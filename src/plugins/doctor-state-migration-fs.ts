@@ -1,4 +1,3 @@
-// Shared filesystem helpers for plugin doctor legacy-state migrations.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { safeStat } from "../infra/path-existence.js";

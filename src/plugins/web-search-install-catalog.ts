@@ -171,7 +171,6 @@ export function resolveWebSearchInstallCatalogEntriesForEnv(
   );
 }
 
-/** Resolves one web-search install catalog entry by provider id or plugin id. */
 export function resolveWebSearchInstallCatalogEntry(params: {
   providerId?: string;
   pluginId?: string;

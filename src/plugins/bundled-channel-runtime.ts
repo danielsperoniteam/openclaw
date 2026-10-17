@@ -1,4 +1,3 @@
-/** Loads bundled channel plugin runtime entries and setup metadata. */
 import path from "node:path";
 import { isVitestRuntimeEnv } from "../infra/env.js";
 import {

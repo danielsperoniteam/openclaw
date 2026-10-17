@@ -380,7 +380,6 @@ function resolvePackageRuntimeEntrySource(
   );
 }
 
-/** Resolves the runtime setup source for a plugin package manifest. */
 export function resolvePackageSetupSource(params: {
   packageDir: string;
   packageRootRealPath?: string;
@@ -410,7 +409,6 @@ export function resolvePackageSetupSource(params: {
   });
 }
 
-/** Resolves runtime extension sources for a plugin package manifest. */
 export function resolvePackageRuntimeExtensionSources(
   params: Parameters<typeof resolvePackageRuntimeExtensions>[0],
 ): string[] {

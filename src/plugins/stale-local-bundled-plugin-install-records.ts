@@ -1,4 +1,3 @@
-// Detects stale local bundled plugin install records.
 import path from "node:path";
 import type { PluginInstallRecord } from "../config/types.plugins.js";
 import { resolveUserPath } from "../utils.js";

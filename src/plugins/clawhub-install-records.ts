@@ -7,7 +7,6 @@ import type {
   ClawHubPackageClawPackSummary,
 } from "../infra/clawhub-packages.js";
 
-/** Install record fields captured for ClawHub plugin installs. */
 export type ClawHubPluginInstallRecordFields = {
   source: "clawhub";
   clawhubUrl: string;
@@ -91,7 +90,6 @@ export function normalizeClawHubClawPackInstallFields(
   };
 }
 
-/** Builds plugin install record fields from resolved ClawHub package metadata. */
 export function buildClawHubPluginInstallRecordFields(
   fields: ClawHubPluginInstallRecordFields,
 ): Pick<PluginInstallRecord, keyof ClawHubPluginInstallRecordFields> {

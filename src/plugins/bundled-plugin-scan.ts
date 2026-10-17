@@ -26,7 +26,6 @@ const RUNTIME_SIDECAR_ARTIFACTS = new Set([
 export { normalizeOptionalString as trimBundledPluginString };
 export { normalizeTrimmedStringList as normalizeBundledPluginStringList };
 
-/** Converts a source entry path to its built JavaScript artifact path. */
 export function rewriteBundledPluginEntryToBuiltPath(
   entry: string | undefined,
 ): string | undefined {
@@ -182,7 +181,6 @@ function listBundledPluginEntrySearchPaths(
   return uniqueStrings(paths);
 }
 
-/** Resolves a generated runtime path for a bundled plugin entry. */
 export function resolveBundledPluginGeneratedPath(
   rootDir: string,
   entry: BundledPluginPathPair | undefined,

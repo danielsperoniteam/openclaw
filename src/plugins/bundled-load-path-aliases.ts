@@ -3,20 +3,17 @@ import path from "node:path";
 /** Alias class for current packaged paths and legacy bundled extension paths. */
 type BundledPluginLoadPathAliasKind = "current" | "legacy";
 
-/** Load path alias used while resolving bundled plugins across package layouts. */
 type BundledPluginLoadPathAlias = {
   kind: BundledPluginLoadPathAliasKind;
   path: string;
 };
 
-/** Parsed path metadata for a bundled plugin in a packaged dist root. */
 type PackagedBundledPluginPath = {
   packageRoot: string;
   bundledRoot: string;
   bundledLeaf: string;
 };
 
-/** Parsed path metadata for a bundled plugin in the legacy extensions root. */
 type LegacyBundledPluginPath = {
   packageRoot: string;
   legacyRoot: string;
@@ -63,7 +60,6 @@ function findBundledRoot(
   return null;
 }
 
-/** Parses a path under a packaged bundled plugin root. */
 export function parsePackagedBundledPluginPath(
   localPath: string,
 ): PackagedBundledPluginPath | null {
@@ -86,7 +82,6 @@ export function buildLegacyBundledRootPath(localPath: string): string | null {
   return packaged ? path.join(packaged.packageRoot, "extensions") : null;
 }
 
-/** Parses a path under the legacy bundled extensions root. */
 export function parseLegacyBundledPluginPath(localPath: string): LegacyBundledPluginPath | null {
   const legacy = findBundledRoot(localPath, ["extensions"]);
   if (!legacy?.bundledLeaf) {

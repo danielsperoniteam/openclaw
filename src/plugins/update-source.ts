@@ -39,7 +39,6 @@ import {
 } from "./official-external-plugin-catalog.js";
 import { satisfiesPluginApiRange, resolvePackagePluginApiRange } from "./package-compat.js";
 
-/** Logger surface used by plugin update flows. */
 export type PluginUpdateLogger = {
   info?: (message: string) => void;
   warn?: (message: string) => void;
