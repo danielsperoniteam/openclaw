@@ -1,56 +1,63 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
+import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BROWSER_PROXY_UPLOAD_ENVELOPE,
   type BrowserProxyUploadV1,
 } from "./browser-proxy-envelope.js";
-import {
-  discardStagedBrowserProxyUpload,
-  ensureBrowserProxyUploadCleanup,
-  prepareBrowserProxyUploadRequest,
-  stageBrowserProxyUploadRequest,
-} from "./browser-proxy-upload.js";
-import { resolveExistingUploadPaths } from "./browser/paths.js";
 
-let root: string;
+const fixture = vi.hoisted(() => ({ root: "" }));
+vi.mock("openclaw/plugin-sdk/temp-path", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/temp-path")>()),
+  resolvePreferredOpenClawTmpDir: () => fixture.root,
+}));
+vi.mock("openclaw/plugin-sdk/text-utility-runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/text-utility-runtime")>()),
+  get CONFIG_DIR() {
+    return fixture.root;
+  },
+}));
+
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+let uploads: typeof import("./browser-proxy-upload.js");
+let browserPaths: typeof import("./browser/paths.js");
 let uploadDir: string;
 let inboundMediaDir: string;
 const chooser = { method: "POST", path: "/hooks/file-chooser", body: {} };
-type StageRequest = Parameters<typeof stageBrowserProxyUploadRequest>[0];
+const MARKER_CONTENT = "openclaw-browser-proxy-upload-v1\n";
+type StageRequest = Parameters<typeof uploads.stageBrowserProxyUploadRequest>[0];
 
 beforeEach(async () => {
-  root = await fs.mkdtemp(path.join(os.tmpdir(), "browser-proxy-upload-"));
+  const root = (fixture.root = tempDirs.make("browser-proxy-upload-"));
   uploadDir = path.join(root, "uploads");
-  inboundMediaDir = path.join(root, "inbound");
+  inboundMediaDir = path.join(root, "media", "inbound");
+  vi.resetModules();
+  uploads = await import("./browser-proxy-upload.js");
+  browserPaths = await import("./browser/paths.js");
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 });
-afterEach(async () => {
+afterEach(() => {
   vi.restoreAllMocks();
-  await fs.rm(root, { recursive: true, force: true });
+  vi.clearAllTimers();
+  vi.useRealTimers();
 });
 
 function stage(options: Partial<StageRequest> = {}) {
-  return stageBrowserProxyUploadRequest({ ...chooser, uploadDir, ...options });
+  return uploads.stageBrowserProxyUploadRequest({ ...chooser, ...options });
 }
 
 function prepare(
   body: unknown,
-  options: Partial<Parameters<typeof prepareBrowserProxyUploadRequest>[0]> = {},
+  options: Partial<Parameters<typeof uploads.prepareBrowserProxyUploadRequest>[0]> = {},
 ) {
-  return prepareBrowserProxyUploadRequest({
-    ...chooser,
-    uploadDir,
-    inboundMediaDir,
-    body,
-    ...options,
-  });
+  return uploads.prepareBrowserProxyUploadRequest({ ...chooser, body, ...options });
 }
 
 async function expectRoutePaths(paths: string[]) {
-  await expect(
-    resolveExistingUploadPaths({ requestedPaths: paths, uploadDir, inboundMediaDir }),
-  ).resolves.toEqual({ ok: true, paths: await Promise.all(paths.map((p) => fs.realpath(p))) });
+  await expect(browserPaths.resolveExistingUploadPaths({ requestedPaths: paths })).resolves.toEqual(
+    { ok: true, paths: await Promise.all(paths.map((p) => fs.realpath(p))) },
+  );
 }
 
 function uploadFiles(...contents: string[]): BrowserProxyUploadV1 {
@@ -69,7 +76,7 @@ async function retainedDirectory(name: string, contents: string, marked = true) 
   if (marked) {
     await fs.writeFile(
       path.join(directory, ".openclaw-browser-proxy-upload-v1"),
-      "openclaw-browser-proxy-upload-v1\n",
+      MARKER_CONTENT,
       "utf8",
     );
   }
@@ -108,7 +115,7 @@ describe("browser proxy upload transport", () => {
     await expect(fs.readFile(stagedPaths[1] ?? "", "utf8")).resolves.toBe("second copy");
     await expectRoutePaths(stagedPaths);
 
-    await discardStagedBrowserProxyUpload(staged);
+    await uploads.discardStagedBrowserProxyUpload(staged);
     await expect(fs.stat(staged.directory ?? "")).rejects.toHaveProperty("code", "ENOENT");
   });
 
@@ -168,14 +175,16 @@ describe("browser proxy upload transport", () => {
       }
       await expectRoutePaths(stagedPaths);
     } finally {
-      await discardStagedBrowserProxyUpload(staged);
+      await uploads.discardStagedBrowserProxyUpload(staged);
     }
   });
 
   it("keeps staging admission serialized after a queued request is cancelled", async () => {
+    for (let index = 0; index < 63; index++) {
+      await retainedDirectory(`existing-${index}`, "retained");
+    }
     const stagingRoot = path.join(uploadDir, ".proxy-uploads");
     const request: Partial<StageRequest> = {
-      maxRetainedDirectories: 1,
       upload: uploadFiles("data"),
     };
     const firstAdmitted = Promise.withResolvers<void>();
@@ -245,26 +254,31 @@ describe("browser proxy upload transport", () => {
       releaseFirst.resolve();
       for (const result of await Promise.allSettled(pending)) {
         if (result.status === "fulfilled") {
-          await discardStagedBrowserProxyUpload(result.value);
+          await uploads.discardStagedBrowserProxyUpload(result.value);
         }
       }
     }
   });
 
   it("counts the ownership marker against retained-byte admission", async () => {
-    await expect(
-      stage({ upload: uploadFiles("data"), maxRetainedBytes: 4, maxRetainedDirectories: 10 }),
-    ).rejects.toThrow("browser proxy upload staging limit reached");
+    const retained = await retainedDirectory("retained", "");
+    await fs.truncate(
+      path.join(retained, "report.txt"),
+      256 * 1024 * 1024 - Buffer.byteLength(MARKER_CONTENT) - 4,
+    );
+    await expect(stage({ upload: uploadFiles("data") })).rejects.toThrow(
+      "browser proxy upload staging limit reached",
+    );
   });
 
   it.each([true, false])(
     "recovers expired directories only with an ownership marker (%s)",
     async (marked) => {
       const directory = await retainedDirectory("stale", "keep", marked);
-      const staleTime = new Date(Date.now() - 10_000);
+      const staleTime = new Date(Date.now() - 25 * 60 * 60 * 1000);
       await fs.utimes(directory, staleTime, staleTime);
 
-      await ensureBrowserProxyUploadCleanup({ uploadDir, retentionMs: 1, nowMs: Date.now() });
+      await uploads.ensureBrowserProxyUploadCleanup();
 
       if (marked) {
         await expect(fs.stat(directory)).rejects.toHaveProperty("code", "ENOENT");
@@ -277,16 +291,12 @@ describe("browser proxy upload transport", () => {
   it("evicts the oldest retained directory during restart recovery when over quota", async () => {
     const oldestDirectory = await retainedDirectory("oldest", "old");
     const newestDirectory = await retainedDirectory("newest", "new");
+    await fs.truncate(path.join(oldestDirectory, "report.txt"), 256 * 1024 * 1024);
     const now = Date.now();
     await fs.utimes(oldestDirectory, new Date(now - 2_000), new Date(now - 2_000));
     await fs.utimes(newestDirectory, new Date(now - 1_000), new Date(now - 1_000));
 
-    await ensureBrowserProxyUploadCleanup({
-      uploadDir,
-      nowMs: now,
-      maxRetainedBytes: 50,
-      maxRetainedDirectories: 10,
-    });
+    await uploads.ensureBrowserProxyUploadCleanup();
 
     await expect(fs.stat(oldestDirectory)).rejects.toHaveProperty("code", "ENOENT");
     await expect(fs.readFile(path.join(newestDirectory, "report.txt"), "utf8")).resolves.toBe(
