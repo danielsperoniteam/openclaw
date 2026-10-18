@@ -35,39 +35,31 @@ const schemaInventorySql =
 function fixture(fullSchema = false) {
   const root = tempDirs.make("openclaw-existing-writer-");
   const options = { path: path.join(root, "state.sqlite"), env: { OPENCLAW_STATE_DIR: root } };
-  const database = new DatabaseSync(options.path);
-  try {
-    database.exec(
-      fullSchema
-        ? OPENCLAW_STATE_SCHEMA_SQL
-        : `
+  using database = new DatabaseSync(options.path);
+  database.exec(
+    fullSchema
+      ? OPENCLAW_STATE_SCHEMA_SQL
+      : `
       CREATE TABLE schema_meta (
         meta_key TEXT PRIMARY KEY, role TEXT, schema_version INTEGER,
         created_at INTEGER, updated_at INTEGER
       );
       ${contract.schemaSql}
     `,
-    );
-    database.exec(`
+  );
+  database.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION};
       INSERT INTO schema_meta (meta_key, role, schema_version, created_at, updated_at)
         VALUES ('primary', 'global', ${OPENCLAW_STATE_SCHEMA_VERSION}, 1, 1);
       ${recordSchema}
     `);
-  } finally {
-    database.close();
-  }
   return options;
 }
 
 function readValues(pathname: string) {
-  const database = new DatabaseSync(pathname, { readOnly: true });
-  try {
-    return database.prepare("SELECT value FROM records ORDER BY id").all();
-  } finally {
-    database.close();
-  }
+  using database = new DatabaseSync(pathname, { readOnly: true });
+  return database.prepare("SELECT value FROM records ORDER BY id").all();
 }
 
 function readSchemaMarkers(database: DatabaseSync) {
@@ -164,11 +156,9 @@ describe("retained existing-state writer", () => {
   it("preserves a replacement appearing during schema lease acquisition", () => {
     const options = fixture();
     const replacement = fixture();
-    const replacementDatabase = new DatabaseSync(replacement.path);
-    try {
+    {
+      using replacementDatabase = new DatabaseSync(replacement.path);
       replacementDatabase.exec("INSERT INTO records VALUES (99, 'replacement preserved')");
-    } finally {
-      replacementDatabase.close();
     }
     const replacementBytes = fs.readFileSync(replacement.path);
     const withMaintenance = maintenance.withStateDatabaseSchemaMaintenance;
@@ -214,20 +204,19 @@ describe("retained existing-state writer", () => {
         const stat = fs.statSync(`${options.path}${suffix}`);
         return { dev: stat.dev, ino: stat.ino };
       });
-      const external = openNodeSqliteDatabase(options.path);
-      try {
+      {
+        using external = openNodeSqliteDatabase(options.path);
         external.prepare("INSERT INTO records VALUES (?, ?)").run(2, "foreign");
-      } finally {
-        external.close();
       }
       writer.run(({ db }) => {
         expect(db).toBe(retained);
         db.prepare("INSERT INTO records VALUES (?, ?)").run(3, "last");
       }, options);
       const warmQueryCount = reads.queries.length;
-      writer.run(({ db }) => {
-        db.prepare("INSERT INTO records VALUES (?, ?)").run(4, "warm");
-      }, options);
+      writer.run(
+        ({ db }) => db.prepare("INSERT INTO records VALUES (?, ?)").run(4, "warm"),
+        options,
+      );
       expect(
         reads.queries.slice(warmQueryCount).filter((sql) => schemaInventorySql.test(sql)),
       ).toEqual([]);
@@ -276,13 +265,9 @@ describe("retained existing-state writer", () => {
         total: 0,
       });
       expect(peer.db.prepare("PRAGMA user_version").get()).toEqual(version);
-      writer.run(({ db }) => {
-        db.exec("INSERT INTO records VALUES (2, 'after addition')");
-      }, options);
+      writer.run(({ db }) => db.exec("INSERT INTO records VALUES (2, 'after addition')"), options);
       const readmittedQueryCount = reads.queries.length;
-      writer.run(({ db }) => {
-        db.exec("INSERT INTO records VALUES (3, 'warm again')");
-      }, options);
+      writer.run(({ db }) => db.exec("INSERT INTO records VALUES (3, 'warm again')"), options);
       expect(
         reads.queries
           .slice(readmittedQueryCount)
@@ -394,30 +379,24 @@ describe("retained existing-state writer", () => {
   ])("rejects $change at first admission", ({ sql, error, markersChange, deferred }) => {
     const options = fixture(deferred);
     if (deferred) {
-      const setup = new DatabaseSync(options.path);
-      try {
-        setup.exec(`
+      using setup = new DatabaseSync(options.path);
+      setup.exec(`
           PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION - 1};
           UPDATE schema_meta SET schema_version = ${OPENCLAW_STATE_SCHEMA_VERSION - 1}
             WHERE meta_key = 'primary';
           INSERT INTO config_machine_state VALUES
             ('state.schema.contentVersion', '${OPENCLAW_STATE_SCHEMA_VERSION}', 1);
         `);
-      } finally {
-        setup.close();
-      }
     }
     const run = () => {
       // Raw fixture connections leave this physical file unadmitted until the writer opens it.
-      const external = new DatabaseSync(options.path);
-      try {
+      {
+        using external = new DatabaseSync(options.path);
         const before = readSchemaMarkers(external);
         external.exec(sql);
         if (!markersChange) {
           expect(readSchemaMarkers(external)).toEqual(before);
         }
-      } finally {
-        external.close();
       }
       const writer = openExistingOpenClawStateWriter(options, contract);
       try {
@@ -444,8 +423,8 @@ describe("retained existing-state writer", () => {
       ...options,
       env: { ...options.env, OPENCLAW_SUPERVISOR_MODE: "external" },
     };
-    const setup = new DatabaseSync(options.path);
-    try {
+    {
+      using setup = new DatabaseSync(options.path);
       setup.prepare("INSERT INTO config_machine_state VALUES (?, ?, ?)").run(
         "gateway.supervision",
         JSON.stringify({
@@ -456,8 +435,6 @@ describe("retained existing-state writer", () => {
         }),
         1,
       );
-    } finally {
-      setup.close();
     }
     const writer = withExistingOpenClawStateSchema(options, () => {
       const result = openExistingOpenClawStateWriter(externalOptions, contract);

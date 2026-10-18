@@ -2,13 +2,27 @@ import { spawn } from "node:child_process";
 import { withinTest } from "../../test/helpers/promise.js";
 import { resolveRuntimeWorkerArgv } from "../infra/runtime-worker-url.js";
 
-/** The generated owner reaps its children before the outer native close can settle. */
-async function runStateDatabaseProcessProbe(params: {
+type ProcessProbeOptions = {
   moduleUrl: string;
-  source: string;
   signal: AbortSignal;
   verifyCleanup: (cleanup: () => Promise<void>) => Promise<void>;
-}): Promise<string> {
+};
+type HotJournalResult = {
+  committedRowsAfterRecovery: number;
+  immutableDirtyRowsBeforeKill: number;
+  integrity: string;
+  journalBytesBeforeReadOnly: number;
+  journalExistsAfterReadOnly: boolean;
+  journalExistsAfterRecovery: boolean;
+  journalShaAfterReadOnly: string;
+  journalShaBeforeReadOnly: string;
+  readOnly: { error: string | null; opened: boolean; uncommittedRows: number | null };
+};
+
+/** The generated owner reaps its children before the outer native close can settle. */
+async function runStateDatabaseProcessProbe(
+  params: ProcessProbeOptions & { source: string },
+): Promise<string> {
   params.signal.throwIfAborted();
   const source = `
     const probeAbort = new AbortController();
@@ -45,8 +59,7 @@ async function runStateDatabaseProcessProbe(params: {
     child.once("close", (code) => resolve(code));
   });
   try {
-    const output = child.stdout;
-    const errors = child.stderr;
+    const { stdout: output, stderr: errors } = child;
     if (!output || !errors) {
       throw new Error("State database probe requires piped stdout and stderr");
     }
@@ -74,26 +87,9 @@ async function runStateDatabaseProcessProbe(params: {
   }
 }
 
-export async function runHotRollbackJournalRecoveryProbe(params: {
-  moduleUrl: string;
-  rootDir: string;
-  signal: AbortSignal;
-  verifyCleanup: (cleanup: () => Promise<void>) => Promise<void>;
-}): Promise<{
-  committedRowsAfterRecovery: number;
-  immutableDirtyRowsBeforeKill: number;
-  integrity: string;
-  journalBytesBeforeReadOnly: number;
-  journalExistsAfterReadOnly: boolean;
-  journalExistsAfterRecovery: boolean;
-  journalShaAfterReadOnly: string;
-  journalShaBeforeReadOnly: string;
-  readOnly: {
-    error: string | null;
-    opened: boolean;
-    uncommittedRows: number | null;
-  };
-}> {
+export async function runHotRollbackJournalRecoveryProbe(
+  params: ProcessProbeOptions & { rootDir: string },
+): Promise<HotJournalResult> {
   const probeSource = `
     import { spawn } from "node:child_process";
     import { once } from "node:events";
@@ -114,15 +110,9 @@ export async function runHotRollbackJournalRecoveryProbe(params: {
 
     const initial = openOpenClawStateDatabase({ path: databasePath });
     initial.db.exec(\`
-      CREATE TABLE hot_journal_probe (
-        id INTEGER PRIMARY KEY,
-        value TEXT NOT NULL,
-        payload BLOB NOT NULL
-      );
+      CREATE TABLE hot_journal_probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL, payload BLOB NOT NULL);
       WITH RECURSIVE rows(id) AS (
-        SELECT 1
-        UNION ALL
-        SELECT id + 1 FROM rows WHERE id < \${rowCount}
+        SELECT 1 UNION ALL SELECT id + 1 FROM rows WHERE id < \${rowCount}
       )
       INSERT INTO hot_journal_probe (id, value, payload)
       SELECT id, 'committed', zeroblob(8192) FROM rows;
@@ -137,14 +127,9 @@ export async function runHotRollbackJournalRecoveryProbe(params: {
       import { DatabaseSync } from "node:sqlite";
 
       const database = new DatabaseSync(process.env.OPENCLAW_HOT_JOURNAL_DATABASE_PATH);
-      database.exec(
-        "PRAGMA journal_mode = DELETE; " +
-        "PRAGMA synchronous = FULL; " +
-        "PRAGMA cache_size = 2; " +
-        "PRAGMA cache_spill = ON; " +
-        "BEGIN IMMEDIATE; " +
-        "UPDATE hot_journal_probe SET value = 'uncommitted';",
-      );
+      database.exec("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; " +
+        "PRAGMA cache_size = 2; PRAGMA cache_spill = ON; BEGIN IMMEDIATE; " +
+        "UPDATE hot_journal_probe SET value = 'uncommitted';");
       process.send("ready");
       // Keep the transaction-owning connection live until the parent kills this process.
       setInterval(() => {
@@ -256,29 +241,10 @@ export async function runHotRollbackJournalRecoveryProbe(params: {
       closeOpenClawStateDatabaseForTest();
     }
   `;
-  const output = await runStateDatabaseProcessProbe({
-    moduleUrl: params.moduleUrl,
-    source: probeSource,
-    signal: params.signal,
-    verifyCleanup: params.verifyCleanup,
-  });
+  const output = await runStateDatabaseProcessProbe({ ...params, source: probeSource });
   const resultLine = output.trim().split("\n").at(-1);
   if (!resultLine) {
     throw new Error("hot rollback journal recovery probe produced no result");
   }
-  return JSON.parse(resultLine) as {
-    committedRowsAfterRecovery: number;
-    immutableDirtyRowsBeforeKill: number;
-    integrity: string;
-    journalBytesBeforeReadOnly: number;
-    journalExistsAfterReadOnly: boolean;
-    journalExistsAfterRecovery: boolean;
-    journalShaAfterReadOnly: string;
-    journalShaBeforeReadOnly: string;
-    readOnly: {
-      error: string | null;
-      opened: boolean;
-      uncommittedRows: number | null;
-    };
-  };
+  return JSON.parse(resultLine) as HotJournalResult;
 }

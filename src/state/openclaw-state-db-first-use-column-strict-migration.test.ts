@@ -1,5 +1,3 @@
-// Covers doctor repair and writable cold open for databases missing first-use
-// additive columns while the STRICT migration rebuilds their tables.
 import { afterEach, describe, expect, it } from "vitest";
 import { observeSqliteReadSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
@@ -15,14 +13,9 @@ import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
-afterEach(() => {
-  closeOpenClawStateDatabaseForTest();
-});
+afterEach(closeOpenClawStateDatabaseForTest);
 
-/**
- * Rebuild one canonical table as a pre-STRICT database that never gained the
- * given first-use columns, then drop the whole database to schema version 2.
- */
+// Rebuild a pre-STRICT table missing first-use columns, at schema version 2.
 function makePreStrictDatabaseWithoutColumns(params: {
   stateDir: string;
   tableName: string;
@@ -35,7 +28,7 @@ function makePreStrictDatabaseWithoutColumns(params: {
   closeOpenClawStateDatabaseForTest();
 
   const { DatabaseSync } = requireNodeSqlite();
-  const legacy = new DatabaseSync(databasePath);
+  using legacy = new DatabaseSync(databasePath);
   const strictCreateSql = (
     legacy
       .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
@@ -69,42 +62,30 @@ function makePreStrictDatabaseWithoutColumns(params: {
     UPDATE schema_meta SET schema_version = 2 WHERE meta_key = 'primary';
   `);
   params.seed?.(legacy);
-  legacy.close();
   return databasePath;
 }
 
 describe("first-use additive column definitions", () => {
-  // Materializing these columns early is only safe while every one of them is
-  // bare and nullable: the pre-STRICT rebuild adds them to tables that already
-  // hold rows, so anything NOT NULL, defaulted, constrained, or key-bearing
-  // would fail or silently rewrite existing data. Enforce that here rather than
-  // leaving it to the convention documented on the definition list.
-  it.each(
-    CLAW_FIRST_USE_ADDITIVE_STATE_COLUMN_DEFINITIONS.map((definition) => [
-      `${definition.tableName}.${definition.columnName}`,
-      definition,
-    ]),
-  )("keeps %s bare and nullable in the canonical schema", (_label, definition) => {
-    const { columnName, dataType, tableName } = definition as {
-      columnName: string;
-      dataType: string;
-      tableName: string;
-    };
-    const tableStart = OPENCLAW_STATE_SCHEMA_SQL.indexOf(
-      `CREATE TABLE IF NOT EXISTS ${tableName} (`,
-    );
-    expect(tableStart).toBeGreaterThanOrEqual(0);
-    const tableBody = OPENCLAW_STATE_SCHEMA_SQL.slice(
-      tableStart,
-      OPENCLAW_STATE_SCHEMA_SQL.indexOf(") STRICT;", tableStart),
-    );
-    const declaration = tableBody
-      .split("\n")
-      .find((line) => new RegExp(`^\\s*${columnName}\\s`, "u").test(line))
-      ?.trim()
-      .replace(/,$/u, "");
-    expect(declaration).toBe(`${columnName} ${dataType}`);
-  });
+  // Existing rows require bare nullable columns: constraints/defaults could rewrite or reject them.
+  it.each(CLAW_FIRST_USE_ADDITIVE_STATE_COLUMN_DEFINITIONS)(
+    "keeps $tableName.$columnName bare and nullable in the canonical schema",
+    ({ columnName, dataType, tableName }) => {
+      const tableStart = OPENCLAW_STATE_SCHEMA_SQL.indexOf(
+        `CREATE TABLE IF NOT EXISTS ${tableName} (`,
+      );
+      expect(tableStart).toBeGreaterThanOrEqual(0);
+      const tableBody = OPENCLAW_STATE_SCHEMA_SQL.slice(
+        tableStart,
+        OPENCLAW_STATE_SCHEMA_SQL.indexOf(") STRICT;", tableStart),
+      );
+      const declaration = tableBody
+        .split("\n")
+        .find((line) => new RegExp(`^\\s*${columnName}\\s`, "u").test(line))
+        ?.trim()
+        .replace(/,$/u, "");
+      expect(declaration).toBe(`${columnName} ${dataType}`);
+    },
+  );
 });
 
 describe("first-use additive column STRICT migration", () => {
@@ -147,108 +128,50 @@ describe("first-use additive column STRICT migration", () => {
     }
   });
 
-  it("repairs device_bootstrap_tokens without setup_id while migrating to STRICT", () => {
-    const stateDir = tempDirs.make("openclaw-state-first-use-column-");
+  it.each([
+    { tableName: "device_bootstrap_tokens", doctor: true },
+    { tableName: "session_groups", doctor: true },
+    { tableName: "device_bootstrap_tokens", doctor: false },
+  ])("migrates $tableName to STRICT (doctor: $doctor)", ({ tableName, doctor }) => {
+    const stateDir = tempDirs.make("openclaw-state-first-use-");
     const options = { env: { OPENCLAW_STATE_DIR: stateDir } };
+    const bootstrap = tableName === "device_bootstrap_tokens";
+    const columnNames = bootstrap ? ["setup_id"] : ["cwd", "worktree"];
     makePreStrictDatabaseWithoutColumns({
       stateDir,
-      tableName: "device_bootstrap_tokens",
-      indexNames: ["idx_device_bootstrap_tokens_ts"],
-      columnNames: ["setup_id"],
-      seed: (database) => {
-        database
-          .prepare(
-            `INSERT INTO device_bootstrap_tokens (token_key, token, ts, issued_at_ms)
-             VALUES (?, ?, ?, ?)`,
-          )
-          .run("bootstrap", "token-value", 1_000, 1_000);
-      },
+      tableName,
+      columnNames,
+      indexNames: bootstrap ? ["idx_device_bootstrap_tokens_ts"] : [],
+      seed: bootstrap
+        ? (db) => {
+            db.prepare(
+              "INSERT INTO device_bootstrap_tokens (token_key, token, ts, issued_at_ms) VALUES (?, ?, ?, ?)",
+            ).run("bootstrap", "retained-token", 1_000, 1_000);
+          }
+        : undefined,
     });
-
-    // Before the fix this returns a warning and applies nothing, which leaves the
-    // whole repair rolled back and re-reports an unrelated audit-events migration.
-    expect(repairOpenClawStateDatabaseSchema(options).warnings).toEqual([]);
-
-    const migrated = openOpenClawStateDatabase(options);
-    expect(migrated.db.prepare("PRAGMA user_version").get()).toEqual({
+    // Regression: STRICT rebuild rolled back and reported an unrelated audit migration.
+    if (doctor) {
+      expect(repairOpenClawStateDatabaseSchema(options).warnings).toEqual([]);
+    }
+    const { db } = openOpenClawStateDatabase(options);
+    expect(db.prepare("PRAGMA user_version").get()).toEqual({
       user_version: OPENCLAW_STATE_SCHEMA_VERSION,
     });
     expect(
-      migrated.db
-        .prepare("SELECT strict FROM pragma_table_list WHERE name = 'device_bootstrap_tokens'")
-        .get(),
+      db.prepare("SELECT strict FROM pragma_table_list WHERE name = ?").get(tableName),
     ).toEqual({ strict: 1 });
-    // The rebuilt table comes from canonical SQL, so the column exists afterwards
-    // and the pre-existing row survives with a NULL correlation id.
-    expect(
-      migrated.db.prepare("SELECT token_key, token, setup_id FROM device_bootstrap_tokens").all(),
-    ).toEqual([{ token_key: "bootstrap", token: "token-value", setup_id: null }]);
-  });
-
-  it("repairs session_groups without the folder default columns", () => {
-    const stateDir = tempDirs.make("openclaw-state-first-use-group-");
-    const options = { env: { OPENCLAW_STATE_DIR: stateDir } };
-    makePreStrictDatabaseWithoutColumns({
-      stateDir,
-      tableName: "session_groups",
-      indexNames: [],
-      columnNames: ["cwd", "worktree"],
-    });
-
-    expect(repairOpenClawStateDatabaseSchema(options).warnings).toEqual([]);
-
-    const migrated = openOpenClawStateDatabase(options);
-    expect(migrated.db.prepare("PRAGMA user_version").get()).toEqual({
-      user_version: OPENCLAW_STATE_SCHEMA_VERSION,
-    });
-    expect(
-      migrated.db
-        .prepare("SELECT strict FROM pragma_table_list WHERE name = 'session_groups'")
-        .get(),
-    ).toEqual({ strict: 1 });
-    const columns = migrated.db
-      .prepare("SELECT name FROM pragma_table_info('session_groups')")
-      .all()
-      .map((row) => (row as { name: string }).name);
-    expect(columns).toContain("cwd");
-    expect(columns).toContain("worktree");
-  });
-
-  it("migrates on a writable cold open without a doctor repair", () => {
-    const stateDir = tempDirs.make("openclaw-state-first-use-cold-open-");
-    const options = { env: { OPENCLAW_STATE_DIR: stateDir } };
-    makePreStrictDatabaseWithoutColumns({
-      stateDir,
-      tableName: "device_bootstrap_tokens",
-      indexNames: ["idx_device_bootstrap_tokens_ts"],
-      columnNames: ["setup_id"],
-      seed: (database) => {
-        database
-          .prepare(
-            "INSERT INTO device_bootstrap_tokens (token_key, token, ts, issued_at_ms) VALUES (?, ?, ?, ?)",
-          )
-          .run("bootstrap", "retained-token", 1_000, 1_000);
-      },
-    });
-
-    // The gateway upgrades the same database on a normal writable open, so that
-    // path has to clear the STRICT rebuild without doctor running first.
-    const opened = openOpenClawStateDatabase(options);
-    expect(opened.db.prepare("PRAGMA user_version").get()).toEqual({
-      user_version: OPENCLAW_STATE_SCHEMA_VERSION,
-    });
-    expect(
-      opened.db
-        .prepare("SELECT strict FROM pragma_table_list WHERE name = 'device_bootstrap_tokens'")
-        .get(),
-    ).toEqual({ strict: 1 });
-    const columns = opened.db
-      .prepare("SELECT name FROM pragma_table_info('device_bootstrap_tokens')")
-      .all()
-      .map((row) => (row as { name: string }).name);
-    expect(columns).toContain("setup_id");
-    expect(
-      opened.db.prepare("SELECT token_key, token, setup_id FROM device_bootstrap_tokens").all(),
-    ).toEqual([{ token_key: "bootstrap", token: "retained-token", setup_id: null }]);
+    const columns = db
+      .prepare("SELECT name FROM pragma_table_info(?)")
+      .all(tableName)
+      .map((row) => row.name);
+    for (const column of columnNames) {
+      expect(columns).toContain(column);
+    }
+    if (bootstrap) {
+      expect(
+        db.prepare("SELECT token_key, token, setup_id FROM device_bootstrap_tokens").all(),
+      ).toEqual([{ token_key: "bootstrap", token: "retained-token", setup_id: null }]);
+    }
   });
 });

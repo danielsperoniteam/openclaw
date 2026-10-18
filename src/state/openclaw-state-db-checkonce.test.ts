@@ -38,6 +38,20 @@ const directories = useAutoCleanupTempDirTracker((cleanup) =>
   }),
 );
 
+function replacedState(sql: string) {
+  const env = { OPENCLAW_STATE_DIR: directories.make("state-checkonce-replacement-") };
+  const pathname = openOpenClawStateDatabase({ env }).path;
+  closeOpenClawStateDatabaseForTest();
+  const replacement = `${pathname}.replacement`;
+  copyFileSync(pathname, replacement);
+  {
+    using database = new DatabaseSync(replacement);
+    database.exec(sql);
+  }
+  renameSync(replacement, pathname);
+  return { env, pathname };
+}
+
 it("preserves full verification across a disposable startup checkpoint write", async () => {
   const env = { OPENCLAW_STATE_DIR: directories.make("state-checkpoint-clean-close-") };
   const state = openOpenClawStateDatabase({ env });
@@ -45,27 +59,23 @@ it("preserves full verification across a disposable startup checkpoint write", a
   expect(verified).toBeDefined();
   await closeOpenClawStateDatabaseAsync();
   const observed = observeSqliteReadSql(StatementSync.prototype);
-  try {
-    withOpenClawStateStartupMigrationCheckpointDatabase(
-      (db) => {
-        db.prepare(
-          `INSERT INTO state_leases(scope, lease_key, owner, created_at, updated_at)
-           VALUES('checkpoint-proof', 'global', 'startup', 1, 1)`,
-        ).run();
-      },
-      { env, atomic: true },
-    );
-    expect(readSqliteDatabaseCleanClose(state.path)).toBe(true);
-    const reopened = openOpenClawStateDatabase({ env });
-    expect(
-      readSqliteDatabaseIntegrityVerification(requireNativeSqliteDatabase(reopened.db)),
-    ).toEqual(verified);
-    expect(
-      observed.queries.filter((sql) => /PRAGMA (?:integrity|foreign_key)_check/iu.test(sql)),
-    ).toEqual([]);
-  } finally {
-    observed.restore();
-  }
+  withOpenClawStateStartupMigrationCheckpointDatabase(
+    (db) => {
+      db.prepare(
+        `INSERT INTO state_leases(scope, lease_key, owner, created_at, updated_at)
+         VALUES('checkpoint-proof', 'global', 'startup', 1, 1)`,
+      ).run();
+    },
+    { env, atomic: true },
+  );
+  expect(readSqliteDatabaseCleanClose(state.path)).toBe(true);
+  const reopened = openOpenClawStateDatabase({ env });
+  expect(readSqliteDatabaseIntegrityVerification(requireNativeSqliteDatabase(reopened.db))).toEqual(
+    verified,
+  );
+  expect(
+    observed.queries.filter((sql) => /PRAGMA (?:integrity|foreign_key)_check/iu.test(sql)),
+  ).toEqual([]);
 });
 
 function validationStatements(queries: string[]): string[] {
@@ -88,88 +98,56 @@ it("admits a restarted current schema before repeated version and migration prob
   // Exercise cold admission rather than restoring this orderly close's seal.
   revokeSqliteDatabaseAdmissionsForPath(first.path);
   const observation = observeSqliteReadSql(StatementSync.prototype);
-  try {
-    const restarted = openOpenClawStateDatabase({ env });
-    expect(observation.queries.filter((sql) => /^PRAGMA user_version\b/iu.test(sql))).toHaveLength(
-      1,
-    );
-    expect(
-      observation.queries.filter((sql) =>
-        /select "value_json" from "config_machine_state"/iu.test(sql),
-      ),
-    ).toHaveLength(1);
-    expect(
-      observation.queries.filter((sql) => /^PRAGMA integrity_check\b/iu.test(sql)),
-    ).toHaveLength(1);
-    expect(
-      restarted.db
-        .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
-        .get("restart.fixture"),
-    ).toEqual({ value_json: '"retained"' });
-    restarted.db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1}`);
-    expect(() => assertSupportedStateSchemaVersion(restarted.db, restarted.path)).toThrow(
-      /newer schema version/iu,
-    );
-  } finally {
-    observation.restore();
-  }
+  const restarted = openOpenClawStateDatabase({ env });
+  expect(observation.queries.filter((sql) => /^PRAGMA user_version\b/iu.test(sql))).toHaveLength(1);
+  expect(
+    observation.queries.filter((sql) =>
+      /select "value_json" from "config_machine_state"/iu.test(sql),
+    ),
+  ).toHaveLength(1);
+  expect(observation.queries.filter((sql) => /^PRAGMA integrity_check\b/iu.test(sql))).toHaveLength(
+    1,
+  );
+  expect(
+    restarted.db
+      .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
+      .get("restart.fixture"),
+  ).toEqual({ value_json: '"retained"' });
+  restarted.db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1}`);
+  expect(() => assertSupportedStateSchemaVersion(restarted.db, restarted.path)).toThrow(
+    /newer schema version/iu,
+  );
 });
 
 it("refuses corrupt current-version state on restart without a clean integrity receipt", () => {
-  const env = { OPENCLAW_STATE_DIR: directories.make("state-checkonce-unclean-") };
-  const pathname = openOpenClawStateDatabase({ env }).path;
-  closeOpenClawStateDatabaseForTest();
   // Persisted invalid bytes model an earlier process that never published clean-close proof.
-  const replacement = `${pathname}.unclean`;
-  copyFileSync(pathname, replacement);
-  {
-    using database = new DatabaseSync(replacement);
-    database.exec(`PRAGMA foreign_keys = OFF;
+  const { env } = replacedState(`PRAGMA foreign_keys = OFF;
       INSERT INTO acp_replay_events
         (session_id, seq, at, session_key, run_id, update_json, estimated_bytes)
         VALUES ('missing-session', 1, 10, 'session', NULL, '{}', 0)`);
-  }
-  renameSync(replacement, pathname);
   const observation = observeSqliteReadSql(StatementSync.prototype);
-  try {
-    expect(() => openOpenClawStateDatabase({ env })).toThrow(/foreign_key_check/iu);
-    expect(observation.queries.some((sql) => /^PRAGMA integrity_check\b/iu.test(sql))).toBe(true);
-    expect(observation.queries.some((sql) => /^PRAGMA foreign_key_check\b/iu.test(sql))).toBe(true);
-  } finally {
-    observation.restore();
-  }
+  expect(() => openOpenClawStateDatabase({ env })).toThrow(/foreign_key_check/iu);
+  expect(observation.queries.some((sql) => /^PRAGMA integrity_check\b/iu.test(sql))).toBe(true);
+  expect(observation.queries.some((sql) => /^PRAGMA foreign_key_check\b/iu.test(sql))).toBe(true);
 });
 
 it("repairs canonical indexes and shares admission until the final handle closes", () => {
-  const env = { OPENCLAW_STATE_DIR: directories.make("state-checkonce-repair-") };
-  const pathname = openOpenClawStateDatabase({ env }).path;
-  closeOpenClawStateDatabaseForTest();
-  const replacement = `${pathname}.replacement`;
-  copyFileSync(pathname, replacement);
-  {
-    using database = new DatabaseSync(replacement);
-    database.exec("DROP INDEX idx_task_runs_runtime_run");
-  }
-  renameSync(replacement, pathname);
+  const { env, pathname } = replacedState("DROP INDEX idx_task_runs_runtime_run");
   const observation = observeSqliteReadSql(StatementSync.prototype);
-  try {
-    const repaired = openOpenClawStateDatabase({ env });
-    expect(
-      repaired.db
-        .prepare("PRAGMA index_info(idx_task_runs_runtime_run)")
-        .all()
-        .map((row) => row.name),
-    ).toEqual(["runtime", "run_id", "source_id", "created_at", "task_id"]);
-    repaired.db.exec("CREATE TABLE checkonce_later (value TEXT)");
-    assertExistingOpenClawStateRuntimeSchema(requireNativeSqliteDatabase(repaired.db), pathname);
-    closeOpenClawStateDatabaseForTest();
-    unlinkSync(`${pathname}.seal`);
-    observation.queries.length = 0;
-    expect(openOpenClawStateDatabase({ env }).db.isOpen).toBe(true);
-    expect(validationStatements(observation.queries)).toEqual([]);
-  } finally {
-    observation.restore();
-  }
+  const repaired = openOpenClawStateDatabase({ env });
+  expect(
+    repaired.db
+      .prepare("PRAGMA index_info(idx_task_runs_runtime_run)")
+      .all()
+      .map((row) => row.name),
+  ).toEqual(["runtime", "run_id", "source_id", "created_at", "task_id"]);
+  repaired.db.exec("CREATE TABLE checkonce_later (value TEXT)");
+  assertExistingOpenClawStateRuntimeSchema(requireNativeSqliteDatabase(repaired.db), pathname);
+  closeOpenClawStateDatabaseForTest();
+  unlinkSync(`${pathname}.seal`);
+  observation.queries.length = 0;
+  expect(openOpenClawStateDatabase({ env }).db.isOpen).toBe(true);
+  expect(validationStatements(observation.queries)).toEqual([]);
 });
 
 it.each(["schema_meta"] as const)(
@@ -206,12 +184,8 @@ it.each(["newer header"] as const)(
       state.db.exec("CREATE TABLE subset_unrelated (id INTEGER)");
       writer.run(() => undefined, options);
       const observed = observeSqliteReadSql(StatementSync.prototype);
-      try {
-        writer.run(() => undefined, options);
-        expect(validationStatements(observed.queries)).toEqual([]);
-      } finally {
-        observed.restore();
-      }
+      writer.run(() => undefined, options);
+      expect(validationStatements(observed.queries)).toEqual([]);
       state.db.exec(`PRAGMA user_version=${OPENCLAW_STATE_SCHEMA_VERSION + 1}`);
       const mutate = vi.fn();
       expect(() => writer.run(mutate, options)).toThrow(/newer schema version/iu);
@@ -248,12 +222,8 @@ it.each(["newer header"] as const)(
     peer.exec("CREATE TABLE checkpoint_unrelated (id INTEGER)");
     expect(read()).toBe(0);
     const observed = observeSqliteReadSql(StatementSync.prototype);
-    try {
-      expect(read()).toBe(0);
-      expect(validationStatements(observed.queries)).toEqual([]);
-    } finally {
-      observed.restore();
-    }
+    expect(read()).toBe(0);
+    expect(validationStatements(observed.queries)).toEqual([]);
     peer.exec(`PRAGMA user_version=${OPENCLAW_STATE_SCHEMA_VERSION + 1}`);
     callback.mockClear();
     expect(read).toThrow(/newer schema version/iu);
@@ -262,22 +232,10 @@ it.each(["newer header"] as const)(
 );
 
 it("validates a replacement file before reusing a shared-state pathname", () => {
-  const env = { OPENCLAW_STATE_DIR: directories.make("state-checkonce-replaced-") };
-  const pathname = openOpenClawStateDatabase({ env }).path;
-  closeOpenClawStateDatabaseForTest();
-  const replacement = path.join(path.dirname(pathname), "replacement.sqlite");
-  copyFileSync(pathname, replacement);
-  const database = new DatabaseSync(replacement);
-  database.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1}`);
-  database.close();
-  renameSync(replacement, pathname);
+  const { env } = replacedState(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1}`);
   const observation = observeSqliteReadSql(StatementSync.prototype);
-  try {
-    expect(() => openOpenClawStateDatabase({ env })).toThrow(/newer schema version/iu);
-    expect(validationStatements(observation.queries).length).toBeGreaterThan(0);
-  } finally {
-    observation.restore();
-  }
+  expect(() => openOpenClawStateDatabase({ env })).toThrow(/newer schema version/iu);
+  expect(validationStatements(observation.queries).length).toBeGreaterThan(0);
 });
 
 it("keeps a historical first version lookup private when the current catalog is unpublished", () => {
@@ -316,13 +274,9 @@ it("keeps observed state versions current without caching caller floors", () => 
   {
     using reader = openNodeSqliteDatabase(pathname, { readOnly: true });
     const observation = observeSqliteReadSql(StatementSync.prototype);
-    try {
-      expect(readStateSchemaContentVersion(reader)).toBe(1);
-      expect(assertSupportedStateSchemaVersion(reader, pathname)).toBe(1);
-      expect(validationStatements(observation.queries)).toEqual([]);
-    } finally {
-      observation.restore();
-    }
+    expect(readStateSchemaContentVersion(reader)).toBe(1);
+    expect(assertSupportedStateSchemaVersion(reader, pathname)).toBe(1);
+    expect(validationStatements(observation.queries)).toEqual([]);
   }
 
   database.exec("PRAGMA user_version = 2");

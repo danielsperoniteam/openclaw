@@ -264,9 +264,7 @@ it("opens databases with early cron tables before creating cron indexes", () => 
   );
   db.close();
 
-  const database = openOpenClawStateDatabase({
-    env: { OPENCLAW_STATE_DIR: stateDir },
-  });
+  const database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: stateDir } });
 
   expect(
     database.db

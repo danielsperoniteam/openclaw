@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { restoreDoctorMigrationBackup } from "../commands/doctor-migration-backup-restore.js";
 import { prepareDoctorDatabaseMigrations } from "../commands/doctor-schema-migrations.js";
+import type { EngineConnection } from "../infra/sql-connection.js";
 import {
   createScopedMigrationSnapshot,
   inspectScopedMigrationSnapshot,
@@ -42,6 +43,27 @@ const retainedStarts = [
 ];
 const readStarts = `SELECT session_id, started_at, started_at_ms
   FROM meeting_transcript_sessions ORDER BY session_id`;
+const readSessions = "SELECT * FROM meeting_transcript_sessions ORDER BY session_id";
+const expectedStarts = retainedStarts.toSorted((a, b) => a.session_id.localeCompare(b.session_id));
+
+function expectVersion(db: EngineConnection, version: number) {
+  expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(version);
+  expect(readStateSchemaContentVersion(db)).toBe(version);
+}
+
+async function withMaintenance(
+  run: (scope: ReturnType<typeof createOpenClawDatabaseMaintenanceScope>) => Promise<unknown>,
+) {
+  const scope = createOpenClawDatabaseMaintenanceScope({
+    schemaMaintenance: true,
+    assertOwnerCurrent: () => {},
+  });
+  try {
+    await scope.run(() => run(scope));
+  } finally {
+    await scope.close();
+  }
+}
 
 describe("meeting transcript chronology migration", () => {
   const directories = useAutoCleanupTempDirTracker((cleanup) => {
@@ -51,6 +73,14 @@ describe("meeting transcript chronology migration", () => {
     });
   });
   let template: string;
+
+  function fixture(label: string) {
+    const env = { OPENCLAW_STATE_DIR: directories.make(`meeting-chronology-${label}-`) };
+    const pathname = resolveOpenClawStateSqlitePath(env);
+    fs.mkdirSync(path.dirname(pathname), { recursive: true });
+    fs.copyFileSync(template, pathname);
+    return { env, pathname };
+  }
 
   beforeAll(() => {
     const previousVersion = MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION - 1;
@@ -92,16 +122,10 @@ describe("meeting transcript chronology migration", () => {
   });
 
   it("keeps Doctor on a full backup when a later version has no declared scope", async () => {
-    const stateDir = directories.make("meeting-chronology-doctor-full-");
-    const env = { OPENCLAW_STATE_DIR: stateDir };
-    const pathname = resolveOpenClawStateSqlitePath(env);
-    fs.mkdirSync(path.dirname(pathname), { recursive: true });
-    fs.copyFileSync(template, pathname);
+    const { env, pathname } = fixture("doctor-full");
     using database = new DatabaseSync(pathname);
     database.exec("DROP INDEX idx_acp_replay_sessions_updated;");
-    const originalSessions = database
-      .prepare("SELECT * FROM meeting_transcript_sessions ORDER BY session_id")
-      .all();
+    const originalSessions = database.prepare(readSessions).all();
     const schemaQuery = "SELECT type, name, sql FROM sqlite_schema ORDER BY type, name";
     const originalSchema = database.prepare(schemaQuery).all();
     const migration = {
@@ -111,62 +135,40 @@ describe("meeting transcript chronology migration", () => {
       supportedVersion: OPENCLAW_STATE_SCHEMA_VERSION,
     };
     expect(resolveSchemaMigrationBackupTables(migration)).toBeUndefined();
-    const maintenance = createOpenClawDatabaseMaintenanceScope({
-      schemaMaintenance: true,
-      assertOwnerCurrent: () => {},
-    });
-    try {
-      await maintenance.run(() =>
-        assertSqliteMigrationScopePreserved(database, [], async () => {
-          const result = await prepareDoctorDatabaseMigrations({
-            env,
-            pendingDatabasePaths: [pathname],
-            pendingMigrations: [migration],
-            databasePaths: [pathname],
-            agentDatabaseTargets: [],
-          });
-          expect(result.warnings).toEqual([]);
-          expect(result.versionMigrations).toBeUndefined();
-        }),
-      );
-    } finally {
-      await maintenance.close();
-    }
-    expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(
-      migration.foundVersion,
+    await withMaintenance(() =>
+      assertSqliteMigrationScopePreserved(database, [], async () => {
+        const result = await prepareDoctorDatabaseMigrations({
+          env,
+          pendingDatabasePaths: [pathname],
+          pendingMigrations: [migration],
+          databasePaths: [pathname],
+          agentDatabaseTargets: [],
+        });
+        expect(result.warnings).toEqual([]);
+        expect(result.versionMigrations).toBeUndefined();
+      }),
     );
-    expect(readStateSchemaContentVersion(database)).toBe(migration.foundVersion);
-    expect(
-      database.prepare("SELECT * FROM meeting_transcript_sessions ORDER BY session_id").all(),
-    ).toEqual(originalSessions);
+    expectVersion(database, migration.foundVersion);
+    expect(database.prepare(readSessions).all()).toEqual(originalSessions);
     const archives = fs.readdirSync(path.dirname(pathname)).filter((name) => name.endsWith(".bak"));
     expect(archives).toEqual([expect.not.stringMatching(/\.scoped\.bak$/)]);
     using archive = new DatabaseSync(path.join(path.dirname(pathname), archives[0]!), {
       readOnly: true,
     });
-    expect(archive.prepare("PRAGMA user_version").get()?.user_version).toBe(migration.foundVersion);
-    expect(readStateSchemaContentVersion(archive)).toBe(migration.foundVersion);
+    expectVersion(archive, migration.foundVersion);
     expect(archive.prepare(schemaQuery).all()).toEqual(originalSchema);
-    expect(
-      archive.prepare("SELECT * FROM meeting_transcript_sessions ORDER BY session_id").all(),
-    ).toEqual(originalSessions);
+    expect(archive.prepare(readSessions).all()).toEqual(originalSessions);
     expect(
       archive.prepare("SELECT metadata_json, hex(blob) AS bytes FROM plugin_blob_entries").get(),
     ).toEqual({ metadata_json: '{"keep":"bytes"}', bytes: "00010200FFFE" });
   });
 
   it("restores a historical chronology archive without performing unrelated repairs", async () => {
-    const stateDir = directories.make("meeting-chronology-doctor-version-");
-    const env = { OPENCLAW_STATE_DIR: stateDir };
-    const pathname = resolveOpenClawStateSqlitePath(env);
-    fs.mkdirSync(path.dirname(pathname), { recursive: true });
-    fs.copyFileSync(template, pathname);
+    const { env, pathname } = fixture("doctor-version");
     using database = new DatabaseSync(pathname);
     // Version migration must leave same-version repair to its later Doctor owner.
     database.exec("DROP INDEX idx_acp_replay_sessions_updated;");
-    const originalSessions = database
-      .prepare("SELECT * FROM meeting_transcript_sessions ORDER BY session_id")
-      .all();
+    const originalSessions = database.prepare(readSessions).all();
     const migration = {
       kind: "state" as const,
       path: pathname,
@@ -175,23 +177,18 @@ describe("meeting transcript chronology migration", () => {
     };
     const tables = ["config_machine_state", "meeting_transcript_sessions", "schema_meta"];
     expect(resolveSchemaMigrationBackupTables(migration)).toEqual(tables);
-    const maintenance = createOpenClawDatabaseMaintenanceScope({
-      schemaMaintenance: true,
-      assertOwnerCurrent: () => {},
-    });
-    try {
-      await maintenance.run(() =>
-        assertSqliteMigrationScopePreserved(database, tables, async () => {
-          await createScopedMigrationSnapshot({
-            sourcePath: pathname,
-            targetPath: `${pathname}.chronology-v23.scoped.bak`,
-            tables,
-            beforePublish: () => maintenance.assertAdmission(),
-          });
-          // Reconstruct the historical v23 result; current-chain migration is covered below.
-          runSqliteImmediateTransactionSync(database, () => {
-            expect(migrateMeetingTranscriptStartTime(database, migration.foundVersion)).toBe(true);
-            database.exec(`
+    await withMaintenance((maintenance) =>
+      assertSqliteMigrationScopePreserved(database, tables, async () => {
+        await createScopedMigrationSnapshot({
+          sourcePath: pathname,
+          targetPath: `${pathname}.chronology-v23.scoped.bak`,
+          tables,
+          beforePublish: () => maintenance.assertAdmission(),
+        });
+        // Reconstruct the historical v23 result; current-chain migration is covered below.
+        runSqliteImmediateTransactionSync(database, () => {
+          expect(migrateMeetingTranscriptStartTime(database, migration.foundVersion)).toBe(true);
+          database.exec(`
               CREATE INDEX idx_meeting_transcript_sessions_chronology
                 ON meeting_transcript_sessions(started_at_ms DESC, session_id ASC, started_at ASC);
               UPDATE schema_meta SET schema_version = ${migration.supportedVersion}
@@ -200,19 +197,11 @@ describe("meeting transcript chronology migration", () => {
                 VALUES ('state.schema.contentVersion', '${migration.supportedVersion}', 1);
               PRAGMA user_version = ${migration.supportedVersion};
             `);
-          });
-        }),
-      );
-    } finally {
-      await maintenance.close();
-    }
-    expect(database.prepare(readStarts).all()).toEqual(
-      retainedStarts.toSorted((left, right) => left.session_id.localeCompare(right.session_id)),
+        });
+      }),
     );
-    expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(
-      migration.supportedVersion,
-    );
-    expect(readStateSchemaContentVersion(database)).toBe(migration.supportedVersion);
+    expect(database.prepare(readStarts).all()).toEqual(expectedStarts);
+    expectVersion(database, migration.supportedVersion);
     expect(
       database
         .prepare("SELECT 1 FROM sqlite_schema WHERE name = 'idx_acp_replay_sessions_updated'")
@@ -233,9 +222,7 @@ describe("meeting transcript chronology migration", () => {
     expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(
       migration.foundVersion,
     );
-    expect(
-      database.prepare("SELECT * FROM meeting_transcript_sessions ORDER BY session_id").all(),
-    ).toEqual(originalSessions);
+    expect(database.prepare(readSessions).all()).toEqual(originalSessions);
     expect(
       database.prepare("SELECT metadata_json FROM plugin_blob_entries").get()?.metadata_json,
     ).toBe('{"keep":"later owner write"}');
@@ -244,15 +231,10 @@ describe("meeting transcript chronology migration", () => {
   it.each(["runtime", "doctor"] as const)(
     "backfills once through %s and preserves undeclared table bytes, schema, and statistics",
     async (owner) => {
-      const stateDir = directories.make(`meeting-chronology-${owner}-`);
-      const pathname = resolveOpenClawStateSqlitePath({ OPENCLAW_STATE_DIR: stateDir });
-      fs.mkdirSync(path.dirname(pathname), { recursive: true });
-      fs.copyFileSync(template, pathname);
-      const options = { env: { OPENCLAW_STATE_DIR: stateDir }, path: pathname };
+      const { env, pathname } = fixture(owner);
+      const options = { env, path: pathname };
       using scope = new DatabaseSync(pathname, { readOnly: true });
-      const originalSessions = scope
-        .prepare("SELECT * FROM meeting_transcript_sessions ORDER BY session_id")
-        .all();
+      const originalSessions = scope.prepare(readSessions).all();
       const backupTables = ["config_machine_state", "meeting_transcript_sessions", "schema_meta"];
       expect(
         resolveSchemaMigrationBackupTables({
@@ -276,27 +258,21 @@ describe("meeting transcript chronology migration", () => {
         }
         return openOpenClawStateDatabase(options);
       });
-      const expected = retainedStarts.toSorted((left, right) =>
-        left.session_id.localeCompare(right.session_id),
-      );
-      expect(db.prepare(readStarts).all()).toEqual(expected);
+      expect(db.prepare(readStarts).all()).toEqual(expectedStarts);
       expect(
         db
-          .prepare("SELECT * FROM meeting_transcript_sessions ORDER BY session_id")
+          .prepare(readSessions)
           .all()
           .map(({ started_at_ms: _startedAtMs, ...row }) => row),
       ).toEqual(originalSessions);
-      expect(db.prepare("PRAGMA user_version").get()).toEqual({
-        user_version: OPENCLAW_STATE_SCHEMA_VERSION,
-      });
+      expectVersion(db, OPENCLAW_STATE_SCHEMA_VERSION);
       expect(
         db.prepare("SELECT schema_version FROM schema_meta WHERE meta_key = 'primary'").get(),
       ).toEqual({ schema_version: OPENCLAW_STATE_SCHEMA_VERSION });
-      expect(readStateSchemaContentVersion(db)).toBe(OPENCLAW_STATE_SCHEMA_VERSION);
 
       await closeOpenClawStateDatabaseAsync();
       const reopened = openOpenClawStateDatabase(options);
-      expect(reopened.db.prepare(readStarts).all()).toEqual(expected);
+      expect(reopened.db.prepare(readStarts).all()).toEqual(expectedStarts);
     },
   );
 });
