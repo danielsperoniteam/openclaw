@@ -7,9 +7,7 @@ export type SidebarAttentionFocus = {
   controls(): HTMLElement[];
 };
 
-export const SidebarAttentionFocusContext = createContext<SidebarAttentionFocus | undefined>(
-  undefined,
-);
+export const SidebarAttentionFocusContext = createContext<SidebarAttentionFocus | null>(null);
 
 /** Shared row renderers also appear outside the Inbox, where no registration is needed. */
 export function sidebarAttentionFocusRef(kind: SidebarAttentionFocusKind = "control") {

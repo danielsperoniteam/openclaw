@@ -90,7 +90,7 @@ function createSidebarAttentionFocus(root: () => HTMLElement): SidebarAttentionF
       let element: HTMLElement | undefined;
       onSettled(() => {
         if (!element) {
-          return;
+          return undefined;
         }
         const target = element;
         targets.set(target, kind);

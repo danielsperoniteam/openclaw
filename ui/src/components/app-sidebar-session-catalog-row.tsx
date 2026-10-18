@@ -120,8 +120,8 @@ export function renderCatalogSessionRow(
     if (restoreFocus && control) {
       queueMicrotask(() => {
         if (element.isConnected && document.activeElement === document.body) {
-          const target = controls[control];
-          (target && element.contains(target) ? target : controls.link)?.focus({
+          const focusTarget = controls[control];
+          (focusTarget && element.contains(focusTarget) ? focusTarget : controls.link)?.focus({
             preventScroll: true,
           });
         }
