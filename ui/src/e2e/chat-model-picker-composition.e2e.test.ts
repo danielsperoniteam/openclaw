@@ -1,15 +1,12 @@
 import { expect, it } from "vitest";
-import {
-  captureUiProof,
-  createChatFlowE2eSuite,
-  installMockGateway,
-} from "./chat-flow.test-support.ts";
+import { createChatFlowE2eSuite, installMockGateway } from "./chat-flow.test-support.ts";
 import {
   polledAttribute,
   polledCount,
   polledText,
   polledVisible,
 } from "./chat-presentation.test-support.ts";
+import { modelAuthStatus, modelPicker } from "./chat-runtime-fixtures.test-support.ts";
 
 const suite = createChatFlowE2eSuite();
 const accountLabel = "Sign in with ChatGPT";
@@ -20,17 +17,8 @@ const catalog = (
   models,
   accountSelection: { kind: "shared", authProfileId, label: accountLabel },
 });
-const authStatus = (profileId: string, email: string) => ({
-  ts: 1,
-  providers: [
-    {
-      provider: "openai",
-      displayName: "OpenAI",
-      status: "ok",
-      profiles: [{ profileId, type: "oauth", status: "ok", displayName: accountLabel, email }],
-    },
-  ],
-});
+const authStatus = (profileId: string, email: string) =>
+  modelAuthStatus([{ profileId, type: "oauth", status: "ok", displayName: accountLabel, email }]);
 
 suite.define(() => {
   it("refreshes the mounted composer's account identity after an auth publication", async () => {
@@ -53,8 +41,8 @@ suite.define(() => {
         },
       });
       await page.goto(`${suite.server.baseUrl}chat`);
-      const picker = page.locator(".agent-chat__input .chat-controls__model-picker").first();
-      await picker.locator("[data-chat-model-select]").click();
+      const { picker, trigger } = modelPicker(page);
+      await trigger.click();
       await polledCount(picker.locator("[data-chat-model-provider-toggle]")).toBe(1);
       const account = picker.locator(".chat-controls__account-selection");
       await polledText(account).toContain("previous@example.test");
@@ -64,7 +52,6 @@ suite.define(() => {
         '[data-chat-account-option="account:openai:old-alternate"]',
       );
       await polledVisible(oldAlternate).toBe(true);
-      await captureUiProof(suite, page, "model-account-auth-refresh", "before-publication.png");
 
       await gateway.setMethodResponse("models.list", catalog(models, "openai:replacement"));
       await gateway.setMethodResponse(
@@ -81,20 +68,15 @@ suite.define(() => {
         modelCatalogChanged: true,
       });
       await gateway.waitForRequest("models.list", { after: catalogReads });
-      try {
-        await polledText(account).toContain("replacement@example.test");
-        expect(await account.textContent()).not.toContain("previous@example.test");
-        expect(await picker.getAttribute("open")).not.toBeNull();
-        await accountToggle.click();
-        await expect
-          .poll(() =>
-            picker.locator('[data-chat-account-option="account:openai:new-alternate"]').isVisible(),
-          )
-          .toBe(true);
-        expect(await oldAlternate.count()).toBe(0);
-      } finally {
-        await captureUiProof(suite, page, "model-account-auth-refresh", "after-publication.png");
-      }
+      await polledText(account).toContain("replacement@example.test");
+      expect(await account.textContent()).not.toContain("previous@example.test");
+      expect(await picker.getAttribute("open")).not.toBeNull();
+      await accountToggle.click();
+      const newAlternate = picker.locator(
+        '[data-chat-account-option="account:openai:new-alternate"]',
+      );
+      await polledVisible(newAlternate).toBe(true);
+      expect(await oldAlternate.count()).toBe(0);
     });
   });
 
@@ -118,10 +100,9 @@ suite.define(() => {
           },
         });
         await page.goto(`${suite.server.baseUrl}chat`);
-        const picker = page.locator(".agent-chat__input .chat-controls__model-picker").first();
-        const trigger = picker.locator("[data-chat-model-select]");
-        const alpha = picker.locator('[data-chat-model-option="openai/shared-alpha"]');
-        const beta = picker.locator('[data-chat-model-option="anthropic/shared-beta"]');
+        const { picker, trigger, search, option } = modelPicker(page);
+        const alpha = option("openai/shared-alpha");
+        const beta = option("anthropic/shared-beta");
         const openai = picker.locator(
           '[data-chat-model-provider-group="openai"] [data-chat-model-provider-toggle]',
         );
@@ -138,7 +119,6 @@ suite.define(() => {
         const authBox = await auth.boundingBox();
         expect(toggleContentsRight).toBeLessThanOrEqual(authBox!.x);
         await openai.click({ trial: true });
-        await captureUiProof(suite, page, "model-account-identity", `${width}.png`);
         await polledVisible(alpha).toBe(true);
         expect(await beta.isVisible()).toBe(false);
         expect(await openai.getAttribute("aria-expanded")).toBe("true");
@@ -151,17 +131,16 @@ suite.define(() => {
         await page.keyboard.press("Enter");
         await polledVisible(alpha).toBe(true);
         expect(await beta.isVisible()).toBe(false);
-        const search = picker.locator("[data-chat-model-search]");
         await search.fill("shared");
         await polledVisible(beta).toBe(true);
         expect(await openai.getAttribute("aria-expanded")).toBe("true");
-        await search.fill("shared-beta");
-        await captureUiProof(suite, page, "model-id-search", `${width}.png`);
-        expect(await beta.isVisible()).toBe(true);
-        expect(await alpha.isVisible()).toBe(false);
-        await search.fill("ANTHROPIC/SHARED-BETA");
-        expect(await beta.isVisible()).toBe(true);
-        expect(await alpha.isVisible()).toBe(false);
+        for (const query of ["shared-beta", "ANTHROPIC/SHARED-BETA"]) {
+          await search.fill(query);
+          expect({ beta: await beta.isVisible(), alpha: await alpha.isVisible() }).toEqual({
+            beta: true,
+            alpha: false,
+          });
+        }
         await search.press("ControlOrMeta+A");
         await search.press("Backspace");
         expect(await search.inputValue()).toBe("");
@@ -201,13 +180,11 @@ suite.define(() => {
             ],
           });
           await page.goto(`${suite.server.baseUrl}chat`);
-          const picker = page.locator(".agent-chat__input .chat-controls__model-picker").first();
-          const trigger = picker.locator("[data-chat-model-select]");
+          const { picker, trigger, search } = modelPicker(page);
           await polledAttribute(trigger, "aria-disabled").toBe("false");
           await trigger.click();
           await polledCount(picker.locator("[data-chat-model-option]")).toBe(2);
           await page.mouse.move(0, 0);
-          const search = picker.locator("[data-chat-model-search]");
           const query = key.startsWith("Arrow") ? "" : "anthropic";
           if (key.startsWith("Arrow")) {
             for (const toggle of await picker
