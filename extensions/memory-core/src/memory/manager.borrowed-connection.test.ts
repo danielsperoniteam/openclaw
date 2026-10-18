@@ -400,6 +400,8 @@ describe("memory manager agent database lifecycle", () => {
       "SELECT hash FROM memory_index_sources WHERE path = ? AND source = 'sessions'",
     );
     expect(readSource.get(sourcePath)).toBeDefined();
+    const changedTime = new Date(Date.now() + 60_000);
+    await fs.utimes(transcript, changedTime, changedTime);
     // Legacy/imported chunks can await a later constructor's provenance reconciliation.
     shared.db
       .prepare(
