@@ -3,14 +3,14 @@ import { registryFor } from "./overlay-registry.ts";
 
 const shortcutItems = new WeakMap<
   HTMLElement,
-  Map<HTMLElement, () => { key: unknown; disabled: boolean }>
+  Map<HTMLElement, () => { key: string | number | boolean | undefined; disabled: boolean }>
 >();
 
 /** Renderers publish the same enabled shortcut elements that receive activation. */
 export function registerMenuShortcut(
   surface: HTMLElement,
   element: HTMLElement,
-  read: () => { key: unknown; disabled: boolean },
+  read: () => { key: string | number | boolean | undefined; disabled: boolean },
 ): () => void {
   let items = shortcutItems.get(surface);
   if (!items) {
@@ -26,7 +26,7 @@ function shortcutInSurface(surface: HTMLElement, key: string): HTMLElement | und
     !(surface instanceof HTMLDetailsElement ? surface.open : surface.matches(":popover-open")) ||
     surface.closest("[inert]")
   ) {
-    return;
+    return undefined;
   }
   for (const [element, read] of shortcutItems.get(surface) ?? []) {
     const item = read();

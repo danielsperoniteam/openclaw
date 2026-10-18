@@ -206,7 +206,8 @@ function openDropdownOwnsKey(root: HTMLElement, key: string): boolean {
   return [...registryFor(root.ownerDocument).members.keys()].some(
     (overlay) =>
       surface.contains(overlay.surface) &&
-      overlay.surface.matches('[role="menu"][popover]:popover-open') &&
+      overlay.open &&
+      overlay.surface.matches('[role="menu"][popover]') &&
       !overlay.surface.closest("[inert]") &&
       (CHAT_DROPDOWN_KEYS.has(key) || keyboardShortcutTargetOwnsKey(overlay.surface, key)),
   );
