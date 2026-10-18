@@ -19,6 +19,7 @@ import { wrapToolWithBeforeToolCallHook } from "./agent-tools.before-tool-call.w
 import { getFinishedSession, getSession, waitForExecScope } from "./bash-process-registry.js";
 import { resetProcessRegistryForTests } from "./bash-process-registry.test-support.js";
 import { createExecTool } from "./bash-tools.exec-run.js";
+import type { ExecToolDefaults, ExecToolDetails } from "./bash-tools.exec-types.js";
 import { createProcessTool } from "./bash-tools.process.js";
 
 const mocks = vi.hoisted(() => ({
@@ -58,23 +59,50 @@ function createAdapter() {
   return { adapter, kill, completed };
 }
 
+function execTool(overrides: ExecToolDefaults = {}) {
+  return createExecTool({
+    host: "gateway",
+    security: "full",
+    ask: "off",
+    notifyOnExit: false,
+    ...overrides,
+  });
+}
+
+function runningSession(details: ExecToolDetails) {
+  expect(details.status).toBe("running");
+  if (details.status !== "running") {
+    throw new Error("Expected a background process handle");
+  }
+  return details;
+}
+
 function createWrappedExec(sessionId: string, allowBackground = false) {
   const ref = { sessionId, sessionKey: `agent:main:${sessionId}`, runId: `run-${sessionId}` };
-  const tool = wrapToolWithBeforeToolCallHook(
-    createExecTool({
-      host: "gateway",
-      security: "full",
-      ask: "off",
-      notifyOnExit: false,
-      allowBackground,
-    }),
-    ref,
-  );
+  const tool = wrapToolWithBeforeToolCallHook(execTool({ allowBackground }), ref);
   return { tool, ref };
 }
 
 describe("registered exec deadline handoff", () => {
   let supervisor: ReturnType<typeof createProcessSupervisor>;
+
+  function prepareChild() {
+    const child = createAdapter();
+    const spawned = createDeferred();
+    mocks.createChildAdapter.mockImplementationOnce(async () => {
+      spawned.resolve();
+      return child.adapter;
+    });
+    const spawn = vi.spyOn(supervisor, "spawn");
+    return {
+      ...child,
+      spawn,
+      ready: async () => {
+        await spawned.promise;
+        await spawn.mock.results[0]?.value;
+      },
+    };
+  }
 
   beforeEach(() => {
     vi.useFakeTimers({
@@ -108,13 +136,7 @@ describe("registered exec deadline handoff", () => {
       preparing.resolve();
       return preparation.promise;
     });
-    const child = createAdapter();
-    const spawned = createDeferred();
-    mocks.createChildAdapter.mockImplementationOnce(async () => {
-      spawned.resolve();
-      return child.adapter;
-    });
-    const spawn = vi.spyOn(supervisor, "spawn");
+    const child = prepareChild();
     const { tool, ref } = createWrappedExec("prepared-deadline");
     const execution = tool.execute("foreground", { command: "sleep 970", timeoutSeconds: 1400 });
     await preparing.promise;
@@ -124,8 +146,7 @@ describe("registered exec deadline handoff", () => {
 
     const processStartedAt = Date.now();
     preparation.resolve({});
-    await spawned.promise;
-    await spawn.mock.results[0]?.value;
+    await child.ready();
     await vi.advanceTimersByTimeAsync(0);
     const deadline = processStartedAt + 1_400_000;
     const recoveryDeadline = deadline + BLOCKED_TOOL_CALL_ABORT_FLOOR_MS;
@@ -147,18 +168,11 @@ describe("registered exec deadline handoff", () => {
   });
 
   it("keeps timeout cleanup local and bounds a cancellation that never settles", async () => {
-    const child = createAdapter();
+    const child = prepareChild();
     child.kill.mockImplementation(() => undefined);
-    const spawned = createDeferred();
-    mocks.createChildAdapter.mockImplementationOnce(async () => {
-      spawned.resolve();
-      return child.adapter;
-    });
-    const spawn = vi.spyOn(supervisor, "spawn");
     const { tool, ref } = createWrappedExec("timeout-cleanup");
     const execution = tool.execute("timeout", { command: "sleep 3600", timeoutSeconds: 300 });
-    await spawned.promise;
-    await spawn.mock.results[0]?.value;
+    await child.ready();
     await waitForDiagnosticEventsDrained();
     await vi.advanceTimersByTimeAsync(300_001);
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
@@ -177,13 +191,7 @@ describe("registered exec deadline handoff", () => {
   });
 
   it("keeps a no-deadline exec recoverable and honors explicit cancellation", async () => {
-    const child = createAdapter();
-    const spawned = createDeferred();
-    mocks.createChildAdapter.mockImplementationOnce(async () => {
-      spawned.resolve();
-      return child.adapter;
-    });
-    const spawn = vi.spyOn(supervisor, "spawn");
+    const child = prepareChild();
     const { tool, ref } = createWrappedExec("no-deadline");
     const controller = new AbortController();
     const execution = tool.execute(
@@ -191,8 +199,7 @@ describe("registered exec deadline handoff", () => {
       { command: "sleep 3600", timeoutSeconds: 0 },
       controller.signal,
     );
-    await spawned.promise;
-    await spawn.mock.results[0]?.value;
+    await child.ready();
     await vi.advanceTimersByTimeAsync(0);
     await waitForDiagnosticEventsDrained();
     await vi.advanceTimersByTimeAsync(BLOCKED_TOOL_CALL_ABORT_FLOOR_MS + 1);
@@ -211,20 +218,9 @@ describe("registered exec deadline handoff", () => {
       const child = createAdapter();
       mocks.createChildAdapter.mockResolvedValueOnce(child.adapter);
       const scopeKey = "background-followup";
-      const tool = createExecTool({
-        host: "gateway",
-        security: "full",
-        ask: "off",
-        allowBackground: true,
-        notifyOnExit,
-        scopeKey,
-      });
+      const tool = execTool({ allowBackground: true, notifyOnExit, scopeKey });
       const result = await tool.execute("background", { command: "build", background: true });
-      expect(result.details.status).toBe("running");
-      if (result.details.status !== "running") {
-        throw new Error("Expected a background process handle");
-      }
-      const followUp = result.details.followUp ?? "";
+      const { sessionId, followUp = "" } = runningSession(result.details);
       expect(followUp).toContain("Use process");
       if (!notifyOnExit) {
         expect(followUp).toContain("Automatic completion wake is disabled");
@@ -241,11 +237,11 @@ describe("registered exec deadline handoff", () => {
       for (const action of ["poll", "log", "list"] as const) {
         const running = await processTool.execute(`still-running-${action}`, {
           action,
-          sessionId: result.details.sessionId,
+          sessionId,
         });
         const expectedSession = {
           status: "running",
-          sessionId: result.details.sessionId,
+          sessionId,
           ...(notifyOnExit ? {} : { followUp: expect.stringContaining("before ending the turn") }),
         };
         expect(running.details).toMatchObject(
@@ -264,7 +260,7 @@ describe("registered exec deadline handoff", () => {
       await waitForExecScope(scopeKey);
       const completed = await processTool.execute("collect", {
         action: "poll",
-        sessionId: result.details.sessionId,
+        sessionId,
       });
       expect(completed.details).toMatchObject({ status: "completed", exitCode: 0 });
       expect(completed.details).not.toHaveProperty("followUp");
@@ -298,64 +294,35 @@ describe("registered exec deadline handoff", () => {
     mocks.createChildAdapter.mockResolvedValueOnce(child.adapter);
     const spawn = vi.spyOn(supervisor, "spawn");
     const scopeKey = "background-without-timeout";
-    const tool = createExecTool({
-      host: "gateway",
-      security: "full",
-      ask: "off",
-      allowBackground: true,
-      notifyOnExit: false,
-      timeoutSec: 1,
-      scopeKey,
-    });
+    const tool = execTool({ allowBackground: true, timeoutSec: 1, scopeKey });
     const result = await tool.execute("background", {
       command: "build",
       background: true,
       timeoutSeconds: 0,
     });
-    expect(result.details.status).toBe("running");
-    if (result.details.status !== "running") {
-      throw new Error("Expected a background process handle");
-    }
+    const { sessionId } = runningSession(result.details);
     expect(spawn.mock.calls[0]?.[0].timeoutMs).toBeUndefined();
     await vi.advanceTimersByTimeAsync(2_000);
     expect(child.kill).not.toHaveBeenCalled();
-    expect(getFinishedSession(result.details.sessionId)).toBeUndefined();
-    expect(getSession(result.details.sessionId)?.exited).toBe(false);
+    expect(getFinishedSession(sessionId)).toBeUndefined();
+    expect(getSession(sessionId)?.exited).toBe(false);
     child.completed.resolve({ code: 0, signal: null });
     await waitForExecScope(scopeKey);
   });
 
   it("yieldMs exec without explicit timeout applies the default timeout", async () => {
-    const child = createAdapter();
-    const spawned = createDeferred();
-    mocks.createChildAdapter.mockImplementationOnce(async () => {
-      spawned.resolve();
-      return child.adapter;
-    });
-    const spawn = vi.spyOn(supervisor, "spawn");
+    const child = prepareChild();
     const scopeKey = "yielded-default-timeout";
-    const tool = createExecTool({
-      host: "gateway",
-      security: "full",
-      ask: "off",
-      allowBackground: true,
-      notifyOnExit: false,
-      timeoutSec: 1,
-      scopeKey,
-    });
+    const tool = execTool({ allowBackground: true, timeoutSec: 1, scopeKey });
     const execution = tool.execute("yielded", { command: "build", yieldMs: 10 });
-    await spawned.promise;
-    await spawn.mock.results[0]?.value;
+    await child.ready();
     await vi.advanceTimersByTimeAsync(10);
     const result = await execution;
-    expect(result.details.status).toBe("running");
-    if (result.details.status !== "running") {
-      throw new Error("Expected a background process handle");
-    }
-    expect(spawn.mock.calls[0]?.[0].timeoutMs).toBe(1_000);
+    const { sessionId } = runningSession(result.details);
+    expect(child.spawn.mock.calls[0]?.[0].timeoutMs).toBe(1_000);
     await vi.advanceTimersByTimeAsync(991);
     await waitForExecScope(scopeKey);
-    expect(getFinishedSession(result.details.sessionId)).toMatchObject({
+    expect(getFinishedSession(sessionId)).toMatchObject({
       terminalStatus: "failed",
       exitReason: "overall-timeout",
     });

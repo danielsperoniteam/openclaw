@@ -1,11 +1,7 @@
-/**
- * Gateway exec approval E2E tests.
- * Exercises a real gateway server approval flow, approval follow-up text, and
- * approval timeout behavior in an isolated temp config.
- */
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core/expect";
 import { asNonArrayRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, describe, expect, it } from "vitest";
 import { GATEWAY_CLIENT_CAPS } from "../../packages/gateway-protocol/src/client-info.js";
@@ -34,12 +30,7 @@ import { resetProcessRegistryForTests } from "./bash-process-registry.test-suppo
 import type { ExecApprovalFollowupOutcome } from "./bash-tools.exec-types.js";
 import { createExecTool } from "./bash-tools.js";
 
-const TEST_ENV_KEYS = [
-  "HOME",
-  ...GATEWAY_STARTUP_MUTATED_ENV_KEYS,
-  "OPENCLAW_STATE_DIR",
-  "OPENCLAW_CONFIG_PATH",
-  "OPENCLAW_GATEWAY_TOKEN",
+const SKIP_ENV_KEYS = [
   "OPENCLAW_SKIP_CHANNELS",
   "OPENCLAW_SKIP_GMAIL_WATCHER",
   "OPENCLAW_SKIP_CRON",
@@ -47,6 +38,14 @@ const TEST_ENV_KEYS = [
   "OPENCLAW_SKIP_BROWSER_CONTROL_SERVER",
   "OPENCLAW_SKIP_PROVIDERS",
   "OPENCLAW_TEST_MINIMAL_GATEWAY",
+];
+const TEST_ENV_KEYS = [
+  "HOME",
+  ...GATEWAY_STARTUP_MUTATED_ENV_KEYS,
+  "OPENCLAW_STATE_DIR",
+  "OPENCLAW_CONFIG_PATH",
+  "OPENCLAW_GATEWAY_TOKEN",
+  ...SKIP_ENV_KEYS,
 ];
 const GATEWAY_CONNECT_TIMEOUT_MS = 120_000;
 const EXEC_APPROVAL_E2E_TIMEOUT_MS = 180_000;
@@ -104,14 +103,7 @@ describe("gateway-hosted exec approvals", () => {
           port: claim.port,
           auth: { mode: "token", token },
         },
-        tools: {
-          exec: {
-            host: "gateway",
-            security: "full",
-            ask: "off",
-            cleanupMs: 60_000,
-          },
-        },
+        tools: { exec: { host: "gateway", security: "full", ask: "off", cleanupMs: 60_000 } },
       } satisfies OpenClawConfig;
       const server = await startClaimedGateway(claim, async () => {
         await fs.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
@@ -121,13 +113,9 @@ describe("gateway-hosted exec approvals", () => {
         setTestEnvValue("OPENCLAW_CONFIG_PATH", configPath);
         setTestEnvValue("OPENCLAW_GATEWAY_TOKEN", token);
         setTestEnvValue("OPENCLAW_GATEWAY_PORT", String(claim.port));
-        setTestEnvValue("OPENCLAW_SKIP_CHANNELS", "1");
-        setTestEnvValue("OPENCLAW_SKIP_GMAIL_WATCHER", "1");
-        setTestEnvValue("OPENCLAW_SKIP_CRON", "1");
-        setTestEnvValue("OPENCLAW_SKIP_CANVAS_HOST", "1");
-        setTestEnvValue("OPENCLAW_SKIP_BROWSER_CONTROL_SERVER", "1");
-        setTestEnvValue("OPENCLAW_SKIP_PROVIDERS", "1");
-        setTestEnvValue("OPENCLAW_TEST_MINIMAL_GATEWAY", "1");
+        for (const key of SKIP_ENV_KEYS) {
+          setTestEnvValue(key, "1");
+        }
         clearRuntimeConfigSnapshot();
         clearConfigCache();
         clearSessionStoreCacheForTest();
@@ -143,51 +131,47 @@ describe("gateway-hosted exec approvals", () => {
       });
       cleanup.push(() => server.close());
 
-      const operator = await connectGatewayClient({
-        url: `ws://127.0.0.1:${claim.port}`,
-        token,
-        clientName: GATEWAY_CLIENT_NAMES.TEST,
-        clientDisplayName: "approval operator",
-        mode: GATEWAY_CLIENT_MODES.TEST,
-        scopes: [ADMIN_SCOPE],
-        caps: [GATEWAY_CLIENT_CAPS.EXEC_APPROVALS],
-        requestTimeoutMs: GATEWAY_CONNECT_TIMEOUT_MS,
-        timeoutMs: GATEWAY_CONNECT_TIMEOUT_MS,
-      });
-      cleanup.push(() => disconnectGatewayClient(operator));
-
-      const originReviewerIdentity = loadOrCreateDeviceIdentity({
-        path: path.join(stateDir, "test-device-identities", "origin-reviewer.sqlite"),
-      });
-      const otherReviewerIdentity = loadOrCreateDeviceIdentity({
-        path: path.join(stateDir, "test-device-identities", "other-reviewer.sqlite"),
-      });
-      const originReviewer = await connectGatewayClient({
-        url: `ws://127.0.0.1:${claim.port}`,
-        token,
-        clientName: GATEWAY_CLIENT_NAMES.TEST,
-        clientDisplayName: "origin approval reviewer",
-        mode: GATEWAY_CLIENT_MODES.TEST,
-        scopes: [APPROVALS_SCOPE],
-        caps: [GATEWAY_CLIENT_CAPS.EXEC_APPROVALS],
-        deviceIdentity: originReviewerIdentity,
-        requestTimeoutMs: GATEWAY_CONNECT_TIMEOUT_MS,
-        timeoutMs: GATEWAY_CONNECT_TIMEOUT_MS,
-      });
-      cleanup.push(() => disconnectGatewayClient(originReviewer));
-      const otherReviewer = await connectGatewayClient({
-        url: `ws://127.0.0.1:${claim.port}`,
-        token,
-        clientName: GATEWAY_CLIENT_NAMES.TEST,
-        clientDisplayName: "other approval reviewer",
-        mode: GATEWAY_CLIENT_MODES.TEST,
-        scopes: [APPROVALS_SCOPE],
-        caps: [GATEWAY_CLIENT_CAPS.EXEC_APPROVALS],
-        deviceIdentity: otherReviewerIdentity,
-        requestTimeoutMs: GATEWAY_CONNECT_TIMEOUT_MS,
-        timeoutMs: GATEWAY_CONNECT_TIMEOUT_MS,
-      });
-      cleanup.push(() => disconnectGatewayClient(otherReviewer));
+      const connect = async (
+        clientDisplayName: string,
+        scopes: string[],
+        deviceIdentity?: ReturnType<typeof loadOrCreateDeviceIdentity>,
+      ) => {
+        const client = await connectGatewayClient({
+          url: `ws://127.0.0.1:${claim.port}`,
+          token,
+          clientName: GATEWAY_CLIENT_NAMES.TEST,
+          clientDisplayName,
+          mode: GATEWAY_CLIENT_MODES.TEST,
+          scopes,
+          deviceIdentity,
+          caps: [GATEWAY_CLIENT_CAPS.EXEC_APPROVALS],
+          requestTimeoutMs: GATEWAY_CONNECT_TIMEOUT_MS,
+          timeoutMs: GATEWAY_CONNECT_TIMEOUT_MS,
+        });
+        cleanup.push(() => disconnectGatewayClient(client));
+        return client;
+      };
+      const identity = (name: string) =>
+        loadOrCreateDeviceIdentity({
+          path: path.join(stateDir, "test-device-identities", `${name}-reviewer.sqlite`),
+        });
+      const operator = await connect("approval operator", [ADMIN_SCOPE]);
+      const originReviewerIdentity = identity("origin");
+      const originReviewer = await connect(
+        "origin approval reviewer",
+        [APPROVALS_SCOPE],
+        originReviewerIdentity,
+      );
+      const otherReviewer = await connect(
+        "other approval reviewer",
+        [APPROVALS_SCOPE],
+        identity("other"),
+      );
+      const resolveApproval = (
+        client: typeof operator,
+        id: string,
+        decision: "deny" | "allow-once",
+      ) => client.request("exec.approval.resolve", { id, decision }, { timeoutMs: 10_000 });
 
       let resolveOutcome: (outcome: ExecApprovalFollowupOutcome) => void = () => {};
       let approvedProcessId: string | undefined;
@@ -213,10 +197,10 @@ describe("gateway-hosted exec approvals", () => {
           },
         },
       });
-      const tool = tools.find((candidate) => candidate.name === "exec");
-      if (!tool) {
-        throw new Error("expected scheduled exec tool");
-      }
+      const tool = expectDefined(
+        tools.find((candidate) => candidate.name === "exec"),
+        "scheduled exec tool",
+      );
 
       const markerPath = path.join(workspaceDir, "denied-marker");
       const deniedPending = await tool.execute("exec-approval-e2e-denied", {
@@ -225,11 +209,7 @@ describe("gateway-hosted exec approvals", () => {
         timeoutSeconds: 5,
       });
       const deniedApprovalId = requireApprovalId(deniedPending.details);
-      await operator.request(
-        "exec.approval.resolve",
-        { id: deniedApprovalId, decision: "deny" },
-        { timeoutMs: 10_000 },
-      );
+      await resolveApproval(operator, deniedApprovalId, "deny");
       await expect(fs.stat(markerPath)).rejects.toMatchObject({ code: "ENOENT" });
 
       const allowedOutcomePromise = new Promise<ExecApprovalFollowupOutcome>((resolve) => {
@@ -244,40 +224,25 @@ describe("gateway-hosted exec approvals", () => {
       const approvalId = requireApprovalId(pending.details);
 
       const helperTools = createOpenClawCodingTools({ agentId: "helper", config, workspaceDir });
-      const helperProcess = helperTools.find((candidate) => candidate.name === "process");
-      if (!helperProcess) {
-        throw new Error("expected helper process tool");
-      }
+      const helperProcess = expectDefined(
+        helperTools.find((candidate) => candidate.name === "process"),
+        "helper process tool",
+      );
       await helperProcess.execute("helper-process-during-approval", { action: "list" });
 
-      await operator.request(
-        "exec.approval.resolve",
-        { id: approvalId, decision: "allow-once" },
-        { timeoutMs: 10_000 },
-      );
+      await resolveApproval(operator, approvalId, "allow-once");
 
       const outcome = await withTimeout(allowedOutcomePromise, 15_000, {
         message: "timed out waiting for approved exec outcome",
       });
-      expect(outcome.status).toBe("completed");
-      expect(outcome.exitCode).toBe(0);
-      expect(outcome.aggregated).toBe("smoke");
-      if (!approvedProcessId) {
-        throw new Error("expected the approved process identity");
-      }
-      const finished = getFinishedSession(approvedProcessId);
-      if (!finished) {
-        throw new Error("expected retained approved process output");
-      }
+      expect(outcome).toMatchObject({ status: "completed", exitCode: 0, aggregated: "smoke" });
+      const finished = expectDefined(
+        getFinishedSession(expectDefined(approvedProcessId, "approved process identity")),
+        "retained approved process output",
+      );
       expect(finished.expiresAt - finished.endedAt).toBe(180_000);
 
-      const {
-        messageProvider,
-        currentChannelId,
-        currentThreadTs,
-        accountId,
-        approvalReviewerDeviceId,
-      } = buildCommandExecApprovalDefaults(
+      const approvalDefaults = buildCommandExecApprovalDefaults(
         buildCommandTestParams(
           "/diagnostics",
           config,
@@ -310,11 +275,11 @@ describe("gateway-hosted exec approvals", () => {
         cwd: workspaceDir,
         agentId: "main",
         sessionKey: "agent:main:main",
-        messageProvider,
-        currentChannelId,
-        currentThreadTs,
-        accountId,
-        approvalReviewerDeviceId,
+        messageProvider: approvalDefaults.messageProvider,
+        currentChannelId: approvalDefaults.currentChannelId,
+        currentThreadTs: approvalDefaults.currentThreadTs,
+        accountId: approvalDefaults.accountId,
+        approvalReviewerDeviceId: approvalDefaults.approvalReviewerDeviceId,
       });
       const routedPending = await routedTool.execute("exec-approval-device-custody", {
         command: "printf 'device-bound-smoke\\n'",
@@ -324,25 +289,19 @@ describe("gateway-hosted exec approvals", () => {
       });
       const routedApprovalId = requireApprovalId(routedPending.details);
 
-      await expect(
-        otherReviewer.request(
-          "exec.approval.resolve",
-          { id: routedApprovalId, decision: "allow-once" },
-          { timeoutMs: 10_000 },
-        ),
-      ).rejects.toThrow("unknown or expired approval id");
-      await originReviewer.request(
-        "exec.approval.resolve",
-        { id: routedApprovalId, decision: "allow-once" },
-        { timeoutMs: 10_000 },
+      await expect(resolveApproval(otherReviewer, routedApprovalId, "allow-once")).rejects.toThrow(
+        "unknown or expired approval id",
       );
+      await resolveApproval(originReviewer, routedApprovalId, "allow-once");
 
       const routedOutcome = await withTimeout(routedOutcomePromise, 15_000, {
         message: "timed out waiting for device-bound exec outcome",
       });
-      expect(routedOutcome.status).toBe("completed");
-      expect(routedOutcome.exitCode).toBe(0);
-      expect(routedOutcome.aggregated).toBe("device-bound-smoke");
+      expect(routedOutcome).toMatchObject({
+        status: "completed",
+        exitCode: 0,
+        aggregated: "device-bound-smoke",
+      });
     },
     EXEC_APPROVAL_E2E_TIMEOUT_MS,
   );

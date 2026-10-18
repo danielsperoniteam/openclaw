@@ -21,6 +21,7 @@ import {
 import { waitForExecScope } from "./bash-process-registry.js";
 import { resetProcessRegistryForTests } from "./bash-process-registry.test-support.js";
 import { createExecTool } from "./bash-tools.exec-run.js";
+import type { ExecToolDefaults, ExecToolDetails } from "./bash-tools.exec-types.js";
 import { createProcessTool } from "./bash-tools.process.js";
 import type { RunEmbeddedAgentParams } from "./embedded-agent-runner/run/params.js";
 import { runEmbeddedAgent } from "./embedded-agent.js";
@@ -126,6 +127,28 @@ async function completion(signal: AbortSignal) {
   });
 }
 
+function backgroundExec(sessionKey: string, overrides: ExecToolDefaults = {}) {
+  return createExecTool({
+    config,
+    host: "gateway",
+    security: "full",
+    ask: "off",
+    sessionKey,
+    scopeKey: sessionKey,
+    notifyOnExit: true,
+    allowBackground: true,
+    ...overrides,
+  });
+}
+
+function runningSession(details: ExecToolDetails) {
+  expect(details.status).toBe("running");
+  if (details.status !== "running") {
+    throw new Error("Expected a background process");
+  }
+  return details;
+}
+
 test("does not advertise detached continuation when process is unavailable", async () => {
   const exec = createExecTool({
     host: "gateway",
@@ -166,23 +189,13 @@ test.for(["ordinary", "live cron", "ended cron", "cron ended during admission"])
       }
       return receipt;
     });
-    const exec = createExecTool({
-      config,
-      host: "gateway",
-      security: "full",
-      ask: "off",
-      agentId: "main",
-      sessionKey,
-      scopeKey: sessionKey,
-      notifyOnExit: true,
-      allowBackground: true,
-    });
+    const exec = backgroundExec(sessionKey, { agentId: "main" });
     try {
       const started = await exec.execute("cron-followup", {
         command: nodeCommand('process.stdout.write("CRON_EXEC_DONE")'),
         background: true,
       });
-      expect(started.details.status).toBe("running");
+      const { sessionId } = runningSession(started.details);
       await withinTest(waitForExecScope(sessionKey), signal);
       if (scenario.includes("ended")) {
         if (scenario === "cron ended during admission") {
@@ -204,12 +217,9 @@ test.for(["ordinary", "live cron", "ended cron", "cron ended during admission"])
         const [params] = expectDefined(model.mock.calls[0], "completion turn");
         expect(params.sessionKey).toBe(sessionKey);
       }
-      if (started.details.status !== "running") {
-        throw new Error("Expected a background process");
-      }
       const result = await createProcessTool({ scopeKey: sessionKey }).execute("collect", {
         action: "log",
-        sessionId: started.details.sessionId,
+        sessionId,
       });
       expect(result.content).toContainEqual({ type: "text", text: "CRON_EXEC_DONE" });
     } finally {
@@ -226,16 +236,7 @@ test("starts and notifies when identity enrichment fails, then resolves child id
   vi.spyOn(sessionReads, "readSessionEntriesFromStoreInWorker").mockRejectedValueOnce(
     new Error("session worker unavailable"),
   );
-  const exec = createExecTool({
-    config,
-    host: "gateway",
-    security: "full",
-    ask: "off",
-    sessionKey,
-    scopeKey: sessionKey,
-    notifyOnExit: true,
-    allowBackground: true,
-  });
+  const exec = backgroundExec(sessionKey);
   const processTool = createProcessTool({ scopeKey: sessionKey });
   for (const recovered of [false, true]) {
     if (recovered) {
@@ -245,10 +246,7 @@ test("starts and notifies when identity enrichment fails, then resolves child id
       command: nodeCommand('process.stdout.write("EXEC_STARTED"); process.exitCode = 1'),
       background: true,
     });
-    expect(started.details.status).toBe("running");
-    if (started.details.status !== "running") {
-      throw new Error("Expected a background process");
-    }
+    const { sessionId } = runningSession(started.details);
     await withinTest(waitForExecScope(sessionKey), signal);
     if (!recovered) {
       await completion(signal);
@@ -257,7 +255,7 @@ test("starts and notifies when identity enrichment fails, then resolves child id
     expect(model).toHaveBeenCalledOnce();
     const result = await processTool.execute("collect", {
       action: "poll",
-      sessionId: started.details.sessionId,
+      sessionId,
     });
     expect(result.details).toMatchObject({
       status: "completed",
@@ -290,18 +288,7 @@ test("reports manual collection after destination capture fails, then recovers o
       return capture(...args);
     },
   );
-  const exec = createExecTool({
-    config,
-    host: "gateway",
-    security: "full",
-    ask: "off",
-    agentId: "main",
-    sessionKey,
-    scopeKey: sessionKey,
-    notifyOnExit: true,
-    notifyOnExitEmptySuccess: true,
-    allowBackground: true,
-  });
+  const exec = backgroundExec(sessionKey, { agentId: "main", notifyOnExitEmptySuccess: true });
   const processTool = createProcessTool({ scopeKey: sessionKey });
   for (const recovered of [false, true]) {
     const release = path.join(state.workspaceDir, `release-${recovered}`);
@@ -312,11 +299,8 @@ test("reports manual collection after destination capture fails, then recovers o
         background: true,
       });
       expect(faults).toBe(1);
-      expect(started.details.status).toBe("running");
-      if (started.details.status !== "running") {
-        throw new Error("Expected a background process");
-      }
-      const followUp = expectDefined(started.details.followUp, "background continuation guidance");
+      const handle = runningSession(started.details);
+      const followUp = expectDefined(handle.followUp, "background continuation guidance");
       expect(followUp).toContain(
         recovered ? "wake this conversation automatically" : "poll with a timeout",
       );
@@ -330,11 +314,11 @@ test("reports manual collection after destination capture fails, then recovers o
       for (const action of ["list", "poll", "log"] as const) {
         const running = await processTool.execute("inspect", {
           action,
-          sessionId: started.details.sessionId,
+          sessionId: handle.sessionId,
         });
         if (!recovered) {
           const expected = {
-            sessionId: started.details.sessionId,
+            sessionId: handle.sessionId,
             followUp: expect.stringContaining("before ending the turn"),
           };
           expect(running.details).toMatchObject(
@@ -351,7 +335,7 @@ test("reports manual collection after destination capture fails, then recovers o
       expect(model).toHaveBeenCalledTimes(recovered ? 1 : 0);
       const collected = await processTool.execute("collect", {
         action: "poll",
-        sessionId: started.details.sessionId,
+        sessionId: handle.sessionId,
       });
       expect(collected.details).toMatchObject({
         status: "completed",

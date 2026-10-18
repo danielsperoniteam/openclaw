@@ -35,6 +35,7 @@ import {
 } from "./bash-process-registry.js";
 import { resetProcessRegistryForTests } from "./bash-process-registry.test-support.js";
 import { createExecTool } from "./bash-tools.exec-run.js";
+import type { ExecToolDefaults, ExecToolDetails } from "./bash-tools.exec-types.js";
 import type { RunEmbeddedAgentParams } from "./embedded-agent-runner/run/params.js";
 import { runEmbeddedAgent } from "./embedded-agent.js";
 
@@ -50,6 +51,29 @@ function nodeCommand(source: string): string {
     `'${value.replaceAll("'", process.platform === "win32" ? "''" : "'\\''")}'`;
   const command = `${quote(process.execPath)} -e ${quote(source)}`;
   return process.platform === "win32" ? `& ${command}` : command;
+}
+
+function captureCancellation(
+  target: Parameters<typeof captureExecRequestCancellation>[0],
+  deviceId: string,
+) {
+  return captureExecRequestCancellation(target, (identity) =>
+    canRequesterAbortChatRun(
+      {
+        ...identity,
+        requester: { connectionId: identity.ownerConnId, deviceId: identity.ownerDeviceId },
+      },
+      { deviceId, isAdmin: false },
+    ),
+  );
+}
+
+function runningSession(details: ExecToolDetails) {
+  expect(details.status).toBe("running");
+  if (details.status !== "running") {
+    throw new Error("Expected an ordinary yielded command");
+  }
+  return details.sessionId;
 }
 
 test.for([
@@ -95,6 +119,17 @@ test.for([
           plugins: { enabled: false },
           skills: { load: { watch: false } },
         };
+        const execTool = (defaults: ExecToolDefaults) =>
+          createExecTool({
+            config,
+            host: "gateway",
+            security: "full",
+            ask: "off",
+            cwd: directory,
+            allowBackground: true,
+            notifyOnExit: true,
+            ...defaults,
+          });
         setRuntimeConfigSnapshot(config);
         await state.writeConfig(config);
         openOpenClawStateDatabase();
@@ -157,31 +192,20 @@ test.for([
           }
           if (params.prompt.includes("ROUTED_REQUEST_COMPLETE")) {
             continuationRuns += 1;
-            const exec = createExecTool({
-              config,
+            const exec = execTool({
               runId: params.runId,
               sessionKey: params.sessionKey,
               sessionId: params.sessionId,
               agentId: params.agentId,
-              host: "gateway",
-              security: "full",
-              ask: "off",
-              cwd: directory,
               scopeKey: continuationScope,
-              allowBackground: true,
-              notifyOnExit: true,
             });
             const running = await exec.execute("routed-continuation", {
               command: nodeCommand('require("node:fs").watch(".", () => {})'),
               yieldMs: 10,
               timeoutSeconds: 60,
             });
-            expect(running.details.status).toBe("running");
-            if (running.details.status !== "running") {
-              throw new Error("Expected the destination continuation's ordinary command");
-            }
             continuedProcess = expectDefined(
-              getSession(running.details.sessionId),
+              getSession(runningSession(running.details)),
               "continued process",
             );
           }
@@ -226,31 +250,21 @@ test.for([
             finish();
           `);
           const started = await withExecRequestTurn({ identity: origin }, async () => {
-            const exec = createExecTool({
+            const exec = execTool({
               ...origin,
-              config,
-              host: "gateway",
-              security: "full",
-              ask: "off",
-              cwd: directory,
               scopeKey: origin.sessionKey,
-              allowBackground: true,
-              notifyOnExit: true,
               eventRouting: { sessionScope, dmScope: "main", allowFrom: ["owner"] },
             });
             return exec.execute("routed-completion", { command, yieldMs: 10, timeoutSeconds: 60 });
           });
-          expect(started.details.status).toBe("running");
-          if (started.details.status !== "running") {
-            throw new Error("Expected an ordinary yielded command");
-          }
+          const sessionId = runningSession(started.details);
           await fs.writeFile(releasePath, "release");
           await waitForExecScope(origin.sessionKey);
-          expect(getFinishedSession(started.details.sessionId)?.exitCode).toBe(0);
+          expect(getFinishedSession(sessionId)?.exitCode).toBe(0);
           completion = await withinTest(completionCreated.promise, signal);
           await expect(completion.accepted).resolves.toEqual({ ok: true });
-          deleteSession(started.details.sessionId);
-          expect(getFinishedSession(started.details.sessionId)).toBeUndefined();
+          deleteSession(sessionId);
+          expect(getFinishedSession(sessionId)).toBeUndefined();
           const neighbor = expectDefined(
             enqueueSystemEventEntry(
               "Unrelated queued reminder",
@@ -260,25 +274,12 @@ test.for([
           );
           if (stopAt === "active destination") {
             await withinTest(entered.promise, signal);
-            const capture = (deviceId: string) =>
-              captureExecRequestCancellation(continuation, (identity) =>
-                canRequesterAbortChatRun(
-                  {
-                    ...identity,
-                    requester: {
-                      connectionId: identity.ownerConnId,
-                      deviceId: identity.ownerDeviceId,
-                    },
-                  },
-                  { deviceId, isAdmin: false },
-                ),
-              );
-            const denied = capture("foreign-device");
+            const denied = captureCancellation(continuation, "foreign-device");
             expect(denied.cancel()).toBe(false);
             await denied.settle();
             expect(continuedProcess?.exited).toBe(false);
             expect(continuedProcess?.cancellationRequested).not.toBe(true);
-            const cancellation = capture("destination-device");
+            const cancellation = captureCancellation(continuation, "destination-device");
             expect(cancellation.cancel()).toBe(true);
             await cancellation.settle();
             expect(continuedProcess).toMatchObject({ exited: true, exitReason: "manual-cancel" });
@@ -290,32 +291,10 @@ test.for([
             );
             expect(routed).toHaveLength(1);
             expect(readExecRequestOwners(routed[0]!)).toHaveLength(1);
-            const denied = captureExecRequestCancellation(origin, (identity) =>
-              canRequesterAbortChatRun(
-                {
-                  ...identity,
-                  requester: {
-                    connectionId: identity.ownerConnId,
-                    deviceId: identity.ownerDeviceId,
-                  },
-                },
-                { deviceId: "foreign-device", isAdmin: false },
-              ),
-            );
+            const denied = captureCancellation(origin, "foreign-device");
             expect(denied.cancel()).toBe(false);
             await denied.settle();
-            const cancellation = captureExecRequestCancellation(origin, (identity) =>
-              canRequesterAbortChatRun(
-                {
-                  ...identity,
-                  requester: {
-                    connectionId: identity.ownerConnId,
-                    deviceId: identity.ownerDeviceId,
-                  },
-                },
-                { deviceId: "origin-device", isAdmin: false },
-              ),
-            );
+            const cancellation = captureCancellation(origin, "origin-device");
             expect(cancellation.cancel()).toBe(true);
             await cancellation.settle();
           }
