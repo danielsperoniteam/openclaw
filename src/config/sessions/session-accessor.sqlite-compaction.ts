@@ -139,6 +139,8 @@ function persistCompactionBoundary(
               },
             }
           : undefined,
+        undefined,
+        database,
       );
       const committed = requireTranscriptEventAppendSnapshot(
         appended,
