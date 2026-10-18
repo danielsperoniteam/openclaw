@@ -122,6 +122,24 @@ function finalizationParams(runId = "synthetic-run", root = "/synthetic") {
 function workerInput<T>(params: T) {
   return { executor: {}, bufferedSteps: [], resultPath: "/synthetic/result.json", params };
 }
+function expectResultFile(
+  input: { resultPath: string; params: { result: unknown } },
+  restartPending: boolean,
+  runId: string,
+) {
+  const args = [
+    input.resultPath,
+    JSON.stringify({
+      result: input.params.result,
+      exitCode: 0,
+      candidateStartAttempted: restartPending,
+      ...(restartPending ? { restartRunId: runId } : { terminalRunId: runId }),
+      executorDelegation: "pid-start-v1",
+    }),
+    { mode: 0o600 },
+  ];
+  expect(fixture.writeFile).toHaveBeenCalledExactlyOnceWith(...args);
+}
 
 beforeEach(() => {
   vi.resetModules();
@@ -280,19 +298,7 @@ it.each([false, true])(
       finalizationOptions,
     );
     expect(fixture.fence.assertCurrent).toHaveBeenCalled();
-    expect(fixture.writeFile).toHaveBeenCalledExactlyOnceWith(
-      input.resultPath,
-      JSON.stringify({
-        result: input.params.result,
-        exitCode: 0,
-        candidateStartAttempted: restartPending,
-        ...(restartPending
-          ? { restartRunId: "candidate-run" }
-          : { terminalRunId: "candidate-run" }),
-        executorDelegation: "pid-start-v1",
-      }),
-      { mode: 0o600 },
-    );
+    expectResultFile(input, restartPending, "candidate-run");
   },
 );
 
@@ -349,139 +355,109 @@ it("times the fresh-driver handoff from the previous driver's last receipt", asy
     input.bufferedSteps[0],
     expect.anything(),
   );
-  expect(fixture.recordLedgerStep.mock.calls).toEqual([
+  expect(fixture.recordLedgerStep.mock.calls).toEqual(
     [
+      { step: "update-driver-handoff", status: "completed" },
+      { step: "diagnostic:update-driver-handoff", detail: handoff.diagnostics[0] },
+    ].map((step) => [
       "handoff-run",
-      expect.objectContaining({
-        step: "update-driver-handoff",
-        status: "completed",
-        startedAtMs: handoffStartedAtMs,
-        endedAtMs: readyAtMs,
-      }),
+      expect.objectContaining({ ...step, startedAtMs: handoffStartedAtMs, endedAtMs: readyAtMs }),
       { env: {} },
-    ],
-    [
-      "handoff-run",
-      expect.objectContaining({
-        step: "diagnostic:update-driver-handoff",
-        detail: handoff.diagnostics[0],
-        startedAtMs: handoffStartedAtMs,
-        endedAtMs: readyAtMs,
-      }),
-      { env: {} },
-    ],
-  ]);
+    ]),
+  );
 });
 
-type DeadlineCase = {
-  name: string;
-  version?: number;
-  operator?: string | boolean | null;
-  owner?: string;
-  serialized?: string;
-  expected?: number;
-  restartPending?: boolean;
-  inherited?: number;
-};
-function deadlineCase(name: string, overrides: Partial<DeadlineCase> = {}): DeadlineCase {
-  return {
-    name,
-    version: 1,
-    operator: null,
-    owner: "parent",
-    serialized: "1800",
-    expected: 10_800_000,
-    ...overrides,
-  };
-}
-it.each([
-  deadlineCase("supported omission", { expected: undefined }),
-  deadlineCase("supported omission with foreground restart pending", {
-    restartPending: true,
-    expected: undefined,
-  }),
-  deadlineCase("explicit deadline", { operator: "1800" }),
-  deadlineCase("unknown version", { version: 2 }),
-  deadlineCase("mismatched serialization", { serialized: "900" }),
-  deadlineCase("malformed operator", { operator: false }),
-  deadlineCase("wrong completion owner", { owner: "child" }),
-  deadlineCase("legacy producer", {
-    version: undefined,
-    operator: undefined,
-    owner: undefined,
-    serialized: undefined,
-  }),
-  deadlineCase("inherited explicit allowance", { inherited: 12_345, expected: 12_345 }),
-])("preserves aggregate deadline intent for $name", async (row) => {
-  const input = {
-    executor: {},
-    completionOwner: row.owner,
-    timeout:
-      row.version === undefined
-        ? undefined
-        : {
-            version: row.version,
-            serialized: row.serialized,
-            operator: row.operator,
+type DeadlineCase = [
+  name: string,
+  version: number | undefined,
+  operator: string | boolean | null | undefined,
+  owner: string | undefined,
+  serialized: string | undefined,
+  expected: number | undefined,
+  restartPending?: boolean,
+  inherited?: number,
+];
+it.each<DeadlineCase>([
+  ["supported omission", 1, null, "parent", "1800", undefined],
+  [
+    "supported omission with foreground restart pending",
+    1,
+    null,
+    "parent",
+    "1800",
+    undefined,
+    true,
+  ],
+  ["explicit deadline", 1, "1800", "parent", "1800", 10_800_000],
+  ["unknown version", 2, null, "parent", "1800", 10_800_000],
+  ["mismatched serialization", 1, null, "parent", "900", 10_800_000],
+  ["malformed operator", 1, false, "parent", "1800", 10_800_000],
+  ["wrong completion owner", 1, null, "child", "1800", 10_800_000],
+  ["legacy producer", undefined, undefined, undefined, undefined, 10_800_000],
+  ["inherited explicit allowance", 1, null, "parent", "1800", 12_345, false, 12_345],
+])(
+  "preserves aggregate deadline intent for %s",
+  async (_name, version, operator, owner, serialized, expected, restartPending, inherited) => {
+    const input = {
+      executor: {},
+      completionOwner: owner,
+      timeout:
+        version === undefined
+          ? undefined
+          : {
+              version,
+              serialized,
+              operator,
+            },
+      bufferedSteps: [],
+      resultPath: "/synthetic/result.json",
+      params: {
+        ...finalizationParams(),
+        opts: {
+          json: true,
+          timeout: version === undefined ? undefined : "1800",
+          run: {
+            runId: "synthetic-run",
+            env: {},
+            activationTimeoutMs: inherited,
+            ...(restartPending
+              ? { completionOwner: "gateway-restart", gatewayRestartRequired: true }
+              : {}),
           },
-    bufferedSteps: [],
-    resultPath: "/synthetic/result.json",
-    params: {
-      ...finalizationParams(),
-      opts: {
-        json: true,
-        timeout: row.version === undefined ? undefined : "1800",
-        run: {
-          runId: "synthetic-run",
-          env: {},
-          activationTimeoutMs: row.inherited,
-          ...(row.restartPending
-            ? { completionOwner: "gateway-restart", gatewayRestartRequired: true }
-            : {}),
         },
+        updateStepTimeoutMs: 1_800_000,
+        result: { ...result, runId: "synthetic-run" },
       },
-      updateStepTimeoutMs: 1_800_000,
-      result: { ...result, runId: "synthetic-run" },
-    },
-  };
-  fixture.budget.mockResolvedValue(10_800_000);
-  fixture.finish.mockResolvedValue(input.params.result);
-  fixture.terminal.mockReturnValue({
-    runId: "synthetic-run",
-    status: row.restartPending ? "running" : "succeeded",
-    ...(row.restartPending ? { phase: "restarting" } : {}),
-  });
-  await runWorker(input);
+    };
+    fixture.budget.mockResolvedValue(10_800_000);
+    fixture.finish.mockResolvedValue(input.params.result);
+    fixture.terminal.mockReturnValue({
+      runId: "synthetic-run",
+      status: restartPending ? "running" : "succeeded",
+      ...(restartPending ? { phase: "restarting" } : {}),
+    });
+    await runWorker(input);
 
-  expect(process.exitCode).toBe(originalExitCode);
-  expect(fixture.activation).toHaveBeenCalledExactlyOnceWith(
-    row.expected === undefined ? undefined : { activationTimeoutMs: row.expected },
-  );
-  expect(fixture.budget).toHaveBeenCalledTimes(
-    row.expected === undefined || row.inherited !== undefined ? 0 : 1,
-  );
-  expect(fixture.finish).toHaveBeenCalledOnce();
-  expect(fixture.writeFile).toHaveBeenCalledOnce();
-  if (row.restartPending) {
-    expect(fixture.finish).toHaveBeenCalledWith(
-      expect.objectContaining({
-        opts: expect.objectContaining({ timeout: undefined }),
-      }),
-      finalizationOptions,
+    expect(process.exitCode).toBe(originalExitCode);
+    expect(fixture.activation).toHaveBeenCalledExactlyOnceWith(
+      expected === undefined ? undefined : { activationTimeoutMs: expected },
     );
-    expect(fixture.writeFile).toHaveBeenCalledWith(
-      input.resultPath,
-      JSON.stringify({
-        result: input.params.result,
-        exitCode: 0,
-        candidateStartAttempted: true,
-        restartRunId: "synthetic-run",
-        executorDelegation: "pid-start-v1",
-      }),
-      { mode: 0o600 },
+    expect(fixture.budget).toHaveBeenCalledTimes(
+      expected === undefined || inherited !== undefined ? 0 : 1,
     );
-  }
-});
+    expect(fixture.finish).toHaveBeenCalledOnce();
+    expect(fixture.writeFile).toHaveBeenCalledOnce();
+    if (restartPending) {
+      expect(fixture.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          opts: expect.objectContaining({ timeout: undefined }),
+        }),
+        finalizationOptions,
+      );
+      expectResultFile(input, true, "synthetic-run");
+    }
+  },
+);
 
 it.each(["inspected", "legacy-unavailable", "windows-suspended"] as const)(
   "forwards the %s service owner to shared migrated finalization",

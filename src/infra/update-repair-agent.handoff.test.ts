@@ -3,6 +3,7 @@ import { createManagedHandoffTestBinding } from "../../test/helpers/managed-hand
 import { createExternalAuthRuntime } from "../agents/auth-profiles/external-auth.js";
 import { createAuthProfileStoreRuntime } from "../agents/auth-profiles/store.js";
 import type { StreamFn } from "../agents/runtime/index.js";
+import { createMockUsage } from "../agents/test-helpers/embedded-agent-runner-e2e-fixtures.js";
 import { beginDoctorMaintenance } from "../commands/doctor-maintenance.js";
 import {
   clearRuntimeConfigSnapshot,
@@ -15,6 +16,7 @@ import { createOpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { resolveManagedUpdateLeaseDatabasePath } from "./update-managed-service-handoff-lease.js";
 import { runUpdateRepairTurn } from "./update-repair-agent.runtime.js";
+import { repairModel, repairTurnInput } from "./update-repair-agent.test-support.js";
 
 const fixture = vi.hoisted(() => ({
   stream: vi.fn<StreamFn>(),
@@ -59,6 +61,12 @@ it("settles the real repair handoff without closing a parent lease before Doctor
         async (_params, run) => run(),
       ),
     );
+    const leases = () => readActiveOpenClawAgentDatabaseLeasesReadOnly({ env: state.env });
+    const load = () =>
+      auth.loadAuthProfileStoreForRuntime(agentDir, {
+        readOnly: true,
+        externalCli: { mode: "none" },
+      });
     const seed = createOpenClawDatabaseMaintenanceScope();
     try {
       seed.run(() =>
@@ -75,7 +83,7 @@ it("settles the real repair handoff without closing a parent lease before Doctor
     } finally {
       await seed.close();
     }
-    expect(readActiveOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).toEqual([]);
+    expect(leases()).toEqual([]);
     const config: OpenClawConfig = {
       plugins: { enabled: false },
       agents: { defaults: { skipBootstrap: true }, entries: { owner: { agentDir } } },
@@ -85,17 +93,7 @@ it("settles the real repair handoff without closing a parent lease before Doctor
           fixture: {
             baseUrl: "https://repair.invalid/v1",
             api: "openai-responses",
-            models: [
-              {
-                id: "repair",
-                name: "Synthetic repair",
-                reasoning: false,
-                input: ["text"],
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                contextWindow: 128000,
-                maxTokens: 1024,
-              },
-            ],
+            models: [repairModel()],
           },
         },
       },
@@ -122,14 +120,7 @@ it("settles the real repair handoff without closing a parent lease before Doctor
             api: model.api,
             provider: model.provider,
             model: model.id,
-            usage: {
-              input: 1,
-              output: 1,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 2,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createMockUsage(1, 1),
             stopReason: "toolUse",
             timestamp: Date.now(),
           },
@@ -150,26 +141,15 @@ it("settles the real repair handoff without closing a parent lease before Doctor
         auth.saveAuthProfileStore({ version: 1, profiles: {} }, state.agentDir("independent")),
       );
       const result = await parent.run(() =>
-        runUpdateRepairTurn({
-          target: { ...state, installRoot: state.workspaceDir },
-          route: {
-            runner: "embedded",
-            provider: "fixture",
-            model: "repair",
-            modelLabel: "fixture/repair",
-            agentId: "owner",
-            agentDir,
+        runUpdateRepairTurn(
+          repairTurnInput(state, {
+            config,
             authProfileId: "fixture:repair",
-            runConfig: config,
-            sourceConfig: config,
-          },
-          modelFallbacks: [],
-          prompt: "Request Doctor repair using the maintenance tool.",
-          timeoutMs: 30000,
-          maxToolCalls: 1,
-          signal: new AbortController().signal,
-          maintenanceHandoff: true,
-        }),
+            prompt: "Request Doctor repair using the maintenance tool.",
+            timeoutMs: 30000,
+            maintenanceHandoff: true,
+          }),
+        ),
       );
       expect(result, JSON.stringify(result)).toMatchObject({
         status: "completed",
@@ -178,15 +158,8 @@ it("settles the real repair handoff without closing a parent lease before Doctor
       });
       expect(fixture.stream).toHaveBeenCalledTimes(1);
       // These checks must precede fixture teardown: cleanup must not hide a leaked lease.
-      expect(
-        readActiveOpenClawAgentDatabaseLeasesReadOnly({ env: state.env }).map(
-          (lease) => lease.agent_id,
-        ),
-      ).toEqual(["independent"]);
-      const saved = auth.loadAuthProfileStoreForRuntime(agentDir, {
-        readOnly: true,
-        externalCli: { mode: "none" },
-      });
+      expect(leases().map((lease) => lease.agent_id)).toEqual(["independent"]);
+      const saved = load();
       expect(saved.usageStats?.["fixture:repair"]?.lastUsed).toBeGreaterThan(0);
       const admitDoctor = () =>
         beginDoctorMaintenance({
@@ -198,7 +171,7 @@ it("settles the real repair handoff without closing a parent lease before Doctor
         refusal: { kind: "deferred", reason: "agent-database-in-use" },
       });
       await parent.close();
-      expect(readActiveOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).toEqual([]);
+      expect(leases()).toEqual([]);
       const doctor = await admitDoctor();
       expect(doctor).toBeDefined();
       try {
@@ -206,13 +179,8 @@ it("settles the real repair handoff without closing a parent lease before Doctor
       } finally {
         await doctor?.release();
       }
-      expect(readActiveOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).toEqual([]);
-      expect(
-        auth.loadAuthProfileStoreForRuntime(agentDir, {
-          readOnly: true,
-          externalCli: { mode: "none" },
-        }),
-      ).toEqual(saved);
+      expect(leases()).toEqual([]);
+      expect(load()).toEqual(saved);
     } finally {
       await parent.close();
     }

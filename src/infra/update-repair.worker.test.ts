@@ -38,7 +38,8 @@ const findStopped = (messages: UpdateRepairWorkerMessage[]) =>
     message.type === "event" && message.event.type === "stopped" ? [message.event] : [],
   )[0];
 
-function createChild() {
+async function startChild() {
+  vi.resetModules();
   const events = new EventEmitter();
   const ready = createDeferred();
   const closed = createDeferred();
@@ -68,12 +69,13 @@ function createChild() {
     }),
   };
   child.exitCode = undefined;
-  return { child, events, ready, closed, sent };
+  vi.stubGlobal("process", child);
+  await import("./update-repair.worker.js");
+  await ready.promise;
+  return { child, events, closed, sent };
 }
 
 it("joins accepted cancellation cleanup before releasing IPC and native state", async () => {
-  vi.resetModules();
-  const { child, events, ready, closed } = createChild();
   const entered = createDeferred();
   const returned = createDeferred();
   const tail = createDeferred();
@@ -87,9 +89,7 @@ it("joins accepted cancellation cleanup before releasing IPC and native state", 
     returned.resolve();
     return { status: "aborted", reason: "parent gone" };
   });
-  vi.stubGlobal("process", child);
-  await import("./update-repair.worker.js");
-  await ready.promise;
+  const { child, events, closed } = await startChild();
   events.emit("message", { type: "turn" });
   await entered.promise;
   child.connected = false;
@@ -108,12 +108,8 @@ it("joins accepted cancellation cleanup before releasing IPC and native state", 
 });
 
 it("emits a stopped event and result message when the delegated turn fails", async () => {
-  vi.resetModules();
-  const { child, events, ready, closed, sent } = createChild();
   runtime.run.mockRejectedValue(new Error("turn exploded"));
-  vi.stubGlobal("process", child);
-  await import("./update-repair.worker.js");
-  await ready.promise;
+  const { child, events, closed, sent } = await startChild();
   events.emit("message", { type: "turn" });
   await closed.promise;
   const stopped = findStopped(sent);
@@ -155,11 +151,7 @@ it("bounds parse-error reasons and emits responses the released parser accepts",
   }
   expect(rawLength).toBeGreaterThan(1024);
 
-  vi.resetModules();
-  const { child, events, ready, closed, sent } = createChild();
-  vi.stubGlobal("process", child);
-  await import("./update-repair.worker.js");
-  await ready.promise;
+  const { child, events, closed, sent } = await startChild();
   events.emit("message", malformed);
   await closed.promise;
   const stopped = findStopped(sent);

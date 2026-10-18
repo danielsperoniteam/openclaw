@@ -10,25 +10,20 @@ type FailureStep = Awaited<ReturnType<typeof runStep>>;
 function failureReport(
   step: FailureStep,
   recorded: boolean,
-  attemptId: string,
   extra: Partial<Parameters<typeof prepareUpdateFailureReport>[0]["result"]> = {},
 ) {
-  return prepareUpdateFailureReport(
-    {
-      attemptId,
-      result: {
-        mode: "npm",
-        status: "error",
-        durationMs: 1,
-        steps: recorded ? [] : [step],
-        ...extra,
-      },
-      ...(recorded
-        ? { recordedRun: { runId: attemptId, steps: updateRunStepsFromResultStep(step) } }
-        : {}),
-    },
-    context,
-  );
+  const attemptId = "npm-fixture";
+  const result: Parameters<typeof prepareUpdateFailureReport>[0]["result"] = {
+    mode: "npm",
+    status: "error",
+    durationMs: 1,
+    steps: recorded ? [] : [step],
+    ...extra,
+  };
+  const recordedRun = recorded
+    ? { runId: attemptId, steps: updateRunStepsFromResultStep(step) }
+    : undefined;
+  return prepareUpdateFailureReport({ attemptId, result, recordedRun }, context);
 }
 function installStep(
   runCommand: Parameters<typeof runStep>[0]["runCommand"],
@@ -76,7 +71,7 @@ describe("npm install failure reports", () => {
       expect(step.exitCode).toBe(1);
       expect(step.failureFacts?.[0]).toMatchObject({ check: "npm", code: code ?? "unknown" });
       for (const recorded of [false, true]) {
-        const report = await failureReport(step, recorded, "npm-fixture", {
+        const report = await failureReport(step, recorded, {
           reason: "global-install-failed",
         });
         expect(report.body).toContain(`npm failure code: ${code ?? "unknown"}`);
@@ -103,7 +98,7 @@ describe("npm install failure reports", () => {
           { manager: "npm", command: "npm", globalRoot: process.cwd(), packageRoot: process.cwd() },
           context.env,
         );
-        const report = await failureReport(classified, false, "npm-permission");
+        const report = await failureReport(classified, false);
         expect(report.body).toContain("npm failure code: EACCES");
         expect(report.body).toContain("npm ERR! install failed while preparing package");
       }
@@ -157,19 +152,15 @@ describe("npm install failure reports", () => {
     expect(messages[3]).not.toContain(marker);
     const excerpt = messages.join("\n");
     expect(Buffer.byteLength(excerpt)).toBeLessThanOrEqual(1024);
-    expect(excerpt).not.toContain("fixture-only-secret");
-    expect(excerpt).not.toContain("omitted");
-    expect(excerpt).not.toContain("sixth diagnostic");
+    expect(excerpt).not.toMatch(/fixture-only-secret|omitted|sixth diagnostic/u);
     for (const recorded of [false, true]) {
-      const report = await failureReport(step, recorded, "npm-bound");
+      const report = await failureReport(step, recorded);
       expect(report.body).toContain(guidance);
       for (const line of [messages[0], truncated, exactLimit, fifth]) {
         expect(report.body).toContain(`- ${line}\n`);
       }
       expect(report.body).toMatch(/^- npm error token=[^\n]+$/mu);
-      expect(report.body).not.toContain("fixture-only-secret");
-      expect(report.body).not.toContain("PRIVATE_IDENTIFIER");
-      expect(report.body).not.toContain("\ufffd");
+      expect(report.body).not.toMatch(/fixture-only-secret|PRIVATE_IDENTIFIER|\ufffd/u);
     }
   });
 });
@@ -206,13 +197,12 @@ it.each([
     const legacyReport = await failureReport(
       { ...step, name: "[redacted-command]", failureFacts: undefined, stderrTail: "" },
       false,
-      "legacy-report",
       { reason: "global-install-failed" },
     );
     expect(legacyReport.body).toContain("Failed phase [redacted-command]: exit 1");
     for (const recorded of [false, true]) {
       const named = { ...step, name };
-      const report = await failureReport(named, recorded, "etarget-report", {
+      const report = await failureReport(named, recorded, {
         reason: "global-install-failed",
         before: { version: "2026.9.4" },
         after: { version: "2026.9.4" },
@@ -221,9 +211,7 @@ it.each([
       expect(report.body).toContain("npm cache verify");
       expect(report.body).toContain("registry/mirror");
       expect(report.body).toContain(`npm view ${spec.includes("*") ? `'${spec}'` : spec} version`);
-      expect(report.body).not.toContain("[redacted-command]");
-      expect(report.body).not.toContain("private.invalid");
-      expect(report.body).not.toContain("/private/install");
+      expect(report.body).not.toMatch(/\[redacted-command\]|private\.invalid|\/private\/install/u);
     }
   },
 );
