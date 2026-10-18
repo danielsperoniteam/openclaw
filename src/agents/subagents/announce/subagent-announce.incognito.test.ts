@@ -163,138 +163,111 @@ afterEach(() => {
 });
 
 describe("selected incognito announcement requester", () => {
-  it("refuses a closed requester while active-wake injection is prepared", async () => {
-    const sessionKey = "agent:main:dashboard:incognito-wake-reset";
-    const sessionId = "wake-reset";
-    setRuntimeConfigSnapshot({ session: { store: actor.path } });
-    await create(actor, sessionKey, { sessionId, lifecycleRevision: "original" });
-    const entered = createDeferredCore();
-    const resume = createDeferredCore();
-    const injected: string[] = [];
-    const target = captureSessionTarget({
-      storeScope: actor.path,
-      sessionKey,
-      agentId: "main",
-      incarnation: sessionId,
-    });
-    const operation = activeOperation(
-      sessionKey,
-      sessionId,
-      target,
-      async (text, _options, assertCurrent) => {
-        entered.resolve();
-        await resume.promise;
-        assertCurrent();
-        injected.push(text);
-      },
-    );
-    const input = reserveSessionControllerSource(sessionKey, {
-      target,
-      policy: { mode: "steer" },
-    });
-    const pending = withMemorySource(actor, () =>
-      sendSubagentAnnounceDirectly({
-        requesterSessionKey: sessionKey,
-        targetRequesterSessionKey: sessionKey,
-        requesterAgentId: "main",
-        requesterIsSubagent: false,
-        triggerMessage: "Child completed",
-        expectsCompletionMessage: true,
-        directIdempotencyKey: "incognito-closed-requester-completion",
-        controllerInput: input,
-      }),
-    );
-    try {
-      await awaitGateBeforeSettlement(
-        entered.promise,
-        pending,
-        "Wake settled before injection preparation",
-      );
-      actor.closeSession(sessionKey);
-      resume.resolve();
-      await expect(pending).resolves.toMatchObject({
-        delivered: false,
-        reason: "source_owner_changed",
+  it.each(["closed requester", "foreign requester"] as const)(
+    "does not inject into a %s",
+    async (scenario) => {
+      const closed = scenario === "closed requester";
+      const sessionKey = `agent:main:dashboard:incognito-wake-${closed ? "reset" : "collision"}`;
+      const sessionId = closed ? "wake-reset" : "local-requester";
+      setRuntimeConfigSnapshot({ session: { store: actor.path } });
+      await create(actor, sessionKey, {
+        sessionId,
+        ...(closed ? { lifecycleRevision: "original" } : {}),
       });
-      expect(injected).toEqual([]);
-    } finally {
-      resume.resolve();
-      try {
-        await pending;
-      } finally {
-        operation.complete();
-        retireSessionControllerInput(input);
-        clearSessionControllerMailbox(input.mailbox, () => {});
-      }
-    }
-  });
-
-  it("does not steer another physical requester's active run with the same key", async () => {
-    const sessionKey = "agent:main:dashboard:incognito-wake-collision";
-    setRuntimeConfigSnapshot({ session: { store: actor.path } });
-    await create(actor, sessionKey, { sessionId: "local-requester" });
-    const injected: string[] = [];
-    const foreignStorePath = resolveIncognitoOpenClawAgentSqlitePath({
-      agentId: "main",
-      env: { OPENCLAW_STATE_DIR: "/synthetic/foreign-announcement" },
-    });
-    const operation = activeOperation(
-      sessionKey,
-      "foreign-requester",
-      captureSessionTarget({
-        storeScope: foreignStorePath,
-        sessionKey,
-        agentId: "main",
-        incarnation: "foreign-requester",
-      }),
-      async (text, _options, assertCurrent) => {
-        assertCurrent();
-        injected.push(text);
-      },
-    );
-    const input = reserveSessionControllerSource(sessionKey, {
-      target: captureSessionTarget({
+      const entered = createDeferredCore();
+      const resume = createDeferredCore();
+      const injected: string[] = [];
+      const target = captureSessionTarget({
         storeScope: actor.path,
         sessionKey,
         agentId: "main",
-        incarnation: "local-requester",
-      }),
-      policy: { mode: "steer" },
-    });
-    const callGateway = vi.fn<typeof runtimeCallGateway>().mockResolvedValue({
-      status: "ok",
-      result: { payloads: [{ text: "Completion accepted by local requester" }] },
-    });
-    setSubagentAnnounceDeliveryDepsForTest({ callGateway });
-    try {
-      await expect(
-        withMemorySource(actor, () =>
-          sendSubagentAnnounceDirectly({
-            requesterSessionKey: sessionKey,
-            targetRequesterSessionKey: sessionKey,
-            requesterAgentId: "main",
-            requesterIsSubagent: false,
-            triggerMessage: "Private completion",
-            expectsCompletionMessage: true,
-            directIdempotencyKey: "incognito-physical-requester-completion",
-            controllerInput: input,
-          }),
-        ),
-      ).resolves.toMatchObject({ delivered: true, path: "direct" });
-      expect(injected).toEqual([]);
-      expect(callGateway).toHaveBeenCalledOnce();
-      expect(callGateway).toHaveBeenCalledWith(
-        expect.objectContaining({
-          method: "agent",
-          params: expect.objectContaining({ sessionKey, agentId: "main" }),
+        incarnation: sessionId,
+      });
+      const operation = activeOperation(
+        sessionKey,
+        closed ? sessionId : "foreign-requester",
+        closed
+          ? target
+          : captureSessionTarget({
+              storeScope: resolveIncognitoOpenClawAgentSqlitePath({
+                agentId: "main",
+                env: { OPENCLAW_STATE_DIR: "/synthetic/foreign-announcement" },
+              }),
+              sessionKey,
+              agentId: "main",
+              incarnation: "foreign-requester",
+            }),
+        async (text, _options, assertCurrent) => {
+          if (closed) {
+            entered.resolve();
+            await resume.promise;
+          }
+          assertCurrent();
+          injected.push(text);
+        },
+      );
+      const input = reserveSessionControllerSource(sessionKey, {
+        target,
+        policy: { mode: "steer" },
+      });
+      const callGateway = vi.fn<typeof runtimeCallGateway>().mockResolvedValue({
+        status: "ok",
+        result: { payloads: [{ text: "Completion accepted by local requester" }] },
+      });
+      if (!closed) {
+        setSubagentAnnounceDeliveryDepsForTest({ callGateway });
+      }
+      const pending = withMemorySource(actor, () =>
+        sendSubagentAnnounceDirectly({
+          requesterSessionKey: sessionKey,
+          targetRequesterSessionKey: sessionKey,
+          requesterAgentId: "main",
+          requesterIsSubagent: false,
+          triggerMessage: closed ? "Child completed" : "Private completion",
+          expectsCompletionMessage: true,
+          directIdempotencyKey: closed
+            ? "incognito-closed-requester-completion"
+            : "incognito-physical-requester-completion",
+          controllerInput: input,
         }),
       );
-    } finally {
-      operation.complete();
-      retireSessionControllerInput(input);
-      clearSessionControllerMailbox(input.mailbox, () => {});
-    }
-  });
+      try {
+        if (closed) {
+          await awaitGateBeforeSettlement(
+            entered.promise,
+            pending,
+            "Wake settled before injection preparation",
+          );
+          actor.closeSession(sessionKey);
+          resume.resolve();
+        }
+        await expect(pending).resolves.toMatchObject(
+          closed
+            ? { delivered: false, reason: "source_owner_changed" }
+            : { delivered: true, path: "direct" },
+        );
+        expect(injected).toEqual([]);
+        if (!closed) {
+          expect(callGateway).toHaveBeenCalledOnce();
+          expect(callGateway).toHaveBeenCalledWith(
+            expect.objectContaining({
+              method: "agent",
+              params: expect.objectContaining({ sessionKey, agentId: "main" }),
+            }),
+          );
+        }
+      } finally {
+        resume.resolve();
+        try {
+          await pending;
+        } finally {
+          operation.complete();
+          retireSessionControllerInput(input);
+          clearSessionControllerMailbox(input.mailbox, () => {});
+        }
+      }
+    },
+  );
 
   it.each(["requester-closed", "source-revoked"] as const)(
     "retains cross-agent custody until %s",

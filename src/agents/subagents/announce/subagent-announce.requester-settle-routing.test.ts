@@ -37,12 +37,8 @@ function routeCase(name: string, overrides: Partial<Omit<RouteCase, "name">> = {
 
 describe("requester settle routing and session authority", () => {
   useRequesterSettleDispatchFixture();
-  beforeEach(() => {
-    setRuntimeConfigSnapshot({});
-  });
-  afterEach(() => {
-    clearRuntimeConfigSnapshot();
-  });
+  beforeEach(() => setRuntimeConfigSnapshot({}));
+  afterEach(() => clearRuntimeConfigSnapshot());
 
   it.each([
     routeCase("WebChat settle"),

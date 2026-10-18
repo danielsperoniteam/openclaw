@@ -58,10 +58,10 @@ describe("subagent announce Gateway instance dispatch", () => {
       .mockReturnValueOnce(retiredContext)
       .mockReturnValue(undefined);
 
-    await withPluginRuntimeGatewayContextResolver(
-      () => replacementContext,
-      async () => {
-        await expect(
+    await expect(
+      withPluginRuntimeGatewayContextResolver(
+        () => replacementContext,
+        () =>
           dispatchGatewayMethodInProcess(
             "agent",
             {
@@ -73,9 +73,8 @@ describe("subagent announce Gateway instance dispatch", () => {
               resolveGatewayContext,
             },
           ),
-        ).rejects.toThrow("current gateway instance binding");
-      },
-    );
+      ),
+    ).rejects.toThrow("current gateway instance binding");
     expect(resolveGatewayContext).toHaveBeenCalledTimes(2);
     expect(retiredAgent).not.toHaveBeenCalled();
     expect(replacementAgent).not.toHaveBeenCalled();

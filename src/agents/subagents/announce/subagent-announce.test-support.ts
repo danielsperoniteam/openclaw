@@ -34,13 +34,7 @@ function resolveExternalBestEffortDeliveryTarget(params: {
 }
 
 function resolveQueueSettings(params: {
-  cfg?: {
-    messages?: {
-      queue?: {
-        byChannel?: Record<string, string>;
-      };
-    };
-  };
+  cfg?: Pick<OpenClawConfig, "messages">;
   channel?: string;
 }) {
   return {
@@ -49,7 +43,6 @@ function resolveQueueSettings(params: {
   };
 }
 
-/** Create a mocked announce delivery runtime for focused subagent tests. */
 export async function createSubagentAnnounceDeliveryRuntimeMock(
   options: DeliveryRuntimeMockOptions,
 ) {
