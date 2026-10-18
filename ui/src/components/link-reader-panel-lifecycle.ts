@@ -84,7 +84,7 @@ export function createLinkReaderPanelLifecycle(
       complete?.(false);
       complete = undefined;
     },
-    subscribe(listener: () => void) {
+    subscribe(this: void, listener: () => void) {
       listeners.add(listener);
       return () => {
         listeners.delete(listener);
