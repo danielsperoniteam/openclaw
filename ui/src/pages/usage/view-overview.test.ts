@@ -134,6 +134,33 @@ describe("UsageInsights", () => {
       button.closest(".usage-summary-card")?.querySelector(".usage-summary-value")?.textContent,
     ).toBe("8");
   });
+  it("hides cost shares while the overall total is a lower bound", () => {
+    const container = document.createElement("div");
+    const complete = { ...totals, totalCost: 10 };
+    const partialTotals = { ...complete, usageReport: { state: "unavailable" as const } };
+    mountSolid(
+      () =>
+        UsageInsights({
+          totals: partialTotals,
+          aggregates: {
+            ...aggregates,
+            byProvider: [{ provider: "openai", count: 1, totals: complete }],
+          },
+          stats: { durationCount: 0, avgDurationMs: 0, errorRate: 0 },
+          showCostHint: false,
+          showCostShares: true,
+          errorHours: [],
+          sessionCount: 1,
+          totalSessions: 1,
+        }),
+      { container },
+    );
+    flush();
+    // A complete provider's share of an incomplete total is unknown, not 100%.
+    expect(container.textContent).toContain("openai");
+    expect(container.textContent).not.toContain("of cost");
+  });
+
   it("labels usage without a known price as unpriced, never free", () => {
     const container = document.createElement("div");
     const unpriced = { ...totals, totalCost: 0, missingCostEntries: 3 };

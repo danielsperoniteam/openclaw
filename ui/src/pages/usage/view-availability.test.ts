@@ -54,6 +54,17 @@ it("shows lower-bound totals after interruption while keeping completed session 
   );
 
   expect(container.querySelector(".sessions-card-stats")?.textContent).toContain("≥ ");
+  // Restored analytics mark partial sums and hide ratios built from partial counters.
+  expect(container.querySelector(".cost-breakdown-total")?.textContent).toContain("≥ ");
+  const summaryValue = (hint: string) =>
+    container
+      .querySelector(`#usage-summary-hint-${hint}`)
+      ?.closest(".usage-summary-card")
+      ?.querySelector(".usage-summary-value")
+      ?.textContent?.trim();
+  expect(summaryValue("cache-hit-rate")).toBe("—");
+  expect(summaryValue("average-tokens")).toBe("—");
+  expect(container.textContent).not.toContain("of cost");
 
   setSelection(["completed"]);
   flush();
@@ -62,6 +73,9 @@ it("shows lower-bound totals after interruption while keeping completed session 
   ).toEqual(["2.6K", "$0.00", "1"]);
   expect(container.querySelector(".usage-trend-section")).not.toBeNull();
   expect(container.querySelector('.usage-callout[role="note"]')).toBeNull();
+  // An exact selection shows exact sums and ratios again.
+  expect(container.querySelector(".cost-breakdown-total")?.textContent).not.toContain("≥");
+  expect(summaryValue("average-tokens")).not.toBe("—");
 });
 
 it("keeps the lower-bound note for full-session charts when only the selected day is complete", () => {
