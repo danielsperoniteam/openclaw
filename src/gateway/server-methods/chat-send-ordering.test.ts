@@ -13,6 +13,7 @@ import type { ReplyOperation } from "../../sessions/session-controller.contracts
 import type { SessionControllerInput } from "../../sessions/session-controller.mailbox.js";
 import { rpcSourceTesting } from "../../sessions/session-lifecycle-admission.test-support.js";
 import * as skillSelection from "../../skills/library/selection.js";
+import { prepareUserProfileCatalog } from "../../state/user-profile-list.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
 import {
   dispatchInboundMessageMock,
@@ -110,6 +111,7 @@ it.for([false, true])(
     const { scope, params } = fixture;
     params.idempotencyKey = `ordered-first-${retry}`;
     const profile = ensureProfileForEmail("ordered-preparation@example.test");
+    using _catalog = { [Symbol.dispose]: (await prepareUserProfileCatalog()).release };
     setClientProfile(fixture.client, profile, "Ordering fixture");
     // Keep reply preparation and queue policy real; observe execution after their admission.
     dispatchInboundMessageMock.mockReset();

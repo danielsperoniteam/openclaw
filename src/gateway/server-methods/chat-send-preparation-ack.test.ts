@@ -23,6 +23,7 @@ import { getCompetingSessionWorkAdmissionRelease } from "../../sessions/session-
 import { rpcSourceTesting } from "../../sessions/session-lifecycle-admission.test-support.js";
 import * as transcriptPersistence from "../../sessions/user-turn-transcript.persistence.js";
 import * as skillSelection from "../../skills/library/selection.js";
+import { prepareUserProfileCatalog } from "../../state/user-profile-list.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
 import { refusePendingInputCommit } from "../pending-input-commit.test-support.js";
 import { bindSessionRowProjection } from "../session-row-projection-access.js";
@@ -352,6 +353,7 @@ it.for(["dispatch", "failure", "cancel"] as const)(
   async (outcome, { signal }) => {
     const fixture = await createFixture({ active: false });
     const profile = ensureProfileForEmail("preparation-ack@example.test");
+    using _catalog = { [Symbol.dispose]: (await prepareUserProfileCatalog()).release };
     setClientProfile(fixture.client, profile, "Preparation fixture");
     const entered = createDeferred();
     const release = createDeferred();
