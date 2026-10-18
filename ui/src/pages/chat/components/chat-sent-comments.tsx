@@ -68,12 +68,19 @@ function SentComments(props: {
   const sources = createMemo(() => props.sources);
   const [revealed, setRevealed] = createSignal(false);
   // Ignore fallback JSX identity: sibling cards must not restart these reads.
-  const key = createMemo(() =>
-    JSON.stringify([props.scope, sources().map(({ fallback: _fallback, ...source }) => source)]),
+  const request = createMemo(
+    () => {
+      const current = sources();
+      return {
+        key: JSON.stringify([
+          props.scope,
+          current.map(({ fallback: _fallback, ...source }) => source),
+        ]),
+        sources: current,
+      };
+    },
+    { equals: (before, next) => before.key === next.key },
   );
-  const request = createMemo(() => ({ key: key(), sources: sources() }), {
-    equals: (before, next) => before.key === next.key,
-  });
   const comments = createMemo(() => {
     const current = request().sources;
     let values: Array<CommentPreview | null | undefined> = current.map((source) =>
