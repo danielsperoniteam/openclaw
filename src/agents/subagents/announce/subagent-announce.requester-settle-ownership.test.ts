@@ -193,21 +193,27 @@ it("holds an adopted child's old wake until its current requester turn yields", 
   expect(quietChild.requesterTurnRunId).toBe("quiet-cancellation-owner");
 });
 
-it.each(["same", "before admission", "during admission"] as const)(
-  "keeps yielded requester wakes in their captured store: %s",
+it.each(["same", "before admission", "during admission", "rearm"] as const)(
+  "fences queued requester wakes across %s",
   async (replacement) => {
+    const rearm = replacement === "rearm";
     const child = makeSettledChild(
-      {
-        requesterStorePath: "original-store",
-        completion: { required: true, resultText: "retained child result" },
-        delivery: { status: "suspended", suspendedReason: "permanent_failure" },
-      },
+      rearm
+        ? {}
+        : {
+            requesterStorePath: "original-store",
+            completion: { required: true, resultText: "retained child result" },
+            delivery: { status: "suspended", suspendedReason: "permanent_failure" },
+          },
       { requesterYieldBatch: true },
     );
+    let current = child;
     registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([child]);
-    publishSystemEventStoreResolver(() =>
-      replacement === "before admission" ? "replacement-store" : "original-store",
-    );
+    if (!rearm) {
+      publishSystemEventStoreResolver(() =>
+        replacement === "before admission" ? "replacement-store" : "original-store",
+      );
+    }
     const { admitted, execute, startedTurns } = holdDelivery();
     const complete = vi.fn((batch: readonly SubagentRunRecord[], generation?: number) =>
       completeBatch(batch, generation),
@@ -223,18 +229,39 @@ it.each(["same", "before admission", "during admission"] as const)(
           pending,
           "Requester delivery settled before reaching admission",
         );
-        publishSystemEventStoreResolver(() =>
-          replacement === "same" ? "original-store" : "replacement-store",
-        );
+        if (rearm) {
+          if (!child.requesterSettleWake) {
+            throw new Error("The admitted requester wake must remain owned until it settles.");
+          }
+          current = copySubagentRunRuntimeOwner<SubagentRunRecord>(child, {
+            ...child,
+            requesterSettleWake: {
+              ...child.requesterSettleWake,
+              requesterYieldBatch: true,
+              rearmGeneration: 2,
+            },
+          });
+          registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([current]);
+        } else {
+          publishSystemEventStoreResolver(() =>
+            replacement === "same" ? "original-store" : "replacement-store",
+          );
+        }
       }
       execute.resolve();
       expect(await pending).toBe(replacement === "same");
       expect(startedTurns).toEqual(replacement === "same" ? [REQUESTER] : []);
-      expect(child).toMatchObject({
-        requesterSettleWake: undefined,
-        completion: { resultText: "retained child result" },
-      });
-      if (replacement !== "same") {
+      if (rearm) {
+        expect(current.requesterSettleWake).toMatchObject({ rearmGeneration: 2 });
+        expect(await maybeWakeRequesterAfterAllChildrenSettled(wakeParams())).toBe(true);
+        expect(current.requesterSettleWake).toBeUndefined();
+      } else {
+        expect(child).toMatchObject({
+          requesterSettleWake: undefined,
+          completion: { resultText: "retained child result" },
+        });
+      }
+      if (!rearm && replacement !== "same") {
         expect(complete).toHaveBeenCalledWith(
           [child],
           1,
@@ -282,39 +309,4 @@ it("excludes a suppressed member while its completed sibling still delivers once
     requesterSettleWake: undefined,
     completion: { resultText: "completed sibling result" },
   });
-});
-
-it("leaves a yielded batch intact when an older queued wake loses rearm authority", async () => {
-  const child = makeSettledChild({}, { requesterYieldBatch: true });
-  registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([child]);
-  const { admitted, execute, startedTurns } = holdDelivery();
-  const pending = maybeWakeRequesterAfterAllChildrenSettled(wakeParams());
-  try {
-    await awaitGateBeforeSettlement(
-      admitted.promise,
-      pending,
-      "Requester delivery settled before reaching admission",
-    );
-    if (!child.requesterSettleWake) {
-      throw new Error("The admitted requester wake must remain owned until it settles.");
-    }
-    const advanced = copySubagentRunRuntimeOwner<SubagentRunRecord>(child, {
-      ...child,
-      requesterSettleWake: {
-        ...child.requesterSettleWake,
-        requesterYieldBatch: true,
-        rearmGeneration: 2,
-      },
-    });
-    registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([advanced]);
-    execute.resolve();
-    expect(await pending).toBe(false);
-    expect(startedTurns).toEqual([]);
-    expect(advanced.requesterSettleWake).toMatchObject({ rearmGeneration: 2 });
-    expect(await maybeWakeRequesterAfterAllChildrenSettled(wakeParams())).toBe(true);
-    expect(advanced.requesterSettleWake).toBeUndefined();
-  } finally {
-    execute.resolve();
-    await pending;
-  }
 });

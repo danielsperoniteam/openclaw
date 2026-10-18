@@ -34,8 +34,8 @@ import {
   type AgentHarnessCompletionCustody,
 } from "../../agent-harness-completion-custody.js";
 import { createAgentHarnessCompletionScope } from "../../agent-harness-completion-scope.js";
+import { createSubagentRunRecord } from "../../subagent-test-fixtures.test-helpers.js";
 import { withGatewayToolCallerIdentity } from "../../tools/gateway-caller-context.js";
-import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
 import { loadRequesterSessionEntry } from "./subagent-announce-delivery.runtime.js";
 import { sendSubagentAnnounceDirectly } from "./subagent-announce-direct-delivery.js";
 import {
@@ -62,6 +62,11 @@ type MemoryOwner = ReturnType<typeof memorySessionActorOwners.get>;
 let actor: MemoryOwner;
 let childActor: MemoryOwner;
 const actorEnv = { OPENCLAW_STATE_DIR: "/synthetic/announce" };
+const actorPath = (agentId: string, env = actorEnv) =>
+  resolveIncognitoOpenClawAgentSqlitePath({ agentId, env });
+function memoryOwner(agentId: string) {
+  return memorySessionActorOwners.get({ agentId, path: actorPath(agentId) });
+}
 
 async function create(
   owner: MemoryOwner,
@@ -140,14 +145,8 @@ function activeOperation(
 
 beforeEach(async () => {
   vi.stubEnv("OPENCLAW_STATE_DIR", actorEnv.OPENCLAW_STATE_DIR);
-  actor = memorySessionActorOwners.get({
-    agentId: "main",
-    path: resolveIncognitoOpenClawAgentSqlitePath({ agentId: "main", env: actorEnv }),
-  });
-  childActor = memorySessionActorOwners.get({
-    agentId: "child",
-    path: resolveIncognitoOpenClawAgentSqlitePath({ agentId: "child", env: actorEnv }),
-  });
+  actor = memoryOwner("main");
+  childActor = memoryOwner("child");
   for (const owner of [actor, childActor]) {
     await create(owner, `agent:${owner.agentId}:dashboard:incognito-source`, {
       sessionId: "source",
@@ -189,9 +188,8 @@ describe("selected incognito announcement requester", () => {
         closed
           ? target
           : captureSessionTarget({
-              storeScope: resolveIncognitoOpenClawAgentSqlitePath({
-                agentId: "main",
-                env: { OPENCLAW_STATE_DIR: "/synthetic/foreign-announcement" },
+              storeScope: actorPath("main", {
+                OPENCLAW_STATE_DIR: "/synthetic/foreign-announcement",
               }),
               sessionKey,
               agentId: "main",
@@ -369,19 +367,15 @@ describe("selected incognito announcement requester", () => {
         },
       ),
     );
-    const child: SubagentRunRecord = {
+    const child = createSubagentRunRecord({
       runId,
       childSessionKey: sessionKey,
       childAgentId: "child",
       requesterSessionKey: "agent:main:dashboard:incognito-requester",
-      requesterDisplayKey: "requester",
       requesterAgentId: "main",
-      task: "Return a complete result",
-      cleanup: "keep",
-      createdAt: 1,
       execution: { status: "terminal", outcome: { status: "ok" } },
       completion: { required: true, terminalReply: { disposition: "visible", text: "Truncated" } },
-    };
+    });
     const result = await withMemorySource(actor, () =>
       readSubagentRunAnnounceResult(child, () => child),
     );
@@ -403,7 +397,7 @@ describe("selected incognito announcement requester", () => {
       ),
     ).resolves.toBe("Stats: runtime 1s • tokens 30 (in 23 / out 7)");
     const env = { OPENCLAW_STATE_DIR: "/synthetic/announce-absent" };
-    const absentPath = resolveIncognitoOpenClawAgentSqlitePath({ agentId: "main", env });
+    const absentPath = actorPath("main", env);
     setRuntimeConfigSnapshot({ session: { store: absentPath } });
     vi.stubEnv("OPENCLAW_STATE_DIR", env.OPENCLAW_STATE_DIR);
     const absent = await loadRequesterSessionEntry("agent:main:dashboard:incognito-absent", "main");
@@ -430,7 +424,7 @@ describe("selected incognito announcement requester", () => {
 it("reads an unbound incognito announcement from its memory owner", async () => {
   const agentId = "unbound-announcer";
   const sessionKey = `agent:${agentId}:dashboard:incognito-unbound`;
-  const storePath = resolveIncognitoOpenClawAgentSqlitePath({ agentId, env: actorEnv });
+  const storePath = actorPath(agentId);
   setRuntimeConfigSnapshot({ session: { store: storePath } });
   await replaceSessionEntry(
     { agentId, sessionKey, storePath, env: actorEnv },
