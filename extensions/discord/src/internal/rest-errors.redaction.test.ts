@@ -172,7 +172,7 @@ describe("Discord REST error redaction", () => {
   });
 
   it("redacts reflected credentials inside Discord validation arrays", () => {
-    const token = "MTAxMjM0NTY3ODkwMTIzNDU2.validation.array.credential";
+    const validationToken = "MTAxMjM0NTY3ODkwMTIzNDU2.validation.array.credential";
     const error = new DiscordError(new Response(null, { status: 400 }), {
       message: "Invalid Form Body",
       errors: {
@@ -180,7 +180,7 @@ describe("Discord REST error redaction", () => {
           _errors: [
             {
               code: "BASE_TYPE_BAD_LENGTH",
-              message: `Authorization: Bot ${token}`,
+              message: `Authorization: Bot ${validationToken}`,
             },
           ],
         },
@@ -188,7 +188,7 @@ describe("Discord REST error redaction", () => {
     });
     const details = JSON.stringify(error.rawBody);
 
-    expect(details).not.toContain(token);
+    expect(details).not.toContain(validationToken);
     expect(details).toContain("BASE_TYPE_BAD_LENGTH");
     expect(details).toContain("Invalid Form Body");
   });
