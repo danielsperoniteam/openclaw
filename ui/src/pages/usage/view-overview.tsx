@@ -271,9 +271,16 @@ export function UsageInsights(props: {
     ) => ({
       label,
       ...(agent ? { agentId: label } : {}),
-      value: formatAnalysisCost(entryTotals.totalCost, entryTotals.usageReport),
+      // Usage with no known price is unpriced, never free.
+      value:
+        entryTotals.totalCost === 0 && entryTotals.missingCostEntries > 0
+          ? t("usage.overview.unpriced")
+          : formatAnalysisCost(entryTotals.totalCost, entryTotals.usageReport),
       sub: [
-        showCostShares && entryTotals.usageReport?.state !== "unavailable" && totals.totalCost > 0
+        showCostShares &&
+        entryTotals.usageReport?.state !== "unavailable" &&
+        entryTotals.totalCost > 0 &&
+        totals.totalCost > 0
           ? t("usage.overview.costShare", {
               percent: ((entryTotals.totalCost / totals.totalCost) * 100).toFixed(1),
             })
