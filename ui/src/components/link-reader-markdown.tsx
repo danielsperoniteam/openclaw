@@ -178,30 +178,40 @@ function prepareImage(
 
 export function LinkReaderMarkdown(props: { body: string; base: string; loadImage?: LoadImage }) {
   const source = createMemo(
-    () =>
-      [props.body, props.base, props.loadImage, i18n.getLocale(), t("linkReader.image")] as const,
+    () => {
+      const body = props.body;
+      let html: string;
+      // Parsing subscribes to lazy syntax-highlighter readiness.
+      try {
+        html = markdown.render(body, documentOptions);
+      } catch {
+        html = "<pre>" + escapeHtml(body) + "</pre>";
+      }
+      return [
+        body,
+        html,
+        props.base,
+        props.loadImage,
+        i18n.getLocale(),
+        t("linkReader.image"),
+      ] as const;
+    },
     { equals: (previous, next) => previous.every((value, index) => value === next[index]) },
   );
   // A document replacement retires its DOM and image requests together.
   return (
     <For each={[source()]}>
-      {(value) => <MarkdownDocument body={value[0]} base={value[1]} loadImage={value[2]} />}
+      {(value) => <MarkdownDocument html={value[1]} base={value[2]} loadImage={value[3]} />}
     </For>
   );
 }
 
-function MarkdownDocument(props: { body: string; base: string; loadImage?: LoadImage }) {
+function MarkdownDocument(props: { html: string; base: string; loadImage?: LoadImage }) {
   let element!: HTMLDivElement;
   onSettled(() => {
-    const body = props.body;
+    const html = props.html;
     const base = props.base;
     const loadImage = props.loadImage;
-    let html: string;
-    try {
-      html = markdown.render(body, documentOptions);
-    } catch {
-      html = "<pre>" + escapeHtml(body) + "</pre>";
-    }
     const lifetime = new AbortController();
     const fragment = purifier.sanitize(html, {
       RETURN_DOM_FRAGMENT: true,

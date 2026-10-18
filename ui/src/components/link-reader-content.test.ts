@@ -84,7 +84,9 @@ describe("link reader document content", () => {
         }
       },
     );
-    onTestFinished(() => vi.unstubAllGlobals());
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
     const loadSection = vi.fn();
     const [sections, setSections] = createSignal<ReaderReadyView["sections"]>({
       checks: "idle",
