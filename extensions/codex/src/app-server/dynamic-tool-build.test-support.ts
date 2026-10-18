@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core";
 import type { EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams } from "openclaw/plugin-sdk/agent-harness-runtime";
 import {
   clearRuntimeConfigSnapshot,
@@ -18,22 +19,18 @@ import { createCodexTestModel } from "./test-support.js";
 
 export { createCodexRuntimePlanFixture } from "./test-support.js";
 
-const hoisted = vi.hoisted(() => ({
+export const hoisted = vi.hoisted(() => ({
   normalizeAgentRuntimeTools: vi.fn(),
   resolveWebSearchToolPolicy: vi.fn(),
   loadNodeExecAvailability: vi.fn(),
 }));
-
-export { hoisted };
 
 vi.mock("openclaw/plugin-sdk/agent-harness", async (importOriginal) => {
   const actual = await importOriginal<typeof import("openclaw/plugin-sdk/agent-harness")>();
 
   return {
     ...actual,
-    resolveWebSearchToolPolicy: (
-      ...args: Parameters<(typeof actual)["resolveWebSearchToolPolicy"]>
-    ) => {
+    resolveWebSearchToolPolicy: (...args: Parameters<typeof actual.resolveWebSearchToolPolicy>) => {
       hoisted.resolveWebSearchToolPolicy(...args);
       return actual.resolveWebSearchToolPolicy(...args);
     },
@@ -57,7 +54,11 @@ vi.mock("openclaw/plugin-sdk/node-selection-runtime", async (importOriginal) => 
   return { ...actual, loadNodeExecAvailability: hoisted.loadNodeExecAvailability };
 });
 
-export function createParams(sessionFile: string, workspaceDir: string): EmbeddedRunAttemptParams {
+export function createParams(
+  sessionFile: string,
+  workspaceDir: string,
+  overrides: Partial<EmbeddedRunAttemptParams> = {},
+): EmbeddedRunAttemptParams {
   return {
     hostCapabilities: createCodexTestHostCapabilities(),
     prompt: "hello",
@@ -69,18 +70,10 @@ export function createParams(sessionFile: string, workspaceDir: string): Embedde
     provider: "codex",
     modelId: "gpt-5.4-codex",
     model: createCodexTestModel("codex"),
-    contextTokenBudget: 150_000,
-    contextWindowInfo: {
-      tokens: 150_000,
-      referenceTokens: 200_000,
-      source: "agentContextTokens",
-    },
-    thinkLevel: "medium",
     disableTools: true,
-    timeoutMs: 5_000,
-    authStorage: {} as never,
+    contextTokenBudget: 150_000,
     authProfileStore: { version: 1, profiles: {} },
-    modelRegistry: {} as never,
+    ...overrides,
   } as EmbeddedRunAttemptParams;
 }
 
@@ -89,29 +82,24 @@ export async function buildDynamicToolsForTest(
   workspaceDir: string,
   options: Partial<Parameters<typeof buildDynamicTools>[0]> = {},
 ) {
-  const sandboxSessionKey = params.sessionKey;
-  if (!sandboxSessionKey) {
-    throw new Error("createParams must provide a sessionKey for Codex dynamic tool tests.");
-  }
   const config = params.config ?? {};
   setRuntimeConfigSnapshot(config, config);
+  const { permissionMode: mode, sessionRoot: root } = params;
+  const execModes = {
+    "read-only": "deny",
+    guarded: "ask",
+    workspace: "auto",
+    full: "full",
+  } as const;
+  const sessionPermissionPolicy =
+    mode && root ? { mode, root, execMode: execModes[mode] } : undefined;
   return buildDynamicTools({
     params,
     resolvedWorkspace: workspaceDir,
     effectiveWorkspace: workspaceDir,
-    sandboxSessionKey,
+    sandboxSessionKey: expectDefined(params.sessionKey, "Codex test session key"),
     sandbox: { enabled: false, backendId: "docker" } as never,
-    ...(params.permissionMode && params.sessionRoot
-      ? {
-          sessionPermissionPolicy: {
-            mode: params.permissionMode,
-            root: params.sessionRoot,
-            execMode: (
-              { "read-only": "deny", guarded: "ask", workspace: "auto", full: "full" } as const
-            )[params.permissionMode],
-          },
-        }
-      : {}),
+    sessionPermissionPolicy,
     nativeToolSurfaceEnabled: true,
     runAbortController: new AbortController(),
     sessionAgentId: "main",
@@ -143,11 +131,7 @@ export function createRuntimeDynamicTool(name: string): RuntimeDynamicToolForTes
     name,
     label: name,
     description: `${name} test tool`,
-    parameters: {
-      type: "object",
-      properties: {},
-      additionalProperties: true,
-    },
+    parameters: { type: "object", properties: {}, additionalProperties: true },
     execute: vi.fn(async () => ({
       content: [{ type: "text" as const, text: `${name} done` }],
       details: {},
