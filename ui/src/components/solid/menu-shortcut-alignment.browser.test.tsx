@@ -102,6 +102,7 @@ it("keeps Layout hints aligned before and after panel styles load, and hidden on
     // The opening transition scales DOM bounds; measure its final geometry.
     expect(getComputedStyle(menu).scale).toBe("1");
   });
+  await Promise.all(menu.getAnimations().map((animation) => animation.finished));
   const hints = [...menu.querySelectorAll<HTMLElement>(".shortcut-kbd")];
   expect(hints).toHaveLength(4);
   const bounds = () => hints.map((hint) => hint.getBoundingClientRect());
@@ -112,7 +113,6 @@ it("keeps Layout hints aligned before and after panel styles load, and hidden on
   await import("../../styles/chat/side-panel.css");
   const after = bounds();
   expect(after).toHaveLength(before.length);
-  // WebKit can retain subpixel transform rounding after the opening scale settles.
   for (const [index, rect] of after.entries()) {
     expect(rect.right).toBeCloseTo(before[index]!.right, 3);
     expect(rect.width).toBeCloseTo(before[index]!.width, 3);
