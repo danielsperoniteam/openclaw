@@ -35,42 +35,54 @@ afterEach(async () => {
   tempDirs.cleanup();
 });
 
-it("preserves typed maintenance errors after broker reuse", async () => {
-  const warm = createHealthDeps();
-  patchConfigHealthEntryToStore(warm, "/warm.json", { lastObservedSuspiciousSignature: "warm" });
-  expect(await captureConfigHealthStateStore(warm, "/warm.json").read()).not.toBeNull();
-  await closeOpenClawStateDatabaseAsync();
-  const deps = createHealthDeps();
-  makeNewerSchema(deps);
-  let incoming: unknown;
-  const execute = worker.runOpenClawStateWorkerOperation;
-  const spy = vi.spyOn(worker, "runOpenClawStateWorkerOperation").mockImplementation(
-    new Proxy(execute, {
-      async apply(target, receiver, args) {
-        try {
-          return await Reflect.apply(target, receiver, args);
-        } catch (error) {
-          incoming = error;
-          throw error;
-        }
-      },
-    }),
-  );
-  try {
-    const store = captureConfigHealthStateStore(deps, "/config.json");
-    const previous = await store.read();
-    const failure = await store.update(healthEntry, previous).catch((error: unknown) => error);
-    expect(incoming).toBeInstanceOf(StartupMaintenanceRequiredError);
-    expect(failure).toBe(incoming);
-    expect(findStartupMaintenanceRequiredError(failure)).toMatchObject({
-      kind: "newer-schema",
-    });
-    expect(deps.logger.warn).not.toHaveBeenCalled();
-  } finally {
-    spy.mockRestore();
-    await closeOpenClawStateDatabaseAsync();
-  }
-});
+it.each(["update", "updateAfterFileCommit"] as const)(
+  "preserves typed maintenance errors through %s",
+  async (operation) => {
+    if (operation === "update") {
+      const warm = createHealthDeps();
+      patchConfigHealthEntryToStore(warm, "/warm.json", {
+        lastObservedSuspiciousSignature: "warm",
+      });
+      expect(await captureConfigHealthStateStore(warm, "/warm.json").read()).not.toBeNull();
+      await closeOpenClawStateDatabaseAsync();
+    }
+    const deps = createHealthDeps();
+    makeNewerSchema(deps);
+    let incoming: unknown;
+    const execute = worker.runOpenClawStateWorkerOperation;
+    const spy = vi.spyOn(worker, "runOpenClawStateWorkerOperation").mockImplementation(
+      new Proxy(execute, {
+        async apply(target, receiver, args) {
+          try {
+            return await Reflect.apply(target, receiver, args);
+          } catch (error) {
+            incoming = error;
+            throw error;
+          }
+        },
+      }),
+    );
+    try {
+      const store = captureConfigHealthStateStore(deps, "/config.json");
+      const previous = await store.read();
+      if (operation === "updateAfterFileCommit") {
+        expect(previous).toEqual({ state: {}, basis: null });
+      }
+      const failure = await store[operation](healthEntry, previous).catch(
+        (error: unknown) => error,
+      );
+      expect(incoming).toBeInstanceOf(StartupMaintenanceRequiredError);
+      expect(failure).toBe(incoming);
+      expect(findStartupMaintenanceRequiredError(failure)).toMatchObject({
+        kind: "newer-schema",
+      });
+      expect(deps.logger.warn).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+      await closeOpenClawStateDatabaseAsync();
+    }
+  },
+);
 
 function createHealthDeps(warn = vi.fn()) {
   const home = tempDirs.make("openclaw-health-warning-");
@@ -192,19 +204,6 @@ describe("config health-state warnings", () => {
       expect.stringContaining("Config health-state write failed:"),
     );
     expect(fs.statSync(databasePath).isDirectory()).toBe(true);
-  });
-
-  it("preserves maintenance failures after a file commit", async () => {
-    const deps = createHealthDeps();
-    makeNewerSchema(deps);
-    const store = captureConfigHealthStateStore(deps, "/config.json");
-    const previous = await store.read();
-    expect(previous).toEqual({ state: {}, basis: null });
-    const failure = await store
-      .updateAfterFileCommit(healthEntry, previous)
-      .catch((error: unknown) => error);
-    expect(findStartupMaintenanceRequiredError(failure)).toMatchObject({ kind: "newer-schema" });
-    expect(deps.logger.warn).not.toHaveBeenCalled();
   });
 
   it("deduplicates write failures across fresh sync and async config reads", async () => {

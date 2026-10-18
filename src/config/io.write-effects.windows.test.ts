@@ -18,7 +18,9 @@ import {
 import {
   content,
   createWriteEffectsFixture,
+  instrumentDestination,
   original,
+  prepareClosedWrite,
   prepareWriteEffects as prepare,
 } from "./io.write-effects.test-support.js";
 
@@ -162,7 +164,7 @@ function acl(target: string): string {
 
 function identity(target: string) {
   const stat = fs.lstatSync(target, { bigint: true });
-  return { dev: stat.dev, ino: stat.ino, raw: fs.readFileSync(target, "utf8") };
+  return { ino: stat.ino, dev: stat.dev, raw: fs.readFileSync(target, "utf8") };
 }
 
 describe.runIf(process.platform === "win32")("native Windows config fallback effects", () => {
@@ -203,52 +205,24 @@ describe.runIf(process.platform === "win32")("native Windows config fallback eff
     { timeout: testTimeout },
     async (phase, { signal }) => {
       const f = fixture();
-      const initial = await prepare(f);
-      try {
-        if (phase === "rollback") {
-          initial.prepared.publish();
-        }
-      } finally {
-        await initial.prepared[Symbol.asyncDispose]();
-      }
+      const initial = await prepareClosedWrite(f, phase === "rollback");
       let observed: ReturnType<typeof identity> | undefined;
       let writes = 0;
       await withNativeSharingViolation(f.target, signal, async (io) => {
-        let destinationFd: number | undefined;
-        const instrumented: typeof fs = {
-          ...io,
-          openSync(name, flags, mode) {
-            const fd = fs.openSync(name, flags, mode);
-            if (
-              String(name) === f.target &&
-              typeof flags === "number" &&
-              flags & fs.constants.O_EXCL
-            ) {
-              destinationFd = fd;
-            }
-            return fd;
+        const instrumented = instrumentDestination(io, f.target, {
+          chunkSize: 3,
+          write() {
+            writes++;
+            f.revoke();
+            observed = identity(f.target);
           },
-          writeSync: new Proxy(fs.writeSync, {
-            apply(fn, self, args) {
-              if (args[0] === destinationFd) {
-                args[3] = Math.min(args[3], 3);
-              }
-              const count = Reflect.apply(fn, self, args);
-              if (args[0] === destinationFd) {
-                writes++;
-                f.revoke();
-                observed = identity(f.target);
-              }
-              return count;
-            },
-          }),
-        };
+        });
         if (phase === "publication") {
           await using prepared = (await prepare(f, instrumented)).prepared;
           expect(() => prepared.publish()).toThrow(f.refusal);
         } else {
           await expect(
-            f.rollback(instrumented, initial.guarded.captureRollbackProof(f.assertCurrent), {
+            f.rollback(instrumented, initial.captureRollbackProof(f.assertCurrent), {
               durable: true,
               destinationHardlinks: "reject",
             }),
@@ -268,65 +242,31 @@ describe.runIf(process.platform === "win32")("native Windows config fallback eff
     { timeout: testTimeout },
     async (replacement, { signal }) => {
       const f = fixture();
-      const { prepared, guarded } = await prepare(f);
-      try {
-        prepared.publish();
-      } finally {
-        await prepared[Symbol.asyncDispose]();
-      }
+      const guarded = await prepareClosedWrite(f);
       const rollbackProof = guarded.captureRollbackProof(f.assertCurrent);
       const parentBefore = fs.lstatSync(f.dir, { bigint: true });
       const movedParent = `${f.dir}-owned`;
       let observed: ReturnType<typeof identity> | undefined;
       let destinationWrites = 0;
       await withNativeSharingViolation(f.target, signal, async (io) => {
-        let destinationFd: number | undefined;
-        const instrumented: typeof fs = {
-          ...io,
-          openSync(name, flags, mode) {
-            const fd = fs.openSync(name, flags, mode);
-            try {
-              if (
-                String(name) === f.target &&
-                typeof flags === "number" &&
-                flags & fs.constants.O_EXCL
-              ) {
-                destinationFd = fd;
-                if (replacement === "parent-directory") {
-                  observed = identity(f.target);
-                  // Windows denies this move while the atomic stage/destination is open.
-                  fs.renameSync(f.dir, movedParent);
-                } else {
-                  const raw = fs.readFileSync(f.target, "utf8");
-                  fs.renameSync(f.target, `${f.target}.owned`);
-                  fs.writeFileSync(f.target, raw);
-                  observed = identity(f.target);
-                }
-              }
-              return fd;
-            } catch (error) {
-              // The production adapter cannot adopt the descriptor until this call returns.
-              try {
-                fs.closeSync(fd);
-              } catch (closeError) {
-                throw new AggregateError(
-                  [error, closeError],
-                  "Native replacement injection and descriptor close failed",
-                  { cause: closeError },
-                );
-              }
-              throw error;
+        const instrumented = instrumentDestination(io, f.target, {
+          closeOnOpenError: true,
+          open() {
+            if (replacement === "parent-directory") {
+              observed = identity(f.target);
+              // Windows denies this move while the atomic stage/destination is open.
+              fs.renameSync(f.dir, movedParent);
+            } else {
+              const raw = fs.readFileSync(f.target, "utf8");
+              fs.renameSync(f.target, `${f.target}.owned`);
+              fs.writeFileSync(f.target, raw);
+              observed = identity(f.target);
             }
           },
-          writeSync: new Proxy(fs.writeSync, {
-            apply(fn, self, args) {
-              if (args[0] === destinationFd) {
-                destinationWrites++;
-              }
-              return Reflect.apply(fn, self, args);
-            },
-          }),
-        };
+          write() {
+            destinationWrites++;
+          },
+        });
         const rollback = f.rollback(instrumented, rollbackProof, {
           durable: true,
           destinationHardlinks: "reject",
