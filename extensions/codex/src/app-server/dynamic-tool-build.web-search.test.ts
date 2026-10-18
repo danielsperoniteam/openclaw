@@ -1,13 +1,7 @@
-import fs from "node:fs/promises";
-import os from "node:os";
 import "./dynamic-tool-build.test-support.js";
 import path from "node:path";
 import type { createOpenClawCodingTools } from "openclaw/plugin-sdk/agent-harness";
 import type { EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams } from "openclaw/plugin-sdk/agent-harness-runtime";
-import {
-  clearRuntimeConfigSnapshot,
-  setRuntimeConfigSnapshot,
-} from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { shouldEnableCodexAppServerNativeToolSurface } from "./dynamic-tool-build.js";
 import { setCodexTestToolFactory } from "./host-capability.test-support.js";
@@ -20,9 +14,24 @@ const {
   createParams: createBaseParams,
   createRuntimeDynamicTool,
   hoisted,
+  setupDynamicToolBuildFixture,
 } = await import("./dynamic-tool-build.test-support.js");
 
 type ToolOptions = NonNullable<Parameters<typeof createOpenClawCodingTools>[0]>;
+type SearchCase = {
+  name: string;
+  config?: EmbeddedRunAttemptParams["config"];
+  toolsAllow?: string[];
+  senderId?: string;
+  excludes?: string[];
+  source: string[];
+  exposed: string[];
+  persistent: boolean;
+  allowed: boolean;
+  fetchAllowlist?: string[];
+  nativeProviderWebSearchSupport?: "unsupported";
+  skipsPolicyLookup?: boolean;
+};
 
 function createParams(sessionFile: string, workspaceDir: string): EmbeddedRunAttemptParams {
   return {
@@ -36,147 +45,92 @@ describe("Codex app-server dynamic tool search policy", () => {
   let tempDir: string;
 
   beforeEach(async () => {
-    setRuntimeConfigSnapshot({});
-    hoisted.loadNodeExecAvailability.mockResolvedValue({
-      cacheKey: "eligible",
-      isAvailable: () => true,
-    });
-    hoisted.normalizeAgentRuntimeTools.mockClear();
-    hoisted.resolveWebSearchToolPolicy.mockClear();
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-search-tools-"));
+    tempDir = await setupDynamicToolBuildFixture();
   });
+  afterEach(() => cleanupDynamicToolBuildFixture(tempDir, []));
 
-  afterEach(async () => {
-    await cleanupDynamicToolBuildFixture(tempDir, []);
-    clearRuntimeConfigSnapshot();
-  });
-
-  it.each<{
-    name: string;
-    config?: EmbeddedRunAttemptParams["config"];
-    toolsAllow?: string[];
-    senderId?: string;
-    excludes?: string[];
-    source: string[];
-    exposed: string[];
-    persistent: boolean;
-    allowed: boolean;
-    fetchAllowlist?: string[];
-    nativeProviderWebSearchSupport?: "unsupported";
-    skipsPolicyLookup?: boolean;
-  }>([
-    {
-      name: "domain-restricted hosted search",
-      config: { tools: { web: { search: { openaiCodex: { allowedDomains: ["example.com"] } } } } },
-      source: ["web_search", "web_fetch", "message"],
+  const webTools = ["web_search", "web_fetch"];
+  const domainConfig = {
+    tools: { web: { search: { openaiCodex: { allowedDomains: ["example.com"] } } } },
+  };
+  function searchCase(name: string, overrides: Partial<SearchCase> = {}): SearchCase {
+    return {
+      name,
+      source: ["message"],
+      exposed: ["message"],
+      persistent: true,
+      allowed: true,
+      ...overrides,
+    };
+  }
+  it.each([
+    searchCase("domain-restricted hosted search", {
+      config: domainConfig,
+      source: [...webTools, "message"],
       exposed: ["web_fetch", "message"],
-      persistent: true,
-      allowed: true,
       fetchAllowlist: ["example.com", "*.example.com"],
-    },
-    {
-      name: "a managed provider despite native domains",
+    }),
+    searchCase("a managed provider despite native domains", {
       config: {
-        tools: {
-          web: { search: { provider: "brave", openaiCodex: { allowedDomains: ["example.com"] } } },
-        },
+        tools: { web: { search: { provider: "brave", ...domainConfig.tools.web.search } } },
       },
-      source: ["web_search", "web_fetch"],
-      exposed: ["web_search", "web_fetch"],
-      persistent: true,
-      allowed: true,
-    },
-    {
-      name: "an empty native domain allowlist",
+      source: webTools,
+      exposed: webTools,
+    }),
+    searchCase("an empty native domain allowlist", {
       config: { tools: { web: { search: { openaiCodex: { allowedDomains: [] } } } } },
-      source: ["web_search", "web_fetch"],
+      source: webTools,
       exposed: ["web_fetch"],
-      persistent: true,
-      allowed: true,
-    },
-    {
-      name: "runtime denial of domain-restricted search",
-      config: { tools: { web: { search: { openaiCodex: { allowedDomains: ["example.com"] } } } } },
+    }),
+    searchCase("runtime denial of domain-restricted search", {
+      config: domainConfig,
       toolsAllow: ["web_fetch"],
-      source: ["web_search", "web_fetch"],
+      source: webTools,
       exposed: ["web_fetch"],
-      persistent: true,
       allowed: false,
-    },
-    {
-      name: "effective policy denial despite a runtime cap",
+    }),
+    searchCase("effective policy denial despite a runtime cap", {
       config: { tools: { deny: ["web_search"] } },
       toolsAllow: ["message"],
-      source: ["message"],
-      exposed: ["message"],
       persistent: false,
       allowed: false,
-    },
-    {
-      name: "hosted search without a configured managed provider",
-      source: ["message"],
-      exposed: ["message"],
-      persistent: true,
-      allowed: true,
-    },
-    {
-      name: "profile denial without a managed provider",
+    }),
+    searchCase("hosted search without a configured managed provider"),
+    searchCase("profile denial without a managed provider", {
       config: { tools: { profile: "minimal" } },
-      source: ["message"],
-      exposed: ["message"],
       persistent: false,
       allowed: false,
-    },
-    {
-      name: "plugin exclusion without a managed provider",
+    }),
+    searchCase("plugin exclusion without a managed provider", {
       excludes: ["web_search"],
-      source: ["message"],
-      exposed: ["message"],
       persistent: false,
       allowed: false,
-    },
-    {
-      name: "runtime-only denial without a managed provider",
+    }),
+    searchCase("runtime-only denial without a managed provider", {
       toolsAllow: ["message"],
-      source: ["message"],
-      exposed: ["message"],
-      persistent: true,
       allowed: false,
-    },
-    {
-      name: "a native provider without hosted search or a managed provider",
+    }),
+    searchCase("a native provider without hosted search or a managed provider", {
       nativeProviderWebSearchSupport: "unsupported",
-      source: ["message"],
-      exposed: ["message"],
       persistent: false,
       allowed: false,
-    },
-    {
-      name: "runtime-only denial",
+    }),
+    searchCase("runtime-only denial", {
       toolsAllow: ["message"],
       source: ["web_search", "message"],
-      exposed: ["message"],
-      persistent: true,
       allowed: false,
       skipsPolicyLookup: true,
-    },
-    {
-      name: "transient sender denial",
+    }),
+    searchCase("transient sender denial", {
       senderId: "restricted-sender",
       config: { tools: { toolsBySender: { "id:restricted-sender": { deny: ["web_search"] } } } },
-      source: ["message"],
-      exposed: ["message"],
-      persistent: true,
       allowed: false,
-    },
-    {
-      name: "a native provider without hosted search",
+    }),
+    searchCase("a native provider without hosted search", {
       nativeProviderWebSearchSupport: "unsupported",
       source: ["web_search", "message"],
       exposed: ["web_search", "message"],
-      persistent: true,
-      allowed: true,
-    },
+    }),
   ])("projects search tools and persistent policy for $name", async (testCase) => {
     const workspaceDir = path.join(tempDir, "workspace");
     const params = createParams(path.join(tempDir, "session.jsonl"), workspaceDir);

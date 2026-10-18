@@ -8,12 +8,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { toCodexDynamicToolProtocolResponse } from "./dynamic-tool-execution.js";
 import { createCodexDynamicToolBridge } from "./dynamic-tools.js";
-import type {
-  CodexDynamicToolCallParams,
-  CodexDynamicToolCallResponse,
-  JsonObject,
-  JsonValue,
-} from "./protocol.js";
+import type { CodexDynamicToolCallResponse, JsonObject, JsonValue } from "./protocol.js";
 
 function installResultMiddleware(
   handler: ReturnType<
@@ -32,55 +27,50 @@ function installResultMiddleware(
   setActivePluginRegistry(registry);
 }
 
-function createDynamicToolCall(
-  tool: string,
-  arguments_: JsonValue = {},
-  callId = "call-1",
-): CodexDynamicToolCallParams {
-  return {
-    threadId: "thread-1",
-    turnId: "turn-1",
-    callId,
-    namespace: null,
-    tool,
-    arguments: arguments_,
-  };
-}
-
-function createTool(overrides: Partial<AnyAgentTool>): AnyAgentTool {
-  return {
-    name: "tts",
-    description: "Convert text to speech.",
-    parameters: { type: "object", properties: {}, additionalProperties: true },
-    execute: vi.fn(),
-    ...overrides,
-  } as unknown as AnyAgentTool;
-}
-
 function textToolResult(text: string, details: unknown = {}): AgentToolResult<unknown> {
   return { content: [{ type: "text", text }], details };
 }
 
-function createSingleToolBridge(
-  tool: AnyAgentTool,
-  options: Omit<Parameters<typeof createCodexDynamicToolBridge>[0], "tools" | "signal"> = {},
+function createMessageBridge(
+  execute: AnyAgentTool["execute"],
+  hookContext?: Parameters<typeof createCodexDynamicToolBridge>[0]["hookContext"],
 ) {
   return createCodexDynamicToolBridge({
-    tools: [tool],
+    tools: [
+      {
+        name: "message",
+        label: "Message",
+        description: "Send a message.",
+        parameters: { type: "object", properties: {}, additionalProperties: true },
+        execute,
+      },
+    ],
     signal: new AbortController().signal,
-    ...options,
+    hookContext,
   });
 }
 
-function createBridgeWithToolResult(
-  toolName: string,
+function bridgeForResult(
   toolResult: AgentToolResult<unknown>,
   hookContext?: Parameters<typeof createCodexDynamicToolBridge>[0]["hookContext"],
 ) {
-  return createSingleToolBridge(
-    createTool({ name: toolName, execute: vi.fn(async () => toolResult) }),
-    { hookContext },
+  return createMessageBridge(
+    vi.fn(async () => toolResult),
+    hookContext,
   );
+}
+
+function deliveredResult(text = "Sent.", details = {}, delivery = {}) {
+  return textToolResult(text, {
+    ...details,
+    messageDelivery: {
+      status: "settled",
+      partialDelivery: false,
+      createdThreadIds: [],
+      sourceReplyDelivered: true,
+      ...delivery,
+    },
+  });
 }
 
 function expectInputText(response: CodexDynamicToolCallResponse, text: string, success = true) {
@@ -93,8 +83,16 @@ function expectInputText(response: CodexDynamicToolCallResponse, text: string, s
 async function handleMessageToolCall(
   bridge: ReturnType<typeof createCodexDynamicToolBridge>,
   arguments_: JsonValue,
+  callId = "call-1",
 ) {
-  return await bridge.handleToolCall(createDynamicToolCall("message", arguments_));
+  return bridge.handleToolCall({
+    threadId: "thread-1",
+    turnId: "turn-1",
+    callId,
+    namespace: null,
+    tool: "message",
+    arguments: arguments_,
+  });
 }
 
 afterEach(() => {
@@ -103,35 +101,28 @@ afterEach(() => {
 });
 
 describe("Codex dynamic-tool source replies", () => {
+  const finalSend = { action: "send", message: "visible reply", final: true };
   it.each(["automatic", "message_tool_only", undefined] as const)(
     "preserves confirmed source delivery when middleware redacts details in %s mode",
     async (sourceReplyDeliveryMode) => {
       installResultMiddleware((event) => ({
         result: { content: event.result.content, details: { redacted: true } },
       }));
-      const bridge = createBridgeWithToolResult(
-        "message",
-        textToolResult("Sent.", {
-          messageDelivery: {
-            status: "settled",
-            primaryPlatformMessageId: "imessage-6264",
-            partialDelivery: false,
-            createdThreadIds: [],
-            sourceReplyDelivered: true,
+      const bridge = bridgeForResult(
+        deliveredResult(
+          "Sent.",
+          {
+            receipt: {
+              primaryPlatformMessageId: "imessage-6264",
+              platformMessageIds: ["imessage-6264"],
+            },
           },
-          receipt: {
-            primaryPlatformMessageId: "imessage-6264",
-            platformMessageIds: ["imessage-6264"],
-          },
-        }),
+          { primaryPlatformMessageId: "imessage-6264" },
+        ),
         { sourceReplyDeliveryMode },
       );
 
-      const result = await handleMessageToolCall(bridge, {
-        action: "send",
-        message: "visible reply",
-        final: true,
-      });
+      const result = await handleMessageToolCall(bridge, finalSend);
 
       expectInputText(result, "Sent.");
       expect(result.terminate).toBe(true);
@@ -149,24 +140,11 @@ describe("Codex dynamic-tool source replies", () => {
         }
         return { result: textToolResult("presentation failed", { error: "presentation failed" }) };
       });
-      const bridge = createBridgeWithToolResult(
-        "message",
-        textToolResult("Sent.", {
-          messageDelivery: {
-            status: "settled",
-            partialDelivery: false,
-            createdThreadIds: [],
-            sourceReplyDelivered: true,
-          },
-        }),
-        { sourceReplyDeliveryMode: "automatic" },
-      );
-
-      const result = await handleMessageToolCall(bridge, {
-        action: "send",
-        message: "visible reply",
-        final: true,
+      const bridge = bridgeForResult(deliveredResult(), {
+        sourceReplyDeliveryMode: "automatic",
       });
+
+      const result = await handleMessageToolCall(bridge, finalSend);
 
       expect(result).toMatchObject({
         success: presentation === "throw",
@@ -186,12 +164,9 @@ describe("Codex dynamic-tool source replies", () => {
   it.each(["automatic", "message_tool_only", undefined] as const)(
     "honors explicit progress message-tool finality in %s mode",
     async (sourceReplyDeliveryMode) => {
-      const bridge = createBridgeWithToolResult(
-        "message",
+      const bridge = bridgeForResult(
         { ...textToolResult("Sent.", { ok: true }), terminate: true },
-        {
-          sourceReplyDeliveryMode,
-        },
+        { sourceReplyDeliveryMode },
       );
 
       const result = await handleMessageToolCall(bridge, {
@@ -217,21 +192,12 @@ describe("Codex dynamic-tool source replies", () => {
     // and the message tool confirming the source reply.
     const deliveryTarget = "-1001234567890";
     const createDeliveryTargetBridge = (messageToolFinalByDefault?: boolean) =>
-      createBridgeWithToolResult(
-        "message",
-        textToolResult('{"ok":true,"messageId":"4242"}', {
-          ok: true,
-          messageId: "4242",
-          chatId: deliveryTarget,
-          messageDelivery: {
-            status: "settled",
-            primaryPlatformMessageId: "4242",
-            deliveredTargets: [deliveryTarget],
-            partialDelivery: false,
-            createdThreadIds: [],
-            sourceReplyDelivered: true,
-          },
-        }),
+      bridgeForResult(
+        deliveredResult(
+          '{"ok":true,"messageId":"4242"}',
+          { ok: true, messageId: "4242", chatId: deliveryTarget },
+          { primaryPlatformMessageId: "4242", deliveredTargets: [deliveryTarget] },
+        ),
         {
           currentChannelProvider: "telegram",
           currentChannelId: deliveryTarget,
@@ -272,19 +238,9 @@ describe("Codex dynamic-tool source replies", () => {
   });
 
   it("ends automatic mode after a confirmed final source reaction", async () => {
-    const bridge = createBridgeWithToolResult(
-      "message",
-      textToolResult("Reacted.", {
-        ok: true,
-        messageDelivery: {
-          status: "settled",
-          partialDelivery: false,
-          createdThreadIds: [],
-          sourceReplyDelivered: true,
-        },
-      }),
-      { sourceReplyDeliveryMode: "automatic" },
-    );
+    const bridge = bridgeForResult(deliveredResult("Reacted.", { ok: true }), {
+      sourceReplyDeliveryMode: "automatic",
+    });
 
     const result = await handleMessageToolCall(bridge, {
       action: "react",
@@ -302,7 +258,7 @@ describe("Codex dynamic-tool source replies", () => {
     { action: "send", to: "other-chat", final: true },
     { action: "send", dryRun: true, final: true },
   ])("continues automatic mode without confirmed source delivery (%j)", async (args) => {
-    const bridge = createBridgeWithToolResult("message", textToolResult("Done.", { ok: true }), {
+    const bridge = bridgeForResult(textToolResult("Done.", { ok: true }), {
       sourceReplyDeliveryMode: "automatic",
     });
 
@@ -316,17 +272,13 @@ describe("Codex dynamic-tool source replies", () => {
       .fn()
       .mockResolvedValueOnce(textToolResult("Sent.", { messageId: "source-reply-1" }))
       .mockResolvedValueOnce(textToolResult("No message sent.", { ok: true }));
-    const bridge = createSingleToolBridge(createTool({ name: "message", execute }), {
-      hookContext: { sourceReplyDeliveryMode: "message_tool_only" },
-    });
+    const bridge = createMessageBridge(execute, { sourceReplyDeliveryMode: "message_tool_only" });
 
     const firstResult = await handleMessageToolCall(bridge, {
       action: "send",
       message: "visible reply",
     });
-    const secondResult = await bridge.handleToolCall(
-      createDynamicToolCall("message", { action: "inspect" }, "call-2"),
-    );
+    const secondResult = await handleMessageToolCall(bridge, { action: "inspect" }, "call-2");
 
     expect(firstResult.terminate).toBe(true);
     expect(bridge.telemetry.didSendViaMessagingTool).toBe(true);

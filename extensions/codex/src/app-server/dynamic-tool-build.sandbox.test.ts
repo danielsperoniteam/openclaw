@@ -8,12 +8,7 @@ import {
   initializeGlobalHookRunner,
   resetGlobalHookRunner,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
-import {
-  clearRuntimeConfigSnapshot,
-  setRuntimeConfigSnapshot,
-} from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { createRemoteShellSandboxFsBridge } from "openclaw/plugin-sdk/sandbox";
-import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { createSandboxTestContext } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { shouldEnableCodexAppServerNativeToolSurface } from "./dynamic-tool-build.js";
@@ -27,33 +22,20 @@ const {
   createCodexRuntimePlanFixture,
   createParams,
   createRuntimeDynamicTool,
-  hoisted,
+  setupDynamicToolBuildFixture,
+  cleanupDynamicToolBuildFixture,
 } = await import("./dynamic-tool-build.test-support.js");
 
 describe("Codex app-server sandbox shell tools", () => {
-  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
   const hostCapabilityClosers: Array<() => void> = [];
   let tempDir: string;
 
-  beforeEach(() => {
-    setRuntimeConfigSnapshot({});
-    hoisted.loadNodeExecAvailability.mockResolvedValue({
-      cacheKey: "eligible",
-      isAvailable: () => true,
-    });
-    hoisted.normalizeAgentRuntimeTools.mockClear();
-    hoisted.resolveWebSearchToolPolicy.mockClear();
-    tempDir = tempDirs.make("openclaw-codex-sandbox-tools-");
+  beforeEach(async () => {
+    tempDir = await setupDynamicToolBuildFixture();
   });
-
-  afterEach(() => {
-    for (const close of hostCapabilityClosers.splice(0)) {
-      close();
-    }
+  afterEach(async () => {
     resetGlobalHookRunner();
-    clearRuntimeConfigSnapshot();
-    vi.restoreAllMocks();
-    vi.unstubAllEnvs();
+    await cleanupDynamicToolBuildFixture(tempDir, hostCapabilityClosers);
   });
 
   function createShellParams() {

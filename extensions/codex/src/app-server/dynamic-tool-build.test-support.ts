@@ -106,14 +106,9 @@ export async function buildDynamicToolsForTest(
           sessionPermissionPolicy: {
             mode: params.permissionMode,
             root: params.sessionRoot,
-            execMode:
-              params.permissionMode === "read-only"
-                ? "deny"
-                : params.permissionMode === "guarded"
-                  ? "ask"
-                  : params.permissionMode === "workspace"
-                    ? "auto"
-                    : "full",
+            execMode: (
+              { "read-only": "deny", guarded: "ask", workspace: "auto", full: "full" } as const
+            )[params.permissionMode],
           },
         }
       : {}),
