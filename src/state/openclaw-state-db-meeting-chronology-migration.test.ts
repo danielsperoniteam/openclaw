@@ -14,41 +14,45 @@ import { runSqliteImmediateTransactionSync } from "../infra/sqlite-transaction.j
 import { createOpenClawDatabaseMaintenanceScope } from "./openclaw-state-db-async-lifecycle.js";
 import {
   MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION,
-  OPENCLAW_STATE_SCHEMA_VERSION,
+  OPENCLAW_STATE_SCHEMA_VERSION as SCHEMA_VERSION,
 } from "./openclaw-state-db-contract.js";
 import { migrateMeetingTranscriptStartTime } from "./openclaw-state-db-meeting-chronology-migration.js";
 import { withLegacyStateHeadLayout } from "./openclaw-state-db-schema-v26-layout.js";
 import { withLegacyStateWriteIndexes } from "./openclaw-state-db-schema-v27-indexes.js";
-import { readStateSchemaContentVersion } from "./openclaw-state-db-schema-version.js";
+import { readStateSchemaContentVersion as readVersion } from "./openclaw-state-db-schema-version.js";
 import {
-  closeOpenClawStateDatabaseAsync,
-  openOpenClawStateDatabase,
-  repairOpenClawStateDatabaseSchema,
+  closeOpenClawStateDatabaseAsync as closeStateAsync,
+  openOpenClawStateDatabase as openState,
+  repairOpenClawStateDatabaseSchema as repairSchema,
 } from "./openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
-import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
+import { OPENCLAW_STATE_SCHEMA_SQL as SCHEMA_SQL } from "./openclaw-state-schema.js";
 import { resolveSchemaMigrationBackupTables } from "./schema-migration-backup-scope.js";
 import { assertSqliteMigrationScopePreserved } from "./sqlite-migration-scope.test-support.js";
 
+// Local-date migration uses the process calendar; worker TZ mutations do not change V8's zone.
 const retainedStarts = [
-  { session_id: "iso", started_at: "2026-01-01T00:00:00Z", started_at_ms: 1767225600000 },
-  { session_id: "offset", started_at: "2026-01-01T02:00:00+02:00", started_at_ms: 1767225600000 },
-  {
-    session_id: "local",
-    started_at: "2026-01-01T00:00:00",
-    // Worker-thread TZ mutation does not change V8's zone; use the migrating process's calendar.
-    started_at_ms: new Date(2026, 0, 1).getTime(),
-  },
-  { session_id: "garbage", started_at: "not a date", started_at_ms: null },
-];
+  ["iso", "2026-01-01T00:00:00Z", 1767225600000],
+  ["offset", "2026-01-01T02:00:00+02:00", 1767225600000],
+  ["local", "2026-01-01T00:00:00", new Date(2026, 0, 1).getTime()],
+  ["garbage", "not a date", null],
+] as const;
 const readStarts = `SELECT session_id, started_at, started_at_ms
   FROM meeting_transcript_sessions ORDER BY session_id`;
 const readSessions = "SELECT * FROM meeting_transcript_sessions ORDER BY session_id";
-const expectedStarts = retainedStarts.toSorted((a, b) => a.session_id.localeCompare(b.session_id));
+const expectedStarts = retainedStarts
+  .map(([session_id, started_at, started_at_ms]) => ({ session_id, started_at, started_at_ms }))
+  .toSorted((a, b) => a.session_id.localeCompare(b.session_id));
+const backupTables = ["config_machine_state", "meeting_transcript_sessions", "schema_meta"];
+const chronologyMigration = {
+  kind: "state" as const,
+  foundVersion: MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION - 1,
+  supportedVersion: MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION,
+};
 
 function expectVersion(db: EngineConnection, version: number) {
   expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(version);
-  expect(readStateSchemaContentVersion(db)).toBe(version);
+  expect(readVersion(db)).toBe(version);
 }
 
 async function withMaintenance(
@@ -68,7 +72,7 @@ async function withMaintenance(
 describe("meeting transcript chronology migration", () => {
   const directories = useAutoCleanupTempDirTracker((cleanup) => {
     afterAll(async () => {
-      await closeOpenClawStateDatabaseAsync();
+      await closeStateAsync();
       cleanup();
     });
   });
@@ -86,7 +90,7 @@ describe("meeting transcript chronology migration", () => {
     const previousVersion = MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION - 1;
     template = path.join(directories.make("meeting-chronology-template-"), "openclaw.sqlite");
     using db = new DatabaseSync(template);
-    db.exec(withLegacyStateWriteIndexes(withLegacyStateHeadLayout(OPENCLAW_STATE_SCHEMA_SQL)));
+    db.exec(withLegacyStateWriteIndexes(withLegacyStateHeadLayout(SCHEMA_SQL)));
     db.exec(`DROP INDEX idx_meeting_transcript_sessions_chronology;
       ALTER TABLE meeting_transcript_sessions DROP COLUMN started_at_ms;
       DROP TABLE secret_store_entries;
@@ -100,8 +104,8 @@ describe("meeting transcript chronology migration", () => {
       (session_id, started_at, selector, export_key, session_slug, provider_id,
        source_json, metadata_json, created_at_ms, updated_at_ms)
       VALUES (?, ?, ?, ?, ?, 'synthetic', '{"accountId":"retained"}', '{"agentId":"main"}', 1, 1)`);
-    for (const row of retainedStarts) {
-      insert.run(row.session_id, row.started_at, row.session_id, row.session_id, row.session_id);
+    for (const [id, startedAt] of retainedStarts) {
+      insert.run(id, startedAt, id, id, id);
     }
     db.exec(`INSERT INTO meeting_transcript_utterances
         (session_id, session_started_at, sequence, text)
@@ -117,9 +121,7 @@ describe("meeting transcript chronology migration", () => {
     expect(db.prepare("SELECT 1 FROM sqlite_stat1 LIMIT 1").get()).toBeDefined();
   });
 
-  afterEach(async () => {
-    await closeOpenClawStateDatabaseAsync();
-  });
+  afterEach(closeStateAsync);
 
   it("keeps Doctor on a full backup when a later version has no declared scope", async () => {
     const { env, pathname } = fixture("doctor-full");
@@ -128,12 +130,7 @@ describe("meeting transcript chronology migration", () => {
     const originalSessions = database.prepare(readSessions).all();
     const schemaQuery = "SELECT type, name, sql FROM sqlite_schema ORDER BY type, name";
     const originalSchema = database.prepare(schemaQuery).all();
-    const migration = {
-      kind: "state" as const,
-      path: pathname,
-      foundVersion: MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION - 1,
-      supportedVersion: OPENCLAW_STATE_SCHEMA_VERSION,
-    };
+    const migration = { ...chronologyMigration, path: pathname, supportedVersion: SCHEMA_VERSION };
     expect(resolveSchemaMigrationBackupTables(migration)).toBeUndefined();
     await withMaintenance(() =>
       assertSqliteMigrationScopePreserved(database, [], async () => {
@@ -169,13 +166,8 @@ describe("meeting transcript chronology migration", () => {
     // Version migration must leave same-version repair to its later Doctor owner.
     database.exec("DROP INDEX idx_acp_replay_sessions_updated;");
     const originalSessions = database.prepare(readSessions).all();
-    const migration = {
-      kind: "state" as const,
-      path: pathname,
-      foundVersion: MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION - 1,
-      supportedVersion: MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION,
-    };
-    const tables = ["config_machine_state", "meeting_transcript_sessions", "schema_meta"];
+    const migration = { ...chronologyMigration, path: pathname };
+    const tables = backupTables;
     expect(resolveSchemaMigrationBackupTables(migration)).toEqual(tables);
     await withMaintenance((maintenance) =>
       assertSqliteMigrationScopePreserved(database, tables, async () => {
@@ -235,14 +227,7 @@ describe("meeting transcript chronology migration", () => {
       const options = { env, path: pathname };
       using scope = new DatabaseSync(pathname, { readOnly: true });
       const originalSessions = scope.prepare(readSessions).all();
-      const backupTables = ["config_machine_state", "meeting_transcript_sessions", "schema_meta"];
-      expect(
-        resolveSchemaMigrationBackupTables({
-          kind: "state",
-          foundVersion: MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION - 1,
-          supportedVersion: MEETING_TRANSCRIPT_START_TIME_SCHEMA_VERSION,
-        }),
-      ).toEqual(backupTables);
+      expect(resolveSchemaMigrationBackupTables(chronologyMigration)).toEqual(backupTables);
       const migrationTables = [
         ...backupTables,
         "acp_replay_events",
@@ -254,9 +239,9 @@ describe("meeting transcript chronology migration", () => {
       ];
       const { db } = await assertSqliteMigrationScopePreserved(scope, migrationTables, () => {
         if (owner === "doctor") {
-          expect(repairOpenClawStateDatabaseSchema(options).warnings).toEqual([]);
+          expect(repairSchema(options).warnings).toEqual([]);
         }
-        return openOpenClawStateDatabase(options);
+        return openState(options);
       });
       expect(db.prepare(readStarts).all()).toEqual(expectedStarts);
       expect(
@@ -265,13 +250,13 @@ describe("meeting transcript chronology migration", () => {
           .all()
           .map(({ started_at_ms: _startedAtMs, ...row }) => row),
       ).toEqual(originalSessions);
-      expectVersion(db, OPENCLAW_STATE_SCHEMA_VERSION);
+      expectVersion(db, SCHEMA_VERSION);
       expect(
         db.prepare("SELECT schema_version FROM schema_meta WHERE meta_key = 'primary'").get(),
-      ).toEqual({ schema_version: OPENCLAW_STATE_SCHEMA_VERSION });
+      ).toEqual({ schema_version: SCHEMA_VERSION });
 
-      await closeOpenClawStateDatabaseAsync();
-      const reopened = openOpenClawStateDatabase(options);
+      await closeStateAsync();
+      const reopened = openState(options);
       expect(reopened.db.prepare(readStarts).all()).toEqual(expectedStarts);
     },
   );

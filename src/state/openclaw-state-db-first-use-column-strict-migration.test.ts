@@ -2,18 +2,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import { observeSqliteReadSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
-import { CLAW_FIRST_USE_ADDITIVE_STATE_COLUMN_DEFINITIONS } from "./openclaw-state-db-additive-columns.js";
-import { OPENCLAW_STATE_SCHEMA_VERSION } from "./openclaw-state-db-contract.js";
+import { CLAW_FIRST_USE_ADDITIVE_STATE_COLUMN_DEFINITIONS as FIRST_USE_COLUMNS } from "./openclaw-state-db-additive-columns.js";
+import { OPENCLAW_STATE_SCHEMA_VERSION as SCHEMA_VERSION } from "./openclaw-state-db-contract.js";
 import {
-  closeOpenClawStateDatabaseForTest,
-  openOpenClawStateDatabase,
-  repairOpenClawStateDatabaseSchema,
+  closeOpenClawStateDatabaseForTest as closeState,
+  openOpenClawStateDatabase as openState,
+  repairOpenClawStateDatabaseSchema as repairSchema,
 } from "./openclaw-state-db.js";
-import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
+import { OPENCLAW_STATE_SCHEMA_SQL as SCHEMA_SQL } from "./openclaw-state-schema.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
-afterEach(closeOpenClawStateDatabaseForTest);
+afterEach(closeState);
 
 // Rebuild a pre-STRICT table missing first-use columns, at schema version 2.
 function makePreStrictDatabaseWithoutColumns(params: {
@@ -22,10 +22,10 @@ function makePreStrictDatabaseWithoutColumns(params: {
   indexNames: readonly string[];
   columnNames: readonly string[];
   seed?: (database: InstanceType<ReturnType<typeof requireNodeSqlite>["DatabaseSync"]>) => void;
-}): string {
+}) {
   const options = { env: { OPENCLAW_STATE_DIR: params.stateDir } };
-  const databasePath = openOpenClawStateDatabase(options).path;
-  closeOpenClawStateDatabaseForTest();
+  const databasePath = openState(options).path;
+  closeState();
 
   const { DatabaseSync } = requireNodeSqlite();
   using legacy = new DatabaseSync(databasePath);
@@ -62,38 +62,30 @@ function makePreStrictDatabaseWithoutColumns(params: {
     UPDATE schema_meta SET schema_version = 2 WHERE meta_key = 'primary';
   `);
   params.seed?.(legacy);
-  return databasePath;
 }
 
-describe("first-use additive column definitions", () => {
-  // Existing rows require bare nullable columns: constraints/defaults could rewrite or reject them.
-  it.each(CLAW_FIRST_USE_ADDITIVE_STATE_COLUMN_DEFINITIONS)(
-    "keeps $tableName.$columnName bare and nullable in the canonical schema",
-    ({ columnName, dataType, tableName }) => {
-      const tableStart = OPENCLAW_STATE_SCHEMA_SQL.indexOf(
-        `CREATE TABLE IF NOT EXISTS ${tableName} (`,
-      );
-      expect(tableStart).toBeGreaterThanOrEqual(0);
-      const tableBody = OPENCLAW_STATE_SCHEMA_SQL.slice(
-        tableStart,
-        OPENCLAW_STATE_SCHEMA_SQL.indexOf(") STRICT;", tableStart),
-      );
-      const declaration = tableBody
-        .split("\n")
-        .find((line) => new RegExp(`^\\s*${columnName}\\s`, "u").test(line))
-        ?.trim()
-        .replace(/,$/u, "");
-      expect(declaration).toBe(`${columnName} ${dataType}`);
-    },
-  );
-});
+// Existing rows require bare nullable columns: constraints/defaults could rewrite or reject them.
+it.each(FIRST_USE_COLUMNS)(
+  "keeps $tableName.$columnName bare and nullable in the canonical schema",
+  ({ columnName, dataType, tableName }) => {
+    const tableStart = SCHEMA_SQL.indexOf(`CREATE TABLE IF NOT EXISTS ${tableName} (`);
+    expect(tableStart).toBeGreaterThanOrEqual(0);
+    const tableBody = SCHEMA_SQL.slice(tableStart, SCHEMA_SQL.indexOf(") STRICT;", tableStart));
+    const declaration = tableBody
+      .split("\n")
+      .find((line) => new RegExp(`^\\s*${columnName}\\s`, "u").test(line))
+      ?.trim()
+      .replace(/,$/u, "");
+    expect(declaration).toBe(`${columnName} ${dataType}`);
+  },
+);
 
 describe("first-use additive column STRICT migration", () => {
   it("opens fresh STRICT tables without legacy rebuild inspection and preserves later writes", () => {
     const options = { env: { OPENCLAW_STATE_DIR: tempDirs.make("openclaw-state-fresh-strict-") } };
     const reads = observeSqliteReadSql(requireNodeSqlite().StatementSync.prototype);
     try {
-      const { db } = openOpenClawStateDatabase(options);
+      const { db } = openState(options);
       // Rebuild planning inspects every canonical column twice, even with no legacy rows.
       expect(reads.queries.filter((sql) => /^PRAGMA table_xinfo\b/iu.test(sql))).toEqual([]);
       expect(
@@ -111,8 +103,8 @@ describe("first-use additive column STRICT migration", () => {
       db.prepare(
         "UPDATE config_machine_state SET value_json = ?, updated_at_ms = ? WHERE state_key = ?",
       ).run("2", 2, "bootstrap-proof");
-      closeOpenClawStateDatabaseForTest();
-      const reopened = openOpenClawStateDatabase(options);
+      closeState();
+      const reopened = openState(options);
       expect(
         reopened.db
           .prepare("SELECT value_json, updated_at_ms FROM config_machine_state WHERE state_key = ?")
@@ -152,12 +144,10 @@ describe("first-use additive column STRICT migration", () => {
     });
     // Regression: STRICT rebuild rolled back and reported an unrelated audit migration.
     if (doctor) {
-      expect(repairOpenClawStateDatabaseSchema(options).warnings).toEqual([]);
+      expect(repairSchema(options).warnings).toEqual([]);
     }
-    const { db } = openOpenClawStateDatabase(options);
-    expect(db.prepare("PRAGMA user_version").get()).toEqual({
-      user_version: OPENCLAW_STATE_SCHEMA_VERSION,
-    });
+    const { db } = openState(options);
+    expect(db.prepare("PRAGMA user_version").get()).toEqual({ user_version: SCHEMA_VERSION });
     expect(
       db.prepare("SELECT strict FROM pragma_table_list WHERE name = ?").get(tableName),
     ).toEqual({ strict: 1 });
