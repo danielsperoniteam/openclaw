@@ -12,7 +12,6 @@ import { resolveChatCommentAnchor } from "./chat-comment-anchor.ts";
 import type { ChatCommentAction } from "./chat-selection-annotations.tsx";
 import { createChatSelectionAttachment } from "./chat-selection-attachment.ts";
 import { showChatAnnotationEditor } from "./chat-selection-popup.ts";
-import { getTranscriptState } from "./chat-thread-interactions.ts";
 
 type CommentAttachment = ChatAttachment & { selectionAnnotation: ChatSelectionAnnotation };
 
@@ -32,6 +31,7 @@ type ChatCommentControllerProps = {
   paneId: string;
   presented: boolean;
   onFocusComposer?: () => void;
+  visiblePin?: (id: string) => HTMLElement | undefined;
 };
 
 /** Owns comment mutations even when plugins or history errors replace the transcript. */
@@ -81,7 +81,7 @@ export const ChatCommentController = defineSolidBridge<ChatCommentControllerProp
     }
 
     function visiblePin(id: string) {
-      return getTranscriptState(view.paneId).commentPins?.visiblePin(id);
+      return view.visiblePin?.(id);
     }
 
     const handleCommentAction = (event: Event) => {
@@ -292,6 +292,7 @@ export const ChatCommentController = defineSolidBridge<ChatCommentControllerProp
       paneId: { default: "" },
       presented: { default: true, type: Boolean },
       onFocusComposer: { default: undefined, attribute: false },
+      visiblePin: { default: undefined, attribute: false },
     },
   },
 );

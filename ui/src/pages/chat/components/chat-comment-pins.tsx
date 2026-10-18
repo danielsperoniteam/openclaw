@@ -8,13 +8,12 @@ import { defineSolidBridge } from "../../../lib/solid-bridge.ts";
 import { chatCommentLineEnd, resolveChatCommentAnchor } from "./chat-comment-anchor.ts";
 import { currentChatComments } from "./chat-comment-controller.ts";
 import { dispatchChatCommentAction } from "./chat-selection-annotations.tsx";
-import type { ChatThreadState } from "./chat-thread-interactions.ts";
 import "../../../styles/chat/selection-annotations.css";
 
 registerChatMessageMetadataEnglish();
 
 type ChatCommentPinsProps = {
-  threadState?: Pick<ChatThreadState, "commentPins">;
+  threadState?: { commentPins?: ChatCommentPinsHandle };
   attachments: readonly ChatAttachment[];
   sessionKey: string;
   disabled: boolean;

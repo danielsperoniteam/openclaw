@@ -10,10 +10,10 @@ export function createScrollStateRef(
     content?: () => unknown;
   } = {},
 ) {
-  const [element, setElement] = createSignal<HTMLElement>();
+  const [currentElement, setElement] = createSignal<HTMLElement>();
   const target = createMemo(
     () => ({
-      element: element(),
+      element: currentElement(),
       presented: options.presented?.() ?? true,
       content: options.content?.(),
     }),

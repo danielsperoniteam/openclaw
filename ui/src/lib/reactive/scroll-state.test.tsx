@@ -76,7 +76,7 @@ it("moves observation to the rendered replacement and ignores the old pending la
     );
   });
   cleanup.push(view.unmount);
-  const first = view.getByRole<HTMLElement>("region", { name: "Scroll content" });
+  const first = view.getByRole("region", { name: "Scroll content" });
   const firstGeometry = geometry(first);
   flush();
   vi.advanceTimersToNextFrame();
@@ -87,7 +87,7 @@ it("moves observation to the rendered replacement and ignores the old pending la
   first.dispatchEvent(new Event("scroll"));
   setIdentity(1);
   flush();
-  const second = view.getByRole<HTMLElement>("region", { name: "Scroll content" });
+  const second = view.getByRole("region", { name: "Scroll content" });
   geometry(second).extent = 100;
   // A queued browser notification can arrive after unobserve and element replacement.
   oldObserver.deliver(first);

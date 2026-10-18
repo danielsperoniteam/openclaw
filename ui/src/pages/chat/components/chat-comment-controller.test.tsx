@@ -103,6 +103,44 @@ async function mountComments(additional: ChatAttachment[] = []) {
 }
 
 describe("comment actions outside the transcript", () => {
+  it("focuses the composer after deleting the last comment when the transcript is detached", async () => {
+    const container = createComposerContainer();
+    document.body.append(container);
+    const onAttachmentsChange = vi.fn();
+    renderChatPropsInto(
+      container,
+      createChatProps({
+        attachments: [
+          {
+            id: "detached-transcript-comment",
+            mimeType: "text/plain",
+            selectionAnnotation: {
+              text: "Selected passage",
+              comment: "Original comment",
+              sessionKey: "main",
+              start: 0,
+              end: 16,
+            },
+          },
+        ],
+        onAttachmentsChange,
+      }),
+    );
+    const controller = container.querySelector<CommentControllerElement>(
+      "openclaw-chat-comment-controller",
+    )!;
+    await controller.updateComplete;
+    flush();
+    const textarea = container.querySelector<HTMLTextAreaElement>(
+      ".agent-chat__composer-combobox > textarea",
+    )!;
+    const focus = vi.spyOn(textarea, "focus");
+    container.querySelector(".chat-thread")!.remove();
+    container.querySelector<HTMLButtonElement>('button[aria-label="Delete comment"]')!.click();
+    expect(onAttachmentsChange).toHaveBeenCalledWith([]);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+  });
+
   it("anchors preview edit actions to their owned trigger", async () => {
     const fixture = await mountComments();
     const trigger = fixture.composer.querySelector<HTMLButtonElement>(
