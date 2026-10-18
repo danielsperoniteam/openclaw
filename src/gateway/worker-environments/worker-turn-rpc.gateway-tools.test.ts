@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
@@ -8,6 +9,9 @@ import type { AnyAgentTool } from "../../agents/tools/common.js";
 import { getWorkerTurnToolSurface } from "./placement-turn-claim-events.js";
 import * as support from "./service.test-support.js";
 import { createWorkerGatewayToolRuntime } from "./worker-gateway-tool-runtime.js";
+
+const toolSuccess = { ok: true, result: { details: { ok: true } } };
+const toolError = { ok: true, result: { details: { status: "error" } } };
 
 async function toolHarness(name: string, codeMode = false) {
   const fixture = await support.placementHarness(`worker-${name}`, `session-${name}`);
@@ -57,9 +61,7 @@ async function toolHarness(name: string, codeMode = false) {
   });
   fixture.bindToolSurface(runtime);
   const surface = await fixture.workerService.getToolSurface(fixture.identity);
-  if (!surface.ok) {
-    throw new Error("Expected an admitted tool surface");
-  }
+  assert(surface.ok === true, "Expected an admitted tool surface");
   const request = {
     generation: surface.result.generation,
     toolId: surface.result.tools[0]!.id,
@@ -68,16 +70,37 @@ async function toolHarness(name: string, codeMode = false) {
   };
   const invoke = (input = request) =>
     fixture.workerService.invokeGatewayTool(fixture.identity, input, { send: vi.fn() });
+  const cancel = () =>
+    fixture.workerService.cancelGatewayTool(fixture.identity, {
+      generation: request.generation,
+      toolCallId: request.toolCallId,
+    });
   return {
     ...fixture,
     execute,
     request,
     invoke,
+    cancel,
     surface: surface.result,
   };
 }
 
-describe("worker Gateway tool RPC authority", () => {
+function bindHeartbeat(
+  h: Awaited<ReturnType<typeof support.placementHarness>>,
+  refresh: Parameters<typeof h.bindGitHubGrant>[0]["refresh"],
+  revoke = vi.fn(async () => {}),
+) {
+  h.bindGitHubGrant({
+    binding: { token: "synthetic-initial", login: "fixture", branch: "fixture" },
+    signal: new AbortController().signal,
+    assertCurrent() {},
+    refresh,
+    revoke,
+  });
+  return revoke;
+}
+
+describe("worker tool and heartbeat authority", () => {
   support.setupWorkerEnvironmentServiceSuite();
 
   it("admits the worker's code-mode schemas while rejecting raw or altered schemas", async () => {
@@ -96,6 +119,16 @@ describe("worker Gateway tool RPC authority", () => {
         .tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
       expect(projected.map((tool) => tool.name)).toEqual(["exec", "wait"]);
       const request = support.inferenceRequest(h.identity);
+      const infer = (
+        tools: typeof projected,
+        connectionId: string,
+        send: Parameters<typeof h.workerService.startInference>[2]["send"] = vi.fn(),
+      ) =>
+        h.workerService.startInference(
+          h.identity,
+          { ...request, context: { ...request.context, tools } },
+          { connectionId, send },
+        );
       for (const tools of [
         h.surface.tools.map(({ definition: { name, description, parameters } }) => ({
           name,
@@ -104,38 +137,23 @@ describe("worker Gateway tool RPC authority", () => {
         })),
         projected.map((tool) => ({ ...tool, description: "unadmitted description" })),
       ]) {
-        await expect(
-          h.workerService.startInference(
-            h.identity,
-            {
-              ...request,
-              context: { ...request.context, tools },
-            },
-            { connectionId: "schema-mismatch", send: vi.fn() },
-          ),
-        ).resolves.toEqual({ ok: false, reason: "invalid-context" });
+        await expect(infer(tools, "schema-mismatch")).resolves.toEqual({
+          ok: false,
+          reason: "invalid-context",
+        });
       }
       const finished = createDeferred();
-      const started = await h.workerService.startInference(
-        h.identity,
-        {
-          ...request,
-          context: { ...request.context, tools: projected },
-        },
-        { connectionId: "projected-tools", send: () => finished.resolve() },
+      const started = await infer(
+        projected,
+        "projected-tools",
+        vi.fn(() => finished.resolve()),
       );
-      expect(started.ok).toBe(true);
-      if (!started.ok) {
-        throw new Error("Projected worker tools were not admitted");
-      }
+      assert(started.ok === true, "Projected worker tools were not admitted");
       await h.workerService.cancelInference(h.identity, request);
       started.launch();
       await finished.promise;
       expect(h.execute).not.toHaveBeenCalled();
-      await expect(h.invoke()).resolves.toMatchObject({
-        ok: true,
-        result: { details: { ok: true } },
-      });
+      await expect(h.invoke()).resolves.toMatchObject(toolSuccess);
     } finally {
       worker.cleanup();
     }
@@ -148,16 +166,10 @@ describe("worker Gateway tool RPC authority", () => {
       { ...h.request, toolId: "unissued" },
       { ...h.request, arguments: { action: "delete", port: 3000 } },
     ]) {
-      await expect(h.invoke(request)).resolves.toMatchObject({
-        ok: true,
-        result: { details: { status: "error" } },
-      });
+      await expect(h.invoke(request)).resolves.toMatchObject(toolError);
     }
     expect(h.execute).not.toHaveBeenCalled();
-    await expect(h.invoke()).resolves.toMatchObject({
-      ok: true,
-      result: { details: { ok: true } },
-    });
+    await expect(h.invoke()).resolves.toMatchObject(toolSuccess);
     expect(h.execute).toHaveBeenCalledOnce();
     h.placementStore.validateWorkerTurn.mockReturnValue(false);
     await expect(h.invoke()).resolves.toEqual({ ok: false, closeReason: "placement-mismatch" });
@@ -166,13 +178,7 @@ describe("worker Gateway tool RPC authority", () => {
 
   it("cancels an issued invocation before its first yield without starting the tool", async () => {
     const h = await toolHarness("cancel-before-yield");
-    const [invoked, cancelled] = await Promise.all([
-      h.invoke(),
-      h.workerService.cancelGatewayTool(h.identity, {
-        generation: h.request.generation,
-        toolCallId: h.request.toolCallId,
-      }),
-    ]);
+    const [invoked, cancelled] = await Promise.all([h.invoke(), h.cancel()]);
     expect(cancelled).toEqual({ ok: true, result: { cancelled: true } });
     expect(invoked).toMatchObject({
       ok: true,
@@ -202,35 +208,18 @@ describe("worker Gateway tool RPC authority", () => {
         await expect(h.workerService.getToolSurface(h.identity)).resolves.toMatchObject({
           ok: false,
         });
-        await expect(
-          h.workerService.cancelGatewayTool(h.identity, {
-            generation: h.request.generation,
-            toolCallId: h.request.toolCallId,
-          }),
-        ).resolves.toMatchObject({ ok: false });
+        await expect(h.cancel()).resolves.toMatchObject({ ok: false });
       }
     },
   );
-});
-
-describe("worker GitHub heartbeat authority", () => {
-  support.setupWorkerEnvironmentServiceSuite();
-
   it("fences a credential prepared before its retained caller closes", async () => {
     const h = await support.placementHarness("github-refresh", "github-refresh-session");
     const entered = createDeferred();
     const release = createDeferred();
-    const revoke = vi.fn(async () => {});
-    h.bindGitHubGrant({
-      binding: { token: "synthetic-initial", login: "fixture", branch: "fixture" },
-      signal: new AbortController().signal,
-      assertCurrent() {},
-      revoke,
-      refresh: async () => {
-        entered.resolve();
-        await release.promise;
-        return { generation: 1, token: "synthetic-replacement" };
-      },
+    const revoke = bindHeartbeat(h, async () => {
+      entered.resolve();
+      await release.promise;
+      return { generation: 1, token: "synthetic-replacement" };
     });
     const pending = h.workerService.refreshGitHubBinding(h.identity, 0);
     await entered.promise;
@@ -245,18 +234,9 @@ describe("worker GitHub heartbeat authority", () => {
       liveEvents: support.sequencedLiveEvents().liveEvents,
     });
     const refresh = vi.fn(async () => ({ generation: 1, token: "synthetic-replacement" }));
-    h.bindGitHubGrant({
-      binding: { token: "synthetic-initial", login: "fixture", branch: "fixture" },
-      signal: new AbortController().signal,
-      assertCurrent() {},
-      revoke: async () => {},
-      refresh,
-    });
+    bindHeartbeat(h, refresh);
     const prepared = await h.workerService.refreshGitHubBinding(h.identity, 0);
-    expect(prepared.ok).toBe(true);
-    if (!prepared.ok) {
-      throw new Error("Expected admitted heartbeat");
-    }
+    assert(prepared.ok === true, "Expected admitted heartbeat");
     expect(prepared.result?.token).toBe("synthetic-replacement");
     await h.workerService.pushLiveEvent(h.identity, support.terminalEvent(h.identity));
     expect(prepared.result).toBeUndefined();

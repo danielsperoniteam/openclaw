@@ -1,3 +1,4 @@
+import { expectDefined } from "@openclaw/normalization-core/expect";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkerLiveEventParams } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
@@ -38,16 +39,13 @@ import {
   attachedEnvironment,
   cleanupWorkerTurnLauncherTest,
   createWorkerSessionTurnPlacementProvider,
-  credential,
-  measureLaunchTurn,
-  readLaunchToolNames,
+  createWorkerTurnTunnel,
   placements,
   seedActivePlacement,
   sessionTarget,
   setupWorkerTurnLauncherTest,
   turn,
-  unusedEnvironments,
-  type WorkerTurnEnvironmentService,
+  workerTurnEnvironments,
 } from "./worker-turn-launcher.test-support.js";
 
 afterAll(closeStateDatabaseForTest);
@@ -71,15 +69,13 @@ function claimInput(runId: string) {
   };
 }
 
+type OwnerOptions = Parameters<
+  typeof import("./worker-turn-run-owner.js").createWorkerTurnRunOwner
+>[0];
 async function makeOwner(
   claim: WorkerSessionTurnClaim,
   operation: ReturnType<typeof createReplyOperation>,
-  options: Partial<
-    Pick<
-      Parameters<typeof import("./worker-turn-run-owner.js").createWorkerTurnRunOwner>[0],
-      "turn" | "assertCurrent"
-    >
-  > = {},
+  options: Partial<Pick<OwnerOptions, "turn" | "assertCurrent">> = {},
 ) {
   const { createWorkerTurnRunOwner } = await import("./worker-turn-run-owner.js");
   return createWorkerTurnRunOwner({
@@ -109,21 +105,12 @@ describe("cloud worker run ownership", () => {
       const launched = createDeferred();
       const finishLaunch = createDeferred();
       let workerSignal: AbortSignal | undefined;
-      const environments: WorkerTurnEnvironmentService = {
-        ...unusedEnvironments(),
-        get: () => attachedEnvironment(),
-        acquireTurnCredential: async () => credential(),
-        acknowledgeCredentialDelivery: async () => true,
-        startTunnel: async () => ({
-          environmentId: ENVIRONMENT_ID,
-          ownerEpoch: OWNER_EPOCH,
-          runWorkspaceCommand: vi.fn(),
+      const environments = workerTurnEnvironments(
+        createWorkerTurnTunnel({
           quiesceWorkspace: vi.fn(),
           syncWorkspace: vi.fn(),
           reconcileWorkspace: vi.fn(),
           stop: vi.fn(),
-          measureLaunchTurn,
-          readLaunchToolNames,
           launchTurn: async (request) => {
             request.onDispatchReady?.();
             workerSignal = request.signal;
@@ -141,9 +128,12 @@ describe("cloud worker run ownership", () => {
             throw new Error("worker turn cancelled");
           },
         }),
-        stopTunnel: vi.fn(),
-        destroy: vi.fn(async () => attachedEnvironment()),
-      };
+        {
+          acknowledgeCredentialDelivery: async () => true,
+          stopTunnel: vi.fn(),
+          destroy: vi.fn(async () => attachedEnvironment()),
+        },
+      );
       const provider = createWorkerSessionTurnPlacementProvider({ environments, placements });
       const operation = replyOperation({
         target: captureSessionTarget({
@@ -184,18 +174,15 @@ describe("cloud worker run ownership", () => {
         .catch((error: unknown) => error)
         .finally(() => operation.complete());
       await launched.promise;
-      const active = placements.get(SESSION_ID);
-      if (!active) {
-        throw new Error("expected active placement");
-      }
-      const turnClaim = projectWorkerSessionTurnClaim(active);
-      if (!turnClaim) {
-        throw new Error("expected admitted worker turn");
-      }
-      const turnCapability = getWorkerTurnExecutionIdentityCapability(placements, turnClaim);
-      if (!turnCapability) {
-        throw new Error("expected worker turn capability");
-      }
+      const active = expectDefined(placements.get(SESSION_ID), "expected active placement");
+      const turnClaim = expectDefined(
+        projectWorkerSessionTurnClaim(active),
+        "expected admitted worker turn",
+      );
+      const turnCapability = expectDefined(
+        getWorkerTurnExecutionIdentityCapability(placements, turnClaim),
+        "expected worker turn capability",
+      );
       const identity: WorkerConnectionIdentity = {
         environmentId: ENVIRONMENT_ID,
         ownerEpoch: OWNER_EPOCH,
@@ -209,12 +196,12 @@ describe("cloud worker run ownership", () => {
         credentialExpiresAtMs: Date.now() + input.timeoutMs,
       };
       const receiver = createWorkerLiveEventReceiver();
-      const receive = (request: WorkerLiveEventParams, sender = identity) =>
+      const receive = (event: WorkerLiveEventParams["event"], seq: number, sender = identity) =>
         receiver.apply({
           readAckedSeq: () => 0,
           source: turnCapability,
           identity: sender,
-          request,
+          request: { runEpoch: OWNER_EPOCH, lastAckedSeq: seq - 1, seq, runId, event },
         });
       now = turnStartedAtMs + firstToolDelayMs;
       const previousDiagnostics = areDiagnosticsEnabledForProcess();
@@ -229,12 +216,8 @@ describe("cloud worker run ownership", () => {
           collideSessionId();
         }
         expect(
-          await receive({
-            runEpoch: OWNER_EPOCH,
-            lastAckedSeq: 0,
-            seq: 1,
-            runId,
-            event: {
+          await receive(
+            {
               kind: "tool",
               payload: {
                 phase: "start",
@@ -243,7 +226,8 @@ describe("cloud worker run ownership", () => {
                 args: {},
               },
             },
-          }),
+            1,
+          ),
         ).toEqual({ ok: true, result: { ackedSeq: 1 } });
         now = turnStartedAtMs + 20 * 60_000 + 1;
 
@@ -268,37 +252,27 @@ describe("cloud worker run ownership", () => {
           expect(placements.validateTurnClaim(turnClaim)).toBe(true);
           await expect(turnCapability.run(async () => "late effect")).rejects.toThrow();
           const finishing = {
-            runEpoch: OWNER_EPOCH,
-            lastAckedSeq: 1,
-            seq: 2,
-            runId,
-            event: {
-              kind: "lifecycle" as const,
-              payload: { phase: "finishing" as const, aborted: true, endedAt: now },
-            },
+            kind: "lifecycle" as const,
+            payload: { phase: "finishing" as const, aborted: true, endedAt: now },
           };
           const lateEvent = vi.fn();
           const unsubscribe = onAgentEventForRun(runId, lateEvent);
           try {
             expect(
-              await receive(finishing, {
+              await receive(finishing, 2, {
                 ...identity,
                 turnClaim: { ...turnClaim, claimId: "foreign-claim" },
               }),
             ).toEqual({ ok: false, details: { reason: "invalid-event" } });
-            expect(await receive(finishing)).toEqual({ ok: true, result: { ackedSeq: 2 } });
+            expect(await receive(finishing, 2)).toEqual({ ok: true, result: { ackedSeq: 2 } });
             expect(lateEvent).not.toHaveBeenCalled();
           } finally {
             unsubscribe();
           }
         } else {
           expect(
-            await receive({
-              runEpoch: OWNER_EPOCH,
-              lastAckedSeq: 1,
-              seq: 2,
-              runId,
-              event: {
+            await receive(
+              {
                 kind: "tool",
                 payload: {
                   phase: "update",
@@ -307,7 +281,8 @@ describe("cloud worker run ownership", () => {
                   partialResult: {},
                 },
               },
-            }),
+              2,
+            ),
           ).toEqual({ ok: true, result: { ackedSeq: 2 } });
           now = turnStartedAtMs + input.timeoutMs - 1;
           expect(isReplyRunEvidenceStale(operation)).toBe(false);
@@ -433,18 +408,7 @@ describe("cloud worker run ownership", () => {
       );
       expect(assertSettlementCurrent).toBeTypeOf("function");
       assertSettlementCurrent?.();
-      const identity: WorkerConnectionIdentity = {
-        environmentId: ENVIRONMENT_ID,
-        ownerEpoch: OWNER_EPOCH,
-        sessionId: SESSION_ID,
-        runId,
-        turnClaim: firstClaim,
-        credentialHash: "test",
-        bundleHash: "a".repeat(64),
-        rpcSetVersion: 1,
-        protocolFeatures: [],
-        credentialExpiresAtMs: Date.now() + 60_000,
-      };
+      const identity = { sessionId: SESSION_ID, turnClaim: firstClaim };
       const eventOwner = captureWorkerTurnLiveEventOwner(identity);
       expect(eventOwner?.record).toBeTypeOf("function");
       if (cancelled) {

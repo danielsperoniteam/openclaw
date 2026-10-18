@@ -67,11 +67,7 @@ it("accepts an interrupted worker's completed edit before a fresh turn reuses it
       termination: "exit",
     };
   });
-  const tunnel: WorkerTurnTunnelHandle = {
-    environmentId: ENVIRONMENT_ID,
-    ownerEpoch: OWNER_EPOCH,
-    measureLaunchTurn: fixture.measureLaunchTurn,
-    readLaunchToolNames: fixture.readLaunchToolNames,
+  const tunnel = fixture.createWorkerTurnTunnel({
     launchTurn,
     runWorkspaceCommand: unexpected,
     syncWorkspace: unexpected,
@@ -106,7 +102,7 @@ it("accepts an interrupted worker's completed edit before a fresh turn reuses it
         ...staged,
       };
     },
-  };
+  });
   const environments = fixture.workerTurnEnvironments(tunnel, {
     get: () => environment,
     acknowledgeCredentialDelivery: async () => true,

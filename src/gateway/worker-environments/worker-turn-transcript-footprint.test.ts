@@ -26,53 +26,27 @@ import {
 const INACTIVE_MARKER = "inactive fixture message ";
 const INPUT_TEXT = "Inspect this workspace";
 
-function textOf(message: unknown): string {
-  if (!message || typeof message !== "object") {
-    return "";
-  }
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") {
-    return content;
-  }
-  return Array.isArray(content)
-    ? content
-        .map((part: unknown) =>
-          part && typeof part === "object" && "text" in part && typeof part.text === "string"
-            ? part.text
-            : "",
-        )
-        .join("")
-    : "";
-}
+const isInactive = (message: unknown) =>
+  JSON.stringify(message)?.includes(INACTIVE_MARKER) ?? false;
 
 function seedBranchedHistory(persistCurrentInput: boolean): number {
   const manager = SessionManager.open(sessionTarget);
-  const anchor = manager.appendMessage(
-    makeAgentUserMessage({ content: "Starting the conversation.", timestamp: 1 }),
-  );
+  const user = (content: string, timestamp: number) =>
+    manager.appendMessage(makeAgentUserMessage({ content, timestamp }));
+  const assistant = (text: string, timestamp: number) =>
+    manager.appendMessage(
+      makeAgentAssistantMessage({ content: [{ type: "text", text }], timestamp }),
+    );
+  const anchor = user("Starting the conversation.", 1);
   for (let index = 0; index < 64; index++) {
     const text = `${INACTIVE_MARKER}${index}`.padEnd(1024, ".");
-    manager.appendMessage(
-      index % 2 === 0
-        ? makeAgentUserMessage({ content: text, timestamp: index + 2 })
-        : makeAgentAssistantMessage({
-            content: [{ type: "text", text }],
-            timestamp: index + 2,
-          }),
-    );
+    (index % 2 === 0 ? user : assistant)(text, index + 2);
   }
   manager.branch(anchor);
-  manager.appendMessage(
-    makeAgentUserMessage({ content: "Continue on the selected branch.", timestamp: 66 }),
-  );
-  manager.appendMessage(
-    makeAgentAssistantMessage({
-      content: [{ type: "text", text: "Selected branch is ready." }],
-      timestamp: 67,
-    }),
-  );
+  user("Continue on the selected branch.", 66);
+  assistant("Selected branch is ready.", 67);
   if (persistCurrentInput) {
-    manager.appendMessage(makeAgentUserMessage({ content: INPUT_TEXT, timestamp: 68 }));
+    user(INPUT_TEXT, 68);
   }
   return persistCurrentInput ? 4 : 3;
 }
@@ -135,14 +109,12 @@ describe("Gateway worker-turn selected transcript preparation", () => {
         },
       };
       const provider = createWorkerSessionTurnPlacementProvider({ environments, placements });
-      let observation:
-        | {
-            loadedMessages: number;
-            inactiveLoadedMessages: number;
-            contextMessages: number;
-            inactiveContextMessages: number;
-          }
-        | undefined;
+      let observation = {
+        loadedMessages: 0,
+        inactiveLoadedMessages: 0,
+        contextMessages: 0,
+        inactiveContextMessages: 0,
+      };
       // Preserve the implementation to forward each observed manager as its explicit receiver.
       // oxlint-disable-next-line typescript/unbound-method
       const originalContext = SessionManager.prototype.buildSessionContext;
@@ -160,13 +132,9 @@ describe("Gateway worker-turn selected transcript preparation", () => {
           calls.context++;
           observation = {
             loadedMessages: loaded.length,
-            inactiveLoadedMessages: loaded.filter((entry) =>
-              textOf(entry.message).startsWith(INACTIVE_MARKER),
-            ).length,
+            inactiveLoadedMessages: loaded.filter((entry) => isInactive(entry.message)).length,
             contextMessages: result.messages.length,
-            inactiveContextMessages: result.messages.filter((message) =>
-              textOf(message).startsWith(INACTIVE_MARKER),
-            ).length,
+            inactiveContextMessages: result.messages.filter(isInactive).length,
           };
           return result;
         },
@@ -182,10 +150,10 @@ describe("Gateway worker-turn selected transcript preparation", () => {
           },
         )
         .then(
-          () => ({ kind: "resolved" as const }),
-          (error: unknown) => ({ kind: "rejected" as const, error }),
+          () => undefined,
+          (error: unknown) => error,
         );
-      let outcome: Awaited<typeof pending> | undefined;
+      let outcome: unknown;
       try {
         await awaitGateBeforeSettlement(
           reachedCredential.promise,
@@ -222,10 +190,7 @@ describe("Gateway worker-turn selected transcript preparation", () => {
           }
         }
       }
-      expect(outcome?.kind).toBe("rejected");
-      if (outcome?.kind === "rejected") {
-        expect(outcome.error).toBe(deliberateStop);
-      }
+      expect(outcome).toBe(deliberateStop);
       expect(placements.get(SESSION_ID)).toMatchObject({ state: "active", turnClaim: null });
       expect(await placements.listPendingWorkspaceResultsAsync()).toHaveLength(0);
       expect(calls.destroy).toBe(0);

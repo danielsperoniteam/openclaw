@@ -1,7 +1,6 @@
-import path from "node:path";
+import assert from "node:assert/strict";
 import { describe, expect, it, vi } from "vitest";
 import { awaitGateBeforeSettlement } from "../../../test/helpers/promise.js";
-import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
 import { SessionManager } from "../../agents/sessions/session-manager.js";
 import { makeAgentAssistantMessage } from "../../agents/test-helpers/agent-message-fixtures.js";
 import {
@@ -11,10 +10,6 @@ import {
   upsertSessionEntryCore,
 } from "../../config/sessions/session-accessor.js";
 import { runExclusiveSqliteSessionWrite } from "../../config/sessions/session-accessor.sqlite-scope.js";
-import {
-  claimAgentRunDelegatedAuthority,
-  releaseAgentRunDelegatedAuthority,
-} from "../../infra/agent-run-registry.js";
 import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
 import { resolveRuntimeWorkerUrl } from "../../infra/runtime-worker-url.js";
 import type { SqliteWorkerOperations } from "../../infra/sqlite-worker-contract.js";
@@ -23,13 +18,32 @@ import { createDeferredCore } from "../../shared/deferred.js";
 import * as agentWorkerStore from "../../state/openclaw-agent-worker-store.js";
 import type { WorkerSessionTurnClaim } from "./placement-record.js";
 import { createPlacementTurnClaimFixtureOps } from "./placement-test-fixtures.js";
-import { bindWorkerTurnOwner } from "./placement-turn-claim-events.js";
 import { createWorkerSessionPlacementGate } from "./placement-worker-gate.js";
 import * as support from "./service.test-support.js";
 import { createWorkerTranscriptCommitStore } from "./transcript-commit-ledger.js";
 import { createWorkerTranscriptCommitter } from "./transcript-commit.js";
-import { claimWorkerPlacement } from "./worker-turn-rpc.test-support.js";
+import {
+  bindClaimOwner,
+  claimAdmission,
+  claimTarget,
+  seedClaim,
+} from "./worker-turn-rpc-fixtures.test-support.js";
 import { prepareWorkerTurnTranscriptSource } from "./worker-turn-transcript-target.js";
+
+type Owner = Awaited<ReturnType<typeof bindClaimOwner>>;
+function transcriptService(
+  store: Awaited<ReturnType<typeof seedClaim>>["store"],
+  getConfig: Parameters<typeof createWorkerTranscriptCommitter>[0]["getConfig"],
+) {
+  const committer = createWorkerTranscriptCommitter({
+    getConfig,
+    store: createWorkerTranscriptCommitStore({ database: support.testState.stateDb }),
+  });
+  return support.createService(support.createProvider(), {
+    placementStore: createWorkerSessionPlacementGate(store),
+    applyTranscriptCommit: committer.commit,
+  });
+}
 
 describe("worker transcript claim fences", () => {
   support.setupWorkerEnvironmentServiceSuite();
@@ -37,22 +51,13 @@ describe("worker transcript claim fences", () => {
   it.each(["replaced", "preparation"] as const)(
     "does not persist or publish a transcript after its worker claim is fenced: %s",
     async (scenario) => {
-      const identity = await support.seedAttachedIdentity(
-        "worker-commit-race",
-        "session-commit-race",
-      );
-      const { claim, store } = await claimWorkerPlacement({
-        environmentId: identity.environmentId,
-        ownerEpoch: identity.ownerEpoch,
-        sessionId: "session-commit-race",
-      });
+      const {
+        claim,
+        store,
+        environmentIdentity: identity,
+      } = await seedClaim("worker-commit-race", "session-commit-race");
       identity.turnClaim = claim;
-      const target = {
-        agentId: "main",
-        sessionId: claim.sessionId,
-        sessionKey: `agent:main:${claim.sessionId}`,
-        storePath: path.join(support.testState.root, "openclaw-agent.sqlite"),
-      };
+      const target = claimTarget(claim.sessionId, "openclaw-agent.sqlite");
       await upsertSessionEntryCore(target, {
         sessionId: claim.sessionId,
         lifecycleRevision: "unchanged-lifecycle",
@@ -85,22 +90,15 @@ describe("worker transcript claim fences", () => {
             };
           },
         );
-      const committer = createWorkerTranscriptCommitter({
-        getConfig: () => ({ session: { store: target.storePath } }),
-        store: createWorkerTranscriptCommitStore({ database: support.testState.stateDb }),
-      });
-      const workerService = support.createService(support.createProvider(), {
-        placementStore: createWorkerSessionPlacementGate(store),
-        applyTranscriptCommit: committer.commit,
-      });
+      const workerService = transcriptService(store, () => ({
+        session: { store: target.storePath },
+      }));
       const updates: unknown[] = [];
       const unsubscribe = onSessionTranscriptUpdate((update) => {
         if (update.sessionId === claim.sessionId) {
           updates.push(update);
         }
       });
-      const instance = createOperationalRunInstanceRef(claim.runId);
-      const authority = claimAgentRunDelegatedAuthority(instance);
       const claimOps = createPlacementTurnClaimFixtureOps(support.testState.stateDb);
       const prepare = vi.fn((message: ReturnType<typeof makeAgentAssistantMessage>) => {
         claimOps.releaseTurn(claim);
@@ -117,18 +115,21 @@ describe("worker transcript claim fences", () => {
         "session.transcript.batch",
       );
       let replacement: WorkerSessionTurnClaim | undefined;
-      let replacementAuthority: ReturnType<typeof claimAgentRunDelegatedAuthority> | undefined;
+      let owner: Owner | undefined;
+      let replacementOwner: Owner | undefined;
       let commit: ReturnType<typeof workerService.commitTranscript> | undefined;
+      const claimReplacement = () =>
+        store.claimTurn({
+          ...target,
+          claimId: "replacement-claim",
+          runId: "replacement-run",
+          owner: claim.owner,
+        });
       try {
-        await bindWorkerTurnOwner(
-          store,
-          claim,
-          undefined,
-          instance,
+        owner = await bindClaimOwner(store, claim, {
           target,
-          () => {},
-          scenario === "preparation" ? prepare : undefined,
-        );
+          prepare: scenario === "preparation" ? prepare : undefined,
+        });
         await writerHeld.promise;
         const request = support.transcriptRequest(identity, "queued before claim closure");
         if (scenario === "preparation") {
@@ -145,12 +146,7 @@ describe("worker transcript claim fences", () => {
         expect(await loadTranscriptEvents(target)).toEqual([]);
         if (scenario !== "preparation") {
           await store.releaseTurn(claim);
-          replacement = await store.claimTurn({
-            ...target,
-            claimId: "replacement-claim",
-            runId: "replacement-run",
-            owner: claim.owner,
-          });
+          replacement = await claimReplacement();
         }
         releaseWriter.resolve();
         await blocker;
@@ -161,38 +157,15 @@ describe("worker transcript claim fences", () => {
         expect(store.get(claim.sessionId)?.lastTranscriptAckCursor).toBeNull();
         expect(prepare).toHaveBeenCalledTimes(scenario === "preparation" ? 1 : 0);
 
-        replacement ??= await store.claimTurn({
-          ...target,
-          claimId: "replacement-claim",
-          runId: "replacement-run",
-          owner: claim.owner,
-        });
-        const replacementInstance = createOperationalRunInstanceRef(replacement.runId);
-        replacementAuthority = claimAgentRunDelegatedAuthority(replacementInstance);
-        await bindWorkerTurnOwner(
-          store,
-          replacement,
-          undefined,
-          replacementInstance,
-          target,
-          () => {},
-        );
+        replacement ??= await claimReplacement();
+        replacementOwner = await bindClaimOwner(store, replacement, { target });
         const credential = await workerService.acquireTurnCredential(replacement);
         expect(credential.ownerEpoch).toBe(identity.ownerEpoch);
         expect(await workerService.acknowledgeCredentialDelivery(credential)).toBe(true);
-        const admitted = await workerService.admitWorker({
-          environmentId: identity.environmentId,
-          credential: credential.credential,
-          sessionId: claim.sessionId,
-          runId: replacement.runId,
-          ownerEpoch: credential.ownerEpoch,
-          rpcSetVersion: 1,
-          handshake: support.BOOTSTRAP_RECEIPT,
-        });
-        expect(admitted.ok).toBe(true);
-        if (!admitted.ok) {
-          throw new Error("replacement worker was not admitted");
-        }
+        const admitted = await workerService.admitWorker(
+          claimAdmission(replacement, credential.credential),
+        );
+        assert(admitted.ok === true, "replacement worker was not admitted");
         const seq = (store.get(claim.sessionId)?.lastTranscriptAckCursor ?? 0) + 1;
         expect(seq).toBe(request.seq);
         await expect(
@@ -213,10 +186,8 @@ describe("worker transcript claim fences", () => {
         if (store.validateTurnClaim(replacement ?? claim)) {
           await store.releaseTurn(replacement ?? claim);
         }
-        releaseAgentRunDelegatedAuthority(authority);
-        if (replacementAuthority) {
-          releaseAgentRunDelegatedAuthority(replacementAuthority);
-        }
+        owner?.release();
+        replacementOwner?.release();
       }
     },
   );
@@ -224,24 +195,20 @@ describe("worker transcript claim fences", () => {
   it.each(["current", "deleted"] as const)(
     "keeps an admitted transcript on its original store after configuration changes: %s",
     async (scenario) => {
-      const identity = await support.seedAttachedIdentity("worker-source", "session-source");
-      const { claim, store } = await claimWorkerPlacement({
-        environmentId: identity.environmentId,
-        ownerEpoch: identity.ownerEpoch,
-        sessionId: "session-source",
-      });
+      const {
+        claim,
+        store,
+        environmentIdentity: identity,
+      } = await seedClaim("worker-source", "session-source");
       identity.turnClaim = claim;
       const original = {
-        agentId: "main",
-        sessionId: claim.sessionId,
-        sessionKey: `agent:main:${claim.sessionId}`,
-        storePath: path.join(support.testState.root, "original", "sessions.json"),
+        ...claimTarget(claim.sessionId, "original/sessions.json"),
         expectedLifecycleRevision: "source-lifecycle",
         expectedWriterRunId: claim.runId,
       };
       const replacement = {
         ...original,
-        storePath: path.join(support.testState.root, "replacement", "sessions.json"),
+        storePath: claimTarget(claim.sessionId, "replacement/sessions.json").storePath,
       };
       const entry = {
         sessionId: claim.sessionId,
@@ -253,19 +220,11 @@ describe("worker transcript claim fences", () => {
       await upsertSessionEntryCore(replacement, entry);
       const replacementBefore = loadSessionEntry(replacement);
       support.testState.config.session = { store: original.storePath };
-      const committer = createWorkerTranscriptCommitter({
-        getConfig: () => support.testState.config,
-        store: createWorkerTranscriptCommitStore({ database: support.testState.stateDb }),
-      });
-      const workerService = support.createService(support.createProvider(), {
-        placementStore: createWorkerSessionPlacementGate(store),
-        applyTranscriptCommit: committer.commit,
-      });
-      const instance = createOperationalRunInstanceRef(claim.runId);
-      const authority = claimAgentRunDelegatedAuthority(instance);
+      const workerService = transcriptService(store, () => support.testState.config);
       await using source = await prepareWorkerTurnTranscriptSource(original);
+      let owner: Owner | undefined;
       try {
-        await bindWorkerTurnOwner(store, claim, undefined, instance, original, source);
+        owner = await bindClaimOwner(store, claim, { target: original, assertCurrent: source });
         support.testState.config.session = { store: replacement.storePath };
         if (scenario === "deleted") {
           await expect(
@@ -303,7 +262,7 @@ describe("worker transcript claim fences", () => {
         if (store.validateTurnClaim(claim)) {
           await store.releaseTurn(claim);
         }
-        releaseAgentRunDelegatedAuthority(authority);
+        owner?.release();
       }
     },
   );

@@ -1,4 +1,4 @@
-import path from "node:path";
+import assert from "node:assert/strict";
 import { describe, expect, it, vi } from "vitest";
 import {
   WORKER_INFERENCE_PROTOCOL_FEATURE,
@@ -7,16 +7,12 @@ import {
   type WorkerInferenceTerminalOutcome,
 } from "../../../packages/gateway-protocol/src/schema/worker-inference.js";
 import { awaitGateBeforeSettlement } from "../../../test/helpers/promise.js";
-import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
-import {
-  claimAgentRunDelegatedAuthority,
-  releaseAgentRunDelegatedAuthority,
-} from "../../infra/agent-run-registry.js";
+import { makeAgentAssistantMessage } from "../../agents/test-helpers/agent-message-fixtures.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { dispatchWorkerRequest } from "../server/ws-connection/worker-connection-dispatch.js";
-import { bindWorkerTurnOwner } from "./placement-turn-claim-events.js";
 import { createWorkerSessionPlacementGate } from "./placement-worker-gate.js";
 import * as support from "./service.test-support.js";
+import { bindClaimOwner, claimAdmission } from "./worker-turn-rpc-fixtures.test-support.js";
 import { claimWorkerPlacement } from "./worker-turn-rpc.test-support.js";
 
 const delivery = vi.hoisted(() => ({
@@ -51,12 +47,15 @@ vi.mock("../../state/openclaw-state-worker-store.js", async (importOriginal) => 
 });
 
 const delta = { type: "text_delta", contentIndex: 0, delta: "preserved provider output" } as const;
+const inferenceFrame = (event: string, payload: unknown) => ({
+  type: "event",
+  event: `worker.inference.${event}`,
+  payload,
+});
 const done: WorkerInferenceTerminalOutcome = {
   type: "done",
-  message: {
-    role: "assistant",
+  message: makeAgentAssistantMessage({
     content: [{ type: "text", text: delta.delta }],
-    api: "openai-responses",
     provider: "fake",
     model: "model-test",
     usage: {
@@ -67,9 +66,8 @@ const done: WorkerInferenceTerminalOutcome = {
       totalTokens: 2,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
-    stopReason: "stop",
     timestamp: 1,
-  },
+  }),
 };
 
 describe("worker inference inventory publication", () => {
@@ -126,40 +124,21 @@ describe("worker inference inventory publication", () => {
         placementStore: createWorkerSessionPlacementGate(placements),
       });
       let mutation: Promise<unknown> | undefined;
-      const instance = createOperationalRunInstanceRef(claim.runId);
-      const authority = claimAgentRunDelegatedAuthority(instance);
+      let owner: Awaited<ReturnType<typeof bindClaimOwner>> | undefined;
       try {
-        await bindWorkerTurnOwner(
-          placements,
-          claim,
-          undefined,
-          instance,
-          {
-            agentId: "main",
-            sessionId,
-            sessionKey: `agent:main:${sessionId}`,
-            storePath: path.join(support.testState.root, "sessions.json"),
-          },
-          () => {
+        owner = await bindClaimOwner(placements, claim, {
+          assertCurrent: () => {
             if (!placements.validateTurnClaim(claim)) {
               throw new Error("Worker publication fixture claim is no longer current");
             }
           },
-        );
+        });
         const grant = await workerService.acquireTurnCredential(claim);
         expect(await workerService.acknowledgeCredentialDelivery(grant)).toBe(true);
-        const admission = await workerService.admitWorker({
-          environmentId,
-          credential: grant.credential,
-          sessionId,
-          runId: claim.runId,
-          ownerEpoch: attached.ownerEpoch,
-          rpcSetVersion: 1,
-          handshake: receipt,
-        });
-        if (!admission.ok) {
-          throw new Error(`Worker inference admission failed: ${admission.reason}`);
-        }
+        const admission = await workerService.admitWorker(
+          claimAdmission(claim, grant.credential, receipt),
+        );
+        assert(admission.ok === true, "Worker inference admission failed");
         const identity = admission.identity;
         const request = support.inferenceRequest(identity);
         const respond = vi.fn();
@@ -221,16 +200,8 @@ describe("worker inference inventory publication", () => {
             turnId: request.turnId,
           };
           expect(frames).toEqual([
-            {
-              type: "event",
-              event: "worker.inference.event",
-              payload: { ...binding, seq: 1, event: delta },
-            },
-            {
-              type: "event",
-              event: "worker.inference.terminal",
-              payload: { ...binding, seq: 2, outcome: done },
-            },
+            inferenceFrame("event", { ...binding, seq: 1, event: delta }),
+            inferenceFrame("terminal", { ...binding, seq: 2, outcome: done }),
           ]);
         } else {
           expect(frames).toEqual([terminal]);
@@ -249,7 +220,7 @@ describe("worker inference inventory publication", () => {
         if (placements.validateTurnClaim(claim)) {
           await placements.releaseTurn(claim);
         }
-        releaseAgentRunDelegatedAuthority(authority);
+        owner?.release();
       }
     },
   );
