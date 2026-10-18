@@ -6,11 +6,16 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from "vi
 import { withinTest } from "../../test/helpers/promise.js";
 import * as sessionEvents from "../auto-reply/reply/session-event-handoff.js";
 import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
-import { replaceSessionEntry } from "../config/sessions/session-accessor.js";
+import { resolveSessionStorePathCore } from "../config/sessions/paths.js";
+import {
+  readSessionTranscriptMessageEvents,
+  replaceSessionEntry,
+} from "../config/sessions/session-accessor.js";
 import * as sessionReads from "../config/sessions/session-entry-read-runtime.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { claimAgentRunContext, releaseAgentRunContext } from "../infra/agent-run-registry.js";
 import { resetSystemEventsForTest } from "../infra/system-events.js";
+import { withSessionTurn } from "../sessions/session-controller.admission.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
@@ -142,15 +147,18 @@ test("does not advertise detached continuation when process is unavailable", asy
   expect(result.details).not.toHaveProperty("followUp");
 });
 
-test.for(["ordinary", "live cron", "ended cron", "cron ended during admission"])(
+test.for(["ordinary", "live cron", "queued cron", "ended cron", "cron ended during admission"])(
   "keeps exec completion bound to its origin: %s",
   async (scenario, { signal }) => {
     const cron = scenario !== "ordinary";
-    const sessionKey = cron ? "agent:main:cron:nightly:run:abc123" : "agent:main:main";
+    const sessionKey = cron
+      ? `agent:main:cron:nightly:run:${scenario.replaceAll(" ", "-")}`
+      : "agent:main:main";
+    const sessionId = sessionKey.replaceAll(":", "-");
     await seedOrigin(sessionKey);
     const claim = claimAgentRunContext(
       "cron-run-followup",
-      { sessionKey, sessionId: sessionKey.replaceAll(":", "-"), agentId: "main" },
+      { sessionKey, sessionId, agentId: "main" },
       { trackOwner: true },
     );
     const release = () => releaseAgentRunContext("cron-run-followup", claim);
@@ -178,12 +186,37 @@ test.for(["ordinary", "live cron", "ended cron", "cron ended during admission"])
       allowBackground: true,
     });
     try {
-      const started = await exec.execute("cron-followup", {
-        command: nodeCommand('process.stdout.write("CRON_EXEC_DONE")'),
-        background: true,
-      });
-      expect(started.details.status).toBe("running");
-      await withinTest(waitForExecScope(sessionKey), signal);
+      const start = async () => {
+        const started = await exec.execute("cron-followup", {
+          command: nodeCommand('process.stdout.write("CRON_EXEC_DONE")'),
+          background: true,
+        });
+        expect(started.details.status).toBe("running");
+        await withinTest(waitForExecScope(sessionKey), signal);
+        if (scenario === "queued cron") {
+          const receipt = expectDefined(receipts[0], "queued cron completion receipt");
+          expect(await withinTest(receipt.accepted, signal)).toEqual({ ok: true });
+          expect(model).not.toHaveBeenCalled();
+          expect(
+            readSessionTranscriptMessageEvents({ agentId: "main", sessionKey, sessionId }),
+          ).toEqual([]);
+          release();
+        }
+        return started;
+      };
+      // Cron preparation and embedded execution share this controller admission.
+      const started =
+        scenario === "queued cron"
+          ? await withSessionTurn(
+              {
+                sessionKey,
+                sessionId,
+                agentId: "main",
+                storePath: resolveSessionStorePathCore(config.session?.store, { agentId: "main" }),
+              },
+              start,
+            )
+          : await start();
       if (scenario.includes("ended")) {
         if (scenario === "cron ended during admission") {
           expect(receipts).toHaveLength(1);
@@ -203,6 +236,12 @@ test.for(["ordinary", "live cron", "ended cron", "cron ended during admission"])
         expect(model).toHaveBeenCalledOnce();
         const [params] = expectDefined(model.mock.calls[0], "completion turn");
         expect(params.sessionKey).toBe(sessionKey);
+        if (scenario === "queued cron") {
+          expect(
+            readSessionTranscriptMessageEvents({ agentId: "main", sessionKey, sessionId }),
+          ).toMatchObject([{ event: { type: "message", message: { role: "user" } } }]);
+          expect(params.prompt).toContain("CRON_EXEC_DONE");
+        }
       }
       if (started.details.status !== "running") {
         throw new Error("Expected a background process");
