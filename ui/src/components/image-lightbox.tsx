@@ -1,6 +1,11 @@
 import { lazy, Loading } from "solid-js";
 import { defineSolidBridge, type SolidBridgeElement } from "../lib/solid-bridge.ts";
+import { ImageLightboxHost } from "./image-lightbox-context.ts";
 import type { ImageLightboxGallery, ImageLightboxItem } from "./image-lightbox.types.ts";
+
+const Content = lazy(() => import("./image-lightbox-content.tsx"), {
+  export: "ImageLightboxContent",
+});
 
 export type ImageLightboxProps = {
   connectVideo?: ImageLightboxItem["connectVideo"];
@@ -19,17 +24,13 @@ export type ImageLightboxElement = SolidBridgeElement<ImageLightboxProps>;
 
 export const ImageLightbox = defineSolidBridge<ImageLightboxProps>(
   "openclaw-image-lightbox",
-  (props, host) => {
-    const Content = lazy(async () => {
-      const { ImageLightboxContent } = await import("./image-lightbox-content.tsx");
-      return { default: (current: ImageLightboxProps) => ImageLightboxContent(current, host) };
-    });
-    return (
+  (props, host) => (
+    <ImageLightboxHost value={host}>
       <Loading>
         <Content {...props} />
       </Loading>
-    );
-  },
+    </ImageLightboxHost>
+  ),
   {
     properties: {
       connectVideo: { default: undefined, attribute: false },

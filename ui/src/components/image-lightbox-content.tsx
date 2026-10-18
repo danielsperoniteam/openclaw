@@ -1,8 +1,9 @@
 import Panzoom, { type PanzoomObject } from "@panzoom/panzoom";
-import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, Show, useContext } from "solid-js";
 import { t } from "../lib/reactive/i18n.ts";
 import { listen } from "../lib/reactive/listener.ts";
 import { nativeListener } from "../lib/solid-native-listener.ts";
+import { ImageLightboxHost } from "./image-lightbox-context.ts";
 import {
   downloadLightboxImage,
   externalLightboxImageUrl,
@@ -21,7 +22,7 @@ import {
   LightboxImageQualityStatus,
   lightboxImageStyle,
 } from "./image-lightbox-view.tsx";
-import type { ImageLightboxElement, ImageLightboxProps } from "./image-lightbox.tsx";
+import type { ImageLightboxProps } from "./image-lightbox.tsx";
 import { Icon } from "./solid/icon.tsx";
 import imageLightboxStyles from "./image-lightbox.css?inline";
 import "./modal-dialog.ts";
@@ -32,7 +33,8 @@ const SWIPE_THRESHOLD_PX = 56;
 const SWIPE_AXIS_THRESHOLD_PX = 8;
 const SLIDE_DURATION_MS = 180;
 
-export function ImageLightboxContent(props: ImageLightboxProps, host: ImageLightboxElement) {
+export function ImageLightboxContent(props: ImageLightboxProps) {
+  const host = useContext(ImageLightboxHost);
   const gallery = createImageLightboxGallery();
   const galleryState = gallery.state;
   const hasGallery = () => galleryState().count > 1;
