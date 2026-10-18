@@ -168,7 +168,7 @@ export function MessageActions(props: {
           text={props.details!.markdown!}
           idleLabel={copyMarkdownLabel()}
           bare
-          buttonRef={(element) => {
+          ref={(element) => {
             elements.copy = element;
           }}
         />
