@@ -850,7 +850,7 @@ describe("SQLite exact transcript suffix replacement", () => {
     },
     {
       name: "preserves a key claimed by an earlier suffix insert",
-      events: [rewriteEvents[0], oldDuplicate, oldOwner],
+      events: [rewriteEvents[0], oldDuplicate, oldOwner, assistant("removed", "owner", "removed")],
       next: [rewriteEvents[0], oldDuplicate, newOwner, insertedOwner],
       reassign: true,
       owners: [
