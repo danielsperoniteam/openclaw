@@ -511,12 +511,13 @@ describe("MemorySettingsPage tab routing", () => {
   );
 
   it("mounts the presentation for the Settings agent and keeps it through a same-client reconnect", async () => {
-    const { element, settingsViews, setPhase, settingsAgentSelection, replaceClient } = createPage({
+    const page = createPage({
       configObject: {},
       agents: [{ id: "main" }, { id: "research" }],
       selectedAgentId: "research",
       routeData: memoryTabRoute("overview"),
     });
+    const { element, settingsViews, setPhase, settingsAgentSelection } = page;
     mountMemoryPage(element);
     try {
       await waitForSolid(() => expect(settingsViews.at(-1)?.snapshot.agentId).toBe("research"));
@@ -538,7 +539,7 @@ describe("MemorySettingsPage tab routing", () => {
       expect(current.snapshot.connectionEpoch).toBeGreaterThan(epoch);
       expect(current.context.signal.aborted).toBe(false);
       expect(settingsViews.at(-1)).toBe(current);
-      replaceClient();
+      page.replaceClient();
       expect(current.context.signal.aborted).toBe(true);
       await waitForSolid(() => expect(settingsViews.at(-1)).not.toBe(current));
     } finally {
