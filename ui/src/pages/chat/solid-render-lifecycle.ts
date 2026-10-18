@@ -39,7 +39,8 @@ export function createSolidRenderLifecycle<T>(options: {
     }
     requestedGeneration += 1;
     setRevision(requestedGeneration);
-    if (options.presented()) {
+    // Telemetry follows committed visibility without subscribing the invalidating caller.
+    if (committedRequest >= 0) {
       notifyRenderLifecycleForTest(options.host, "invalidate");
     }
   };
@@ -124,6 +125,7 @@ export function createSolidRenderLifecycle<T>(options: {
     () => ({ frame: frame(), presented: options.presented() }),
     (next) => {
       if (!next.presented) {
+        committedRequest = -1;
         // Pending work waits for reveal; already-started foreground work retires.
         for (const task of Array.from(tasks)) {
           if (task.started) {
