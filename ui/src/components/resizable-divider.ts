@@ -1,4 +1,5 @@
-import { createEffect, onCleanup } from "solid-js";
+import { spread } from "@solidjs/web";
+import { onCleanup } from "solid-js";
 import { t } from "../lib/reactive/i18n.ts";
 import { listen } from "../lib/reactive/listener.ts";
 import { defineSolidBridge, type SolidBridgeElement } from "../lib/solid-bridge.ts";
@@ -195,25 +196,20 @@ defineSolidBridge<ResizableDividerProps>(
       }
     }
 
-    host.setAttribute("role", "separator");
-    host.setAttribute("tabindex", "0");
     nativeListener("pointerdown", handlePointerDown)(host);
     nativeListener("keydown", handleKeyDown)(host);
-    createEffect(
+    spread(
+      host,
       () => ({
-        min: toAriaValue(props.minRatio),
-        max: toAriaValue(props.maxRatio),
-        value: props.splitRatio,
-        label: props.label || t("common.resizeSplitView"),
-        orientation: props.orientation,
+        role: "separator",
+        tabindex: "0",
+        "aria-valuemin": String(toAriaValue(props.minRatio)),
+        "aria-valuemax": String(toAriaValue(props.maxRatio)),
+        "aria-valuenow": String(toAriaValue(props.splitRatio)),
+        "aria-label": props.label || t("common.resizeSplitView"),
+        "aria-orientation": props.orientation,
       }),
-      (value) => {
-        setAttribute("aria-valuemin", String(value.min));
-        setAttribute("aria-valuemax", String(value.max));
-        setCurrentAriaValue(value.value);
-        setAttribute("aria-label", value.label);
-        setAttribute("aria-orientation", value.orientation);
-      },
+      true,
     );
     onCleanup(() => finishDragging(new Event("disconnect")));
     return undefined;
