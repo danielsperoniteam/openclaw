@@ -7,12 +7,12 @@ import { MODEL_SELECTION_LOCKED_PARENT_FORK_MESSAGE } from "../auto-reply/reply/
 import type { InternalSessionEntry, SessionEntry } from "../config/sessions.js";
 import {
   inheritSessionCreationPolicy,
-  inheritSessionGitContributorProfileIds,
   inheritSpawnSessionOwner,
   type SessionOwnerAssignment,
 } from "../config/sessions/session-entry-provenance.js";
 import { readSessionEntryReadOnlyInWorker } from "../config/sessions/session-entry-read-runtime.js";
 import { inheritSessionSelection } from "../config/sessions/session-entry-selection.js";
+import { selectSessionGitContributorProfileIds } from "../config/sessions/session-git-contributors.js";
 import { isModelSelectionLocked } from "../sessions/model-overrides.js";
 import { waitForSessionParticipantRecording } from "../sessions/session-participant-recording.js";
 import { readResidentUserProfileId } from "../state/user-profile-list.js";
@@ -118,27 +118,39 @@ function resolveResidentProfileId(profileId: string): string | undefined {
 
 /** Derives trusted child policy and ownership from the locked spawn parent. */
 export function resolveSessionCreateInheritance(params: {
-  creation: SessionCreation | undefined;
-  parent: SessionEntry | undefined;
+  request: Pick<CreateGatewaySessionParams, "cfg" | "creation">;
+  parent: {
+    entry: SessionEntry | undefined;
+    target: { agentId: string; canonicalKey: string } | undefined;
+  };
 }): {
   creation: SessionCreation | undefined;
   ownerAssignment?: SessionOwnerAssignment;
 } {
-  if (params.creation?.via !== "spawn") {
-    return { creation: params.creation };
+  if (params.request.creation?.via !== "spawn") {
+    return { creation: params.request.creation };
   }
   const ownerAssignment = inheritSpawnSessionOwner(
-    params.parent,
-    params.creation.actor,
-    params.creation.requesterProfileId,
+    params.parent.entry,
+    params.request.creation.actor,
+    params.request.creation.requesterProfileId,
     Date.now(),
     resolveResidentProfileId,
   );
   return {
     creation: {
-      ...params.creation,
-      ...inheritSessionCreationPolicy(params.parent, params.creation.actor),
-      inheritedGitContributorProfileIds: inheritSessionGitContributorProfileIds(params.parent),
+      ...params.request.creation,
+      ...inheritSessionCreationPolicy(params.parent.entry, params.request.creation.actor),
+      inheritedGitContributorProfileIds: params.parent.target
+        ? selectSessionGitContributorProfileIds(params.parent.entry, {
+            config: params.request.cfg,
+            agentId: params.parent.target.agentId,
+            sessionKey: params.parent.target.canonicalKey,
+            requesterProfileIds: params.request.creation.gitContributorProfileId
+              ? [params.request.creation.gitContributorProfileId]
+              : [],
+          })
+        : [],
     },
     ...(ownerAssignment ? { ownerAssignment } : {}),
   };

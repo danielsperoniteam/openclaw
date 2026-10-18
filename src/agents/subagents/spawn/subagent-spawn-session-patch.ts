@@ -5,10 +5,8 @@ import {
   runWithSessionActorStorage,
   type SessionActorStorageBinding,
 } from "../../../config/sessions/session-actor-storage-binding.js";
-import {
-  buildSessionCreationStamp,
-  inheritSessionGitContributorProfileIds,
-} from "../../../config/sessions/session-entry-provenance.js";
+import { buildSessionCreationStamp } from "../../../config/sessions/session-entry-provenance.js";
+import { selectSessionGitContributorProfileIds } from "../../../config/sessions/session-git-contributors.js";
 import {
   sessionEntryCommitGuardOptions,
   composeSessionSourceAssertion,
@@ -63,6 +61,7 @@ export async function createInitialSubagentSession(input: {
   requesterInternalKey: string;
   parentTarget: GatewaySessionStoreTargetWithStore;
   senderIsOwner?: boolean;
+  gitContributorProfileId?: string;
   expectedParentSessionId?: string;
   assertActive?: SessionSourceAssertion;
   creationPolicy: Pick<Parameters<typeof buildSessionCreationStamp>[0], "actor" | "sandbox">;
@@ -302,8 +301,17 @@ export async function createInitialSubagentSession(input: {
                     ...params.creationPolicy,
                     ...(!params.incognito
                       ? {
-                          inheritedGitContributorProfileIds:
-                            inheritSessionGitContributorProfileIds(parentEntry),
+                          inheritedGitContributorProfileIds: selectSessionGitContributorProfileIds(
+                            parentEntry,
+                            {
+                              config: params.cfg,
+                              agentId: params.requesterAgentId,
+                              sessionKey: params.requesterInternalKey,
+                              requesterProfileIds: params.gitContributorProfileId
+                                ? [params.gitContributorProfileId]
+                                : [],
+                            },
+                          ),
                         }
                       : {}),
                   }),

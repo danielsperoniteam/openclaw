@@ -12,11 +12,9 @@ import { captureSessionEventTargetForHost as captureSessionEventTarget } from ".
 import { getRuntimeConfig } from "../../../config/config.js";
 import { resolveSessionStorePathCore } from "../../../config/sessions/paths.js";
 import { upsertSessionEntryCore } from "../../../config/sessions/session-accessor.js";
-import {
-  buildSessionCreationStamp,
-  inheritSessionGitContributorProfileIds,
-} from "../../../config/sessions/session-entry-provenance.js";
+import { buildSessionCreationStamp } from "../../../config/sessions/session-entry-provenance.js";
 import { readSessionEntryReadOnlyInWorker } from "../../../config/sessions/session-entry-read-runtime.js";
+import { selectSessionGitContributorProfileIds } from "../../../config/sessions/session-git-contributors.js";
 import {
   sessionEntryCommitGuardOptions,
   type SessionSourceAssertion,
@@ -138,6 +136,7 @@ type SpawnAcpContext = SpawnRequesterConversationSource & {
   agentSessionKey?: string;
   /** Trusted parent tool construction facts; never read from model arguments. */
   senderIsOwner?: boolean;
+  gitContributorProfileId?: string;
   expectedParentSessionId?: string;
   requesterTurnRunId?: string;
   completionOwnerKey?: string;
@@ -478,7 +477,12 @@ export async function spawnAcpDirect(
       const creationStamp = buildSessionCreationStamp({
         via: "spawn",
         actor: { type: "agent", id: requesterAgentId },
-        inheritedGitContributorProfileIds: inheritSessionGitContributorProfileIds(parentEntry),
+        inheritedGitContributorProfileIds: selectSessionGitContributorProfileIds(parentEntry, {
+          config: cfg,
+          agentId: requesterAgentId,
+          sessionKey: requesterInternalKey,
+          requesterProfileIds: ctx.gitContributorProfileId ? [ctx.gitContributorProfileId] : [],
+        }),
       });
       const storePath = resolveSessionStorePathCore(cfg.session?.store, { agentId: ownerAgentId });
       const childSessionPatch = admission.childSessionPatch

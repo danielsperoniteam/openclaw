@@ -69,6 +69,7 @@ import {
   SUBAGENT_ANNOUNCE_CLAUDE_CLI_DELIVERY_CASES,
   SUBAGENT_ANNOUNCE_EMBEDDED_DELIVERY_CASES,
 } from "./attempt-execution.announce.test-support.js";
+import { registerCommandCliAdmissionTests } from "./attempt-execution.cli-admission.test-support.js";
 import {
   cliRuntimeConfig,
   createCliImageCapabilityPlugins,
@@ -413,40 +414,13 @@ describe("CLI attempt execution", () => {
     return { sessionStore, runCli };
   }
 
-  it.each(["assistant_output_started"] as const)(
-    "keeps CLI admission separate from observed %s",
-    async (phase) => {
-      const sessionKey = "agent:main:direct:cli-execution-started";
-      const sessionEntry = makeSessionEntry("session-cli-execution-started");
-      const { runCli } = await createCliSession(sessionKey, sessionEntry);
-      const onExecutionStarted = vi.fn();
-      const onRuntimeTurnStarted = vi.fn();
-      const callbacks = createAgentAttemptLifecycleCallbacks(
-        {
-          currentTurnUserMessagePersisted: false,
-          lifecycleFinishing: false,
-          lifecycleEnded: false,
-        },
-        onRuntimeTurnStarted,
-      );
-      runCliAgentMock.mockResolvedValueOnce(makeCliResult("started"));
-
-      await runCli({
-        onExecutionStarted,
-        onAgentEvent: callbacks.onAgentEvent,
-      });
-
-      expect(firstRunCliAgentArg().onExecutionStarted).toBe(onExecutionStarted);
-      const observePhase = firstRunCliAgentArg().onExecutionPhase;
-      if (typeof observePhase !== "function") {
-        throw new Error("CLI execution phase observer is missing");
-      }
-      observePhase({ phase: "process_spawned" });
-      expect(onRuntimeTurnStarted).not.toHaveBeenCalled();
-      observePhase({ phase });
-      expect(onRuntimeTurnStarted).toHaveBeenCalledOnce();
-    },
-  );
+  registerCommandCliAdmissionTests({
+    runStoredAttempt,
+    seedSessionStore,
+    runCliAgentMock,
+    createCliSession,
+    firstRunCliAgentArg,
+  });
 
   it.each(["updated", "replaced", "revised"])(
     "refreshes a %s session after CLI placement admission",

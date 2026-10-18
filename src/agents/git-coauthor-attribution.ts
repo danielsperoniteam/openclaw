@@ -1,5 +1,9 @@
 import { MAX_SESSION_PARTICIPANTS } from "../config/sessions/session-entry-provenance.js";
 import { readSessionEntriesFromStoreInWorker } from "../config/sessions/session-entry-read-runtime.js";
+import {
+  isMainGitContributorScope,
+  selectSessionGitContributorProfileIds,
+} from "../config/sessions/session-git-contributors.js";
 import { resolveSessionStorePathForScope } from "../config/sessions/session-store-path.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isIncognitoSessionKey } from "../routing/session-key.js";
@@ -28,6 +32,8 @@ type GitCoauthorAttributionParams = {
   agentId: string;
   config: OpenClawConfig;
   excludeAccountId?: number;
+  /** Host-verified requester; main is a routing hub, not a task contributor set. */
+  requesterProfileId?: string;
   host?: string;
   env?: NodeJS.ProcessEnv;
   sessionKey?: string;
@@ -88,7 +94,14 @@ async function resolveAttribution(
     ),
   );
   const inheritedProfileIds = entry.inheritedGitContributorProfileIds ?? [];
-  const profileIds = [...new Set([...profileRecords.keys(), ...inheritedProfileIds])];
+  const source = {
+    ...params,
+    sessionKey: params.sessionKey,
+    requesterProfileIds: params.requesterProfileId ? [params.requesterProfileId] : [],
+  };
+  const profileIds = isMainGitContributorScope(source)
+    ? (selectSessionGitContributorProfileIds(entry, source) ?? [])
+    : [...new Set([...profileRecords.keys(), ...inheritedProfileIds])];
   if (profileIds.length === 0) {
     return empty;
   }

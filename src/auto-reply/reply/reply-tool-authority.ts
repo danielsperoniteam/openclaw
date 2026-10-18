@@ -36,11 +36,13 @@ import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import { retainPreparedSessionEntryPredicate } from "../../config/sessions/session-accessor.sqlite-entry-cache-publication-state.js";
 import { withSessionEntriesFromStoresInWorker } from "../../config/sessions/session-entry-read-runtime.js";
 import type { SessionEntryCohortReader } from "../../config/sessions/session-entry-read-runtime.types.js";
+import { isMainGitContributorScope } from "../../config/sessions/session-git-contributors.js";
 import {
   prepareGatewaySessionEntryReadOnlyInWorker,
   type GatewaySessionEntryReadPlan,
 } from "../../gateway/session-utils-store-worker.js";
 import { warnPluginSdkDeprecation } from "../../plugins/sdk-deprecation.js";
+import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { GATEWAY_OWNER_ONLY_CORE_TOOLS } from "../../security/dangerous-tools.js";
 import type {
   ReplyToolAuthorityOverlay,
@@ -195,6 +197,16 @@ function resolveFollowupRunToolAuthorityFingerprint(
         provider,
         model,
         policy: capabilityProfile.policy,
+        // Main routes unrelated requests. Its tools retain the originating credit; a
+        // different requester must use the existing follow-up path, not those closures.
+        gitContributorProfileId: isMainGitContributorScope({
+          agentId:
+            execution.agentId ?? parseAgentSessionKey(execution.sessionKey)?.agentId ?? "main",
+          config: execution.config ?? {},
+          sessionKey: execution.sessionKey ?? "",
+        })
+          ? execution.gitContributorProfileId
+          : undefined,
         operatorAuthority: authority
           ? {
               scopes: [...new Set(authority.scopes)].toSorted(),
