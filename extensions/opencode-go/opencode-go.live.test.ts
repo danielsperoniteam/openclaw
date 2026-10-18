@@ -109,6 +109,14 @@ describeLive("OpenCode Go live dynamic catalog", () => {
         },
       );
       if (result.stopReason === "error") {
+        // Contributor models require a workspace opt-in to training on request data; this
+        // refusal still proves the route, auth, and model id reached Go.
+        if (
+          modelId.endsWith("-contributor") &&
+          result.errorMessage?.includes("trains on request data")
+        ) {
+          return;
+        }
         throw new Error(result.errorMessage || "OpenCode Go inference returned an error");
       }
       expect(extractNonEmptyAssistantText(result.content)).toMatch(/^ok[.!]?$/i);
