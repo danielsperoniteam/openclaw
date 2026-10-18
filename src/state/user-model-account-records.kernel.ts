@@ -47,24 +47,8 @@ export function userModelAccountRecordValue(row: {
   return row.value;
 }
 
-/** Read only selected records through their current one-hop owners, preserving selection order. */
-export function readSelectedUserModelAccountRecords(
-  db: EngineConnection,
-  profileIds: readonly string[],
-) {
-  const selected = [...new Set(profileIds)].flatMap((id) => {
-    const locator = parseUserModelAuthProfileId(id);
-    return locator ? [{ id, owner: locator.ownerProfileId }] : [];
-  });
-  if (
-    selected.length === 0 ||
-    !tableExists(db, "user_profiles") ||
-    !tableExists(db, "secret_store_entries")
-  ) {
-    return [];
-  }
-  const rows = executeSqliteQuerySync(
-    db,
+function userModelAccountRecordsQuery(db: EngineConnection) {
+  return (
     getNodeSqliteKysely<UserProfilesDatabase & Pick<DB, "secret_store_entries">>(db)
       .selectFrom("user_profiles as source")
       .leftJoin("user_profiles as target", "target.id", "source.merged_into")
@@ -98,13 +82,50 @@ export function readSelectedUserModelAccountRecords(
           ]),
         ]),
       )
-      .where((eb) =>
-        eb.or(
-          selected.map(({ id, owner }) =>
-            eb.and([eb("source.id", "=", owner), eb("name", "=", `model-account:${id}`)]),
-          ),
+  );
+}
+
+export function readUserModelAccountLinksRecord(
+  db: EngineConnection,
+  profileId: string,
+): string | undefined {
+  if (!tableExists(db, "user_profiles") || !tableExists(db, "secret_store_entries")) {
+    return undefined;
+  }
+  const row = executeSqliteQueryTakeFirstSync(
+    db,
+    userModelAccountRecordsQuery(db)
+      .where("source.id", "=", profileId)
+      .where("name", "=", "model-accounts"),
+  );
+  return row ? userModelAccountRecordValue(row) : undefined;
+}
+
+/** Read only selected records through their current one-hop owners, preserving selection order. */
+export function readSelectedUserModelAccountRecords(
+  db: EngineConnection,
+  profileIds: readonly string[],
+) {
+  const selected = [...new Set(profileIds)].flatMap((id) => {
+    const locator = parseUserModelAuthProfileId(id);
+    return locator ? [{ id, owner: locator.ownerProfileId }] : [];
+  });
+  if (
+    selected.length === 0 ||
+    !tableExists(db, "user_profiles") ||
+    !tableExists(db, "secret_store_entries")
+  ) {
+    return [];
+  }
+  const rows = executeSqliteQuerySync(
+    db,
+    userModelAccountRecordsQuery(db).where((eb) =>
+      eb.or(
+        selected.map(({ id, owner }) =>
+          eb.and([eb("source.id", "=", owner), eb("name", "=", `model-account:${id}`)]),
         ),
       ),
+    ),
   ).rows;
   const records = new Map(rows.map((row) => [row.name, row]));
   return selected.flatMap(({ id }) => {
