@@ -20,7 +20,7 @@ import {
   setRuntimeConfigSnapshotRefreshHandler,
   type RuntimeConfigSnapshotRefreshHandler,
 } from "./runtime-snapshot.js";
-import { withTempHome } from "./test-helpers.js";
+import { withTempHome, writeOpenClawConfig } from "./test-helpers.js";
 import { withConfigWriteLock } from "./write-lock.js";
 
 const original = '{"gateway":{"mode":"local","port":18789}}\n';
@@ -88,13 +88,10 @@ afterEach(() => {
 
 it("preserves committed source provenance when the post-write reread is invalid", async () => {
   await withTempHome(async (home) => {
-    const configPath = path.join(home, ".openclaw", "openclaw.json");
-    await fs.mkdir(path.dirname(configPath), { recursive: true });
-    const initialConfig = {
+    const configPath = await writeOpenClawConfig(home, {
       gateway: { mode: "local", port: 18789 },
       agents: { entries: { main: {} }, defaults: { compaction: {} } },
-    };
-    await fs.writeFile(configPath, `${JSON.stringify(initialConfig, null, 2)}\n`, "utf-8");
+    });
 
     // Corrupt only the post-commit reread, keeping the persisted payload inspectable.
     let corrupted = false;
@@ -107,15 +104,13 @@ it("preserves committed source provenance when the post-write reread is invalid"
     });
     const realReadFileSync = fsNode.readFileSync.bind(fsNode);
     vi.spyOn(fsNode, "readFileSync").mockImplementation(
-      (target, options?: BufferEncoding | fsNode.ReadFileSyncOptions | null) => {
-        if (corrupted && target === configPath) {
-          return "{ definitely not json";
-        }
-        return realReadFileSync(
-          target,
-          typeof options === "string" ? { encoding: options } : (options ?? {}),
-        );
-      },
+      new Proxy(realReadFileSync, {
+        apply(read, receiver, args) {
+          return corrupted && args[0] === configPath
+            ? "{ definitely not json"
+            : Reflect.apply(read, receiver, args);
+        },
+      }),
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const preflight = vi.fn<NonNullable<RuntimeConfigSnapshotRefreshHandler["preflight"]>>(
@@ -281,7 +276,7 @@ it.each(["same-byte-replacement", "revoked"] as const)(
       withExecutor(home, "config-compensation-fence", async (assertCurrent, revokeExecutor) => {
         const { configPath, io, options } = await prepareWrite(home);
         const realRename = fsNode.renameSync;
-        const rootRenames: string[] = [];
+        let rootRenames = 0;
         const mutations = (["writeSync", "writeFileSync", "ftruncateSync", "rmSync"] as const).map(
           (name) => vi.spyOn(fsNode, name),
         );
@@ -301,7 +296,7 @@ it.each(["same-byte-replacement", "revoked"] as const)(
         };
         // Worker lock custody can advance independently of the fenced config target.
         const effects = () => [
-          rootRenames.length,
+          rootRenames,
           ...mutations.map(
             ({ mock }) =>
               mock.calls.filter((args, index) =>
@@ -321,7 +316,7 @@ it.each(["same-byte-replacement", "revoked"] as const)(
           if (destination !== configPath) {
             return;
           }
-          rootRenames.push(String(source));
+          rootRenames++;
           if (observed) {
             return;
           }

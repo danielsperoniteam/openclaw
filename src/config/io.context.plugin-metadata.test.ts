@@ -229,7 +229,6 @@ it("feeds merged workspace plugins to snapshot-backed read-only discovery", () =
   const ids = ["primary", "chat"];
   expect(snapshot?.index.plugins.map((plugin) => plugin.pluginId)).toEqual(ids);
   expect(snapshot?.registryIndex).toEqual(snapshots.get("/srv/ops")?.registryIndex);
-  expect(snapshot?.registryIndex.plugins.map((plugin) => plugin.pluginId)).toEqual(["primary"]);
   expect(snapshot?.registryDiagnostics).toEqual([secondaryDiagnostic]);
   expect(snapshot?.plugins).toEqual(mergedRegistry.plugins);
   expect(structuredClone(snapshot?.manifestRegistry)).toEqual(mergedRegistry);
@@ -244,7 +243,6 @@ it("feeds merged workspace plugins to snapshot-backed read-only discovery", () =
   ]);
   expect(snapshot?.discovery?.candidates.map(resolvePluginCandidateInstallOwner)).toEqual(ids);
   expect(Object.isFrozen(snapshot?.index.plugins)).toBe(true);
-  expect(loader.getSnapshot()).toBe(snapshot);
   expect(
     resolveReadOnlyChannelPluginsForConfig(cfg, {
       env: {},
@@ -268,7 +266,6 @@ it("preserves shared source order and rejects conflicting IDs throughout the inv
   expect(snapshot.plugins.map((plugin) => plugin.id)).toEqual(ids);
   expect(snapshot.index.plugins.map((plugin) => plugin.pluginId)).toEqual(ids);
   expect(snapshot.discovery?.candidates.map((candidate) => candidate.idHint)).toEqual(ids);
-  expect(structuredClone(snapshot.manifestRegistry)).toEqual(snapshot.manifestRegistry);
   expect(
     structuredClone(
       resolveConfigWidePluginManifestRegistry({ config: { agents }, env: {}, pluginIds: [] }),

@@ -7,6 +7,7 @@ import {
   findStartupMaintenanceRequiredError,
   StartupMaintenanceRequiredError,
 } from "../infra/startup-maintenance-required.js";
+import { writeLegacyStateSchemaV1 } from "../infra/state-migrations.caller-mode.test-helpers.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../state/openclaw-state-db-contract.js";
 import {
@@ -234,29 +235,12 @@ describe("config health-state warnings", () => {
     fs.renameSync(databasePath, `${databasePath}.seed`);
     fs.copyFileSync(`${databasePath}.seed`, databasePath);
     const db = new DatabaseSync(databasePath);
-    db.exec(`
-      DROP TABLE audit_events;
-      CREATE TABLE audit_events (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_id TEXT NOT NULL UNIQUE,
-        source_id TEXT NOT NULL UNIQUE,
-        source_sequence INTEGER NOT NULL,
-        occurred_at INTEGER NOT NULL,
-        kind TEXT NOT NULL,
-        action TEXT NOT NULL,
-        status TEXT NOT NULL,
-        error_code TEXT,
-        actor_type TEXT NOT NULL,
-        actor_id TEXT NOT NULL,
-        agent_id TEXT NOT NULL,
-        session_key TEXT,
-        session_id TEXT,
-        run_id TEXT NOT NULL,
-        tool_call_id TEXT,
-        tool_name TEXT
-      );
-    `);
+    db.exec("DROP TABLE audit_events");
     db.close();
+    writeLegacyStateSchemaV1(databasePath);
+    const migrated = new DatabaseSync(databasePath);
+    migrated.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION}`);
+    migrated.close();
     let failure: unknown;
     try {
       patchHealth(deps);
