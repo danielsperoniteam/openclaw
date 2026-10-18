@@ -8,7 +8,7 @@ import { readConfigFileSnapshotFromContext } from "../config/io.snapshot.js";
 import { clearRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import {
-  cliEnv,
+  createCliFixture,
   registerCli,
   writeJson,
   stringConfigSchema,
@@ -24,7 +24,6 @@ import { getCurrentPluginMetadataSnapshot } from "./current-plugin-metadata-snap
 import * as discovery from "./discovery.js";
 import {
   cleanupPluginLoaderFixturesForTest,
-  makePluginLoaderTempDir,
   resetPluginLoaderTestStateForTest,
   writePlugin,
 } from "./loader.test-fixtures.js";
@@ -40,10 +39,9 @@ describe("CLI config producer lifetime", () => {
   it.each(["empty", "missing", "missing-provider", "missing-direct-provider"] as const)(
     "owns discovery from the first %s config read through validated registration",
     async (kind) => {
-      const root = fs.realpathSync(makePluginLoaderTempDir());
+      const { root, configPath, env } = createCliFixture("OPENCLAW_HOME");
       const bundledDir = path.join(root, "bundled");
       const actionPath = path.join(root, "action.txt");
-      const configPath = path.join(root, "openclaw.json");
       const descriptor =
         '{ name: "prepared", description: "Prepared command", hasSubcommands: false }';
       const plugin = writePlugin({
@@ -89,9 +87,7 @@ describe("CLI config producer lifetime", () => {
       }
       await withEnvAsync(
         {
-          OPENCLAW_HOME: root,
-          OPENCLAW_STATE_DIR: path.join(root, "state"),
-          OPENCLAW_CONFIG_PATH: configPath,
+          ...env,
           OPENCLAW_BUNDLED_PLUGINS_DIR: bundledDir,
           OPENCLAW_DISABLE_BUNDLED_PLUGINS: undefined,
           ANTHROPIC_API_KEY: kind.includes("provider") ? "synthetic-token" : undefined,
@@ -147,7 +143,7 @@ describe("CLI config producer lifetime", () => {
     },
   );
   it("keeps skipped validation lazy but rejects an invalid plugin at the fresh registration read", async () => {
-    const root = fs.realpathSync(makePluginLoaderTempDir());
+    const { root, configPath, env } = createCliFixture("OPENCLAW_HOME");
     const plugin = writePlugin({
       id: "invalid-cli",
       dir: path.join(root, "plugin"),
@@ -163,9 +159,8 @@ describe("CLI config producer lifetime", () => {
       path.join(plugin.dir, "doctor-contract-api.cjs"),
       `module.exports = { legacyConfigRules: [${JSON.stringify(rule)}] };`,
     );
-    const configPath = path.join(root, "openclaw.json");
     writeJson(configPath, pluginConfig(plugin, { config: { label: 17 } }));
-    await withEnvAsync({ ...cliEnv(root), OPENCLAW_HOME: root }, async () => {
+    await withEnvAsync(env, async () => {
       const discover = vi.spyOn(discovery, "discoverOpenClawPlugins");
       const session = createPluginCliLoadSession();
       const read = await session.readConfig(() =>
@@ -189,7 +184,7 @@ describe("CLI config producer lifetime", () => {
     });
   });
   it("publishes validated config before plugin CLI registration reads it", async () => {
-    const root = fs.realpathSync(makePluginLoaderTempDir());
+    const { root, configPath, env } = createCliFixture("OPENCLAW_HOME");
     const id = "runtime-config-cli";
     const plugin = writePlugin({
       id,
@@ -206,10 +201,9 @@ describe("CLI config producer lifetime", () => {
         { name: "live-config", description: "Live config command", hasSubcommands: false },
       ],
     });
-    const configPath = path.join(root, "openclaw.json");
     const cfg = pluginConfig(plugin, { enabled: true, config: { command: "live-config" } });
     writeJson(configPath, { ...cfg, plugins: { ...cfg.plugins, enabled: true } });
-    await withEnvAsync({ ...cliEnv(root), OPENCLAW_HOME: root }, async () => {
+    await withEnvAsync(env, async () => {
       clearRuntimeConfigSnapshot();
       const program = new Command();
       await registerCli(program, { primary: "live-config" });
