@@ -16,6 +16,7 @@ export type SqliteReadOnlyWorkerMode =
   | "sync"
   | "content-version"
   | "file-generation"
+  | "update-generation"
   | "async"
   | "metadata"
   | "consolidated"
@@ -164,7 +165,14 @@ function parseSqliteReadOnlyWorkerResult(
 
 export function readSqliteReadOnlyWorkerValue(
   params: SqliteReadOnlyWorkerOutput,
-  mode: "sync" | "async" | "metadata" | "consolidated" | "content-version" | "file-generation",
+  mode:
+    | "sync"
+    | "async"
+    | "metadata"
+    | "consolidated"
+    | "content-version"
+    | "file-generation"
+    | "update-generation",
 ): string;
 export function readSqliteReadOnlyWorkerValue(
   params: SqliteReadOnlyWorkerOutput,
@@ -226,7 +234,7 @@ export function readSqliteReadOnlyWorkerValue(
   if (mode === "content-version" && "contentVersion" in result) {
     return result.contentVersion;
   }
-  if (mode === "file-generation" && "generation" in result) {
+  if ((mode === "file-generation" || mode === "update-generation") && "generation" in result) {
     return result.generation;
   }
   if (mode === "reclaim" && "warnings" in result) {
