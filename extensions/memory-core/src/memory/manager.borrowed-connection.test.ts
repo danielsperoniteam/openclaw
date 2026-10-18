@@ -389,7 +389,11 @@ describe("memory manager agent database lifecycle", () => {
     const writeTranscript = (content: string) =>
       fs.writeFile(
         transcript,
-        `${JSON.stringify({ type: "message", message: { role: "user", content } })}\n`,
+        `${JSON.stringify({
+          type: "message",
+          timestamp: "2026-09-01T00:00:00.000Z",
+          message: { role: "user", content },
+        })}\n`,
       );
     await writeTranscript("Old violet history.");
     const manager = await fixture.getFreshManager(sessionConfig(), "cli");
