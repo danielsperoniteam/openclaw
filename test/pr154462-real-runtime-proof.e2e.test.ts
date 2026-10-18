@@ -2,7 +2,6 @@
 import fs from "node:fs/promises";
 import { createServer, type ServerResponse } from "node:http";
 import path from "node:path";
-import { performance } from "node:perf_hooks";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   getPreparedModelCatalogOwnerSnapshot,
@@ -21,6 +20,7 @@ import {
   startGatewayWithClient,
 } from "../src/gateway/test-helpers.e2e.js";
 import { captureEnv, setTestEnvValue } from "../src/test-utils/env.js";
+import { anthropicTextTurn } from "./anthropic-text-turn.test-support.js";
 import { createSolidPngBuffer } from "./helpers/image-fixtures.js";
 import { createDeferred } from "./helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
@@ -51,51 +51,17 @@ const ACCOUNT_A = "fixture-account-a-v1";
 const ACCOUNT_A_REFRESHED = "fixture-account-a-v2";
 const ACCOUNT_B = "fixture-account-b";
 
-const epoch = performance.now();
-function proof(event: string, data: Record<string, unknown> = {}): void {
-  console.log(
-    JSON.stringify({
-      proof: true,
-      event,
-      utc: new Date().toISOString(),
-      ms: Number((performance.now() - epoch).toFixed(1)),
-      pid: process.pid,
-      ...data,
-    }),
-  );
-}
-
-function anthropicSse(events: Record<string, unknown>[]): string {
-  return events
-    .map((event) => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`)
-    .join("");
-}
-
-/** A plain streamed text answer attributed to the requested model. */
 function textTurn(model: string, text: string): string {
-  return anthropicSse([
-    {
-      type: "message_start",
-      message: {
-        id: `msg_pr154462_${model}`,
-        type: "message",
-        role: "assistant",
-        model,
-        content: [],
-        stop_reason: null,
-        usage: { input_tokens: 320, output_tokens: 0 },
-      },
-    },
-    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-    { type: "content_block_stop", index: 0 },
-    {
-      type: "message_delta",
-      delta: { stop_reason: "end_turn", stop_sequence: null },
-      usage: { output_tokens: 8 },
-    },
-    { type: "message_stop" },
-  ]);
+  return anthropicTextTurn(model, text, `msg_pr154462_${model}`, 320, 8);
+}
+
+function jsonResponse(response: ServerResponse, status: number, body: unknown) {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(JSON.stringify(body));
+}
+
+function modelCapabilities(rich: boolean): Pick<ModelDefinitionConfig, "reasoning" | "input"> {
+  return { reasoning: rich, input: rich ? ["text", "image"] : ["text"] };
 }
 
 function buildMockAnthropicProvider(baseUrl: string) {
@@ -232,29 +198,20 @@ describe("runtime-config replacement during a turn", () => {
         providerServer = createServer((request, response) => {
           const credential = identifyCredential(request.headers["x-api-key"]);
           if (credential === "unknown") {
-            response.writeHead(401, { "content-type": "application/json" });
-            response.end(
-              JSON.stringify({
-                type: "error",
-                error: { type: "authentication_error", message: "unknown fixture account" },
-              }),
-            );
+            jsonResponse(response, 401, {
+              type: "error",
+              error: { type: "authentication_error", message: "unknown fixture account" },
+            });
             return;
           }
           if (request.url === "/models") {
             catalogRequests.push(credential);
             const rich = credential !== "B";
-            response.writeHead(200, { "content-type": "application/json" });
-            response.end(
-              JSON.stringify({
-                models: catalogModels.map((model) =>
-                  Object.assign({}, model, {
-                    reasoning: rich,
-                    input: rich ? ["text", "image"] : ["text"],
-                  } satisfies Pick<ModelDefinitionConfig, "reasoning" | "input">),
-                ),
-              }),
-            );
+            jsonResponse(response, 200, {
+              models: catalogModels.map((model) =>
+                Object.assign({}, model, modelCapabilities(rich)),
+              ),
+            });
             return;
           }
           let body = "";
@@ -289,13 +246,10 @@ describe("runtime-config replacement during a turn", () => {
               return;
             }
             if (failPrimary && model === PRIMARY_MODEL_ID) {
-              response.writeHead(404, { "content-type": "application/json" });
-              response.end(
-                JSON.stringify({
-                  type: "error",
-                  error: { type: "not_found_error", message: `model: ${model}` },
-                }),
-              );
+              jsonResponse(response, 404, {
+                type: "error",
+                error: { type: "not_found_error", message: `model: ${model}` },
+              });
               return;
             }
             response.writeHead(200, {
@@ -397,13 +351,6 @@ describe("runtime-config replacement during a turn", () => {
                     config: getRuntimeConfig(),
                   });
                   const catalog = owner?.readFullModelCatalog?.() ?? owner?.modelCatalog;
-                  proof("catalog_refresh_observed", {
-                    rich,
-                    ready,
-                    requests: [...catalogRequests],
-                    pending: catalog?.pendingProviders ?? [],
-                    entries: catalog?.entries.length ?? 0,
-                  });
                   if (!ready && !catalog?.pendingProviders?.includes(PROVIDER_ID)) {
                     throw new Error(
                       "Catalog refresh settled without the requested provider inventory",
@@ -427,7 +374,6 @@ describe("runtime-config replacement during a turn", () => {
               input: rich ? ["text", "image"] : ["text"],
             }),
           );
-          proof("catalog_ready", { credential: catalogRequests.at(-1), rich });
         };
         const send = async (sessionKey: string, id: string, withImage = false) => {
           const started = await client.request<{ status?: string; runId?: string }>("chat.send", {
@@ -474,7 +420,6 @@ describe("runtime-config replacement during a turn", () => {
         expect(baseline.credential).toBe("A-original");
         expectRichRequest(baseline);
         const admittedShape = { thinking: baseline.thinking, imageCount: baseline.imageCount };
-        proof("baseline_request_verified", { credential: baseline.credential, ...admittedShape });
         const scenarios = [
           {
             name: "same-account-refresh",
@@ -509,10 +454,7 @@ describe("runtime-config replacement during a turn", () => {
             ...provider.config,
             apiKey: scenario.replacementKey,
             models: provider.config.models.map((model) =>
-              Object.assign({}, model, {
-                reasoning: richReplacement,
-                input: richReplacement ? ["text", "image"] : ["text"],
-              } satisfies Pick<ModelDefinitionConfig, "reasoning" | "input">),
+              Object.assign({}, model, modelCapabilities(richReplacement)),
             ),
           };
           await patchConfig(replacement);
@@ -523,13 +465,10 @@ describe("runtime-config replacement during a turn", () => {
           expect(catalogRequests).toContain(scenario.nextCredential);
           const beforeFailover = requests.length;
           failPrimary = true;
-          admittedResponse.writeHead(404, { "content-type": "application/json" });
-          admittedResponse.end(
-            JSON.stringify({
-              type: "error",
-              error: { type: "not_found_error", message: `model: ${PRIMARY_MODEL_ID}` },
-            }),
-          );
+          jsonResponse(admittedResponse, 404, {
+            type: "error",
+            error: { type: "not_found_error", message: `model: ${PRIMARY_MODEL_ID}` },
+          });
           await waitForRun(held.runId);
           const finalRequest = requests
             .slice(beforeFailover)
@@ -553,13 +492,6 @@ describe("runtime-config replacement during a turn", () => {
             requests.slice(beforeNewTurn).find((request) => request.model === PRIMARY_MODEL_ID)
               ?.credential,
           ).toBe(scenario.nextCredential);
-          proof("final_request_verified", {
-            scenario: scenario.name,
-            admittedCredential: finalRequest!.credential,
-            nextTurnCredential: scenario.nextCredential,
-            ...shape,
-            persistedReply: true,
-          });
         }
       } finally {
         heldResponse?.destroy();

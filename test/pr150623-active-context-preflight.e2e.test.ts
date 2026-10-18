@@ -7,6 +7,7 @@ import { SessionManager } from "../src/agents/sessions/session-manager.js";
 import { upsertSessionEntryCore } from "../src/config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../src/config/types.openclaw.js";
 import { connectGatewayClient, disconnectGatewayClient } from "../src/gateway/test-helpers.e2e.js";
+import { anthropicTextTurn } from "./anthropic-text-turn.test-support.js";
 import {
   createOpenClawTestInstance,
   type OpenClawTestInstance,
@@ -202,39 +203,5 @@ async function handleRequest(
   }
   requests.push({ body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
   response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
-  response.end(
-    [
-      {
-        type: "message_start",
-        message: {
-          id: "msg_preflight_proof",
-          type: "message",
-          role: "assistant",
-          model: "preflight-proof",
-          content: [],
-          stop_reason: null,
-          usage: { input_tokens: 20, output_tokens: 0 },
-        },
-      },
-      {
-        type: "content_block_start",
-        index: 0,
-        content_block: { type: "text", text: "" },
-      },
-      {
-        type: "content_block_delta",
-        index: 0,
-        delta: { type: "text_delta", text: REPLY_MARKER },
-      },
-      { type: "content_block_stop", index: 0 },
-      {
-        type: "message_delta",
-        delta: { stop_reason: "end_turn", stop_sequence: null },
-        usage: { output_tokens: 4 },
-      },
-      { type: "message_stop" },
-    ]
-      .map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
-      .join(""),
-  );
+  response.end(anthropicTextTurn("preflight-proof", REPLY_MARKER, "msg_preflight_proof", 20, 4));
 }

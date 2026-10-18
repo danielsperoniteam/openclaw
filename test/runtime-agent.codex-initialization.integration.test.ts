@@ -36,7 +36,13 @@ import { openOpenClawStateDatabase } from "../src/state/openclaw-state-db.js";
 import { observeMainThreadReads } from "../src/test-utils/main-thread-sql-spies.test-support.js";
 import { withOpenClawTestState } from "../src/test-utils/openclaw-test-state.js";
 
-const { upsertSessionUpstreamLink } = upstreamLinks;
+function writeLink(input: Parameters<typeof upstreamLinks.upsertSessionUpstreamLink>[0]) {
+  expect(upstreamLinks.upsertSessionUpstreamLink(input)).toBe(true);
+}
+
+function readLink(sessionKey: string, agentId = "main") {
+  return readSessionUpstreamLinkInDatabase(openOpenClawStateDatabase().db, sessionKey, agentId);
+}
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -134,12 +140,14 @@ describe("Codex initialization through the registered session deletion owner", (
           (admit, attachment) => {
             const operation = linkOperation;
             return createAdmission((request, grant) => {
+              const publication =
+                isRecord(request.facts) && isRecord(request.facts.publication)
+                  ? request.facts.publication.kind
+                  : undefined;
               if (
                 rejectReadinessCommit &&
                 request.stage === "commit" &&
-                isRecord(request.facts) &&
-                isRecord(request.facts.publication) &&
-                request.facts.publication.kind === "session-entry-patch-committed"
+                publication === "session-entry-patch-committed"
               ) {
                 rejectReadinessCommit = false;
                 readinessCommitRefused = true;
@@ -148,9 +156,7 @@ describe("Codex initialization through the registered session deletion owner", (
               if (
                 failure === "rollback commit" &&
                 request.stage === "commit" &&
-                isRecord(request.facts) &&
-                isRecord(request.facts.publication) &&
-                request.facts.publication.kind === "session-native-binding"
+                publication === "session-native-binding"
               ) {
                 rollbackCommitRefused = true;
                 throw new Error("injected rollback failure");
@@ -179,18 +185,16 @@ describe("Codex initialization through the registered session deletion owner", (
         registry.agentHarnesses.push({ pluginId: "codex", source: "runtime", harness });
         markPluginRegistryActive(registry);
         const invokeFork = async () => {
-          expect(
-            upsertSessionUpstreamLink({
-              sessionKey: params.source.sessionKey,
-              agentId: "main",
-              catalogId: params.upstream.catalogId,
-              hostId: params.upstream.hostId,
-              upstreamKind: params.upstream.kind,
-              threadId: sourceThread.id,
-              upstreamRef: params.upstream.ref,
-              marker: null,
-            }),
-          ).toBe(true);
+          writeLink({
+            sessionKey: params.source.sessionKey,
+            agentId: "main",
+            catalogId: params.upstream.catalogId,
+            hostId: params.upstream.hostId,
+            upstreamKind: params.upstream.kind,
+            threadId: sourceThread.id,
+            upstreamRef: params.upstream.ref,
+            marker: null,
+          });
           let result: { status: string; message?: string } | undefined;
           const request = { sessionKey: params.source.sessionKey, entryId: params.source.entryId };
           await expectDefined(
@@ -241,23 +245,17 @@ describe("Codex initialization through the registered session deletion owner", (
                 throw new Error("injected callback failure");
               }
               if (failure === "existing link") {
-                expect(
-                  upsertSessionUpstreamLink({
-                    sessionKey: context.key,
-                    agentId: context.agentId,
-                    catalogId: "codex",
-                    hostId: "gateway:local",
-                    upstreamKind: "codex-app-server",
-                    threadId: "existing-successor",
-                    upstreamRef: { threadId: "existing-successor" },
-                    marker: null,
-                  }),
-                ).toBe(true);
-                successorLink = readSessionUpstreamLinkInDatabase(
-                  openOpenClawStateDatabase().db,
-                  context.key,
-                  context.agentId,
-                );
+                writeLink({
+                  sessionKey: context.key,
+                  agentId: context.agentId,
+                  catalogId: "codex",
+                  hostId: "gateway:local",
+                  upstreamKind: "codex-app-server",
+                  threadId: "existing-successor",
+                  upstreamRef: { threadId: "existing-successor" },
+                  marker: null,
+                });
+                successorLink = readLink(context.key, context.agentId);
               }
               let patch: Awaited<ReturnType<NonNullable<typeof input.afterCreate>>>;
               try {
@@ -313,25 +311,12 @@ describe("Codex initialization through the registered session deletion owner", (
             successorBinding = bindingStore.read(identity);
           }
           if (failure === "successor link") {
-            expect(
-              upsertSessionUpstreamLink({
-                ...expectDefined(
-                  readSessionUpstreamLinkInDatabase(
-                    openOpenClawStateDatabase().db,
-                    params.targetKey,
-                    "main",
-                  ),
-                  "created link",
-                ),
-                marker: { turnId: "successor-turn", userMessageCount: 2 },
-                threadId: "successor-thread",
-              }),
-            ).toBe(true);
-            successorLink = readSessionUpstreamLinkInDatabase(
-              openOpenClawStateDatabase().db,
-              params.targetKey,
-              "main",
-            );
+            writeLink({
+              ...expectDefined(readLink(params.targetKey), "created link"),
+              marker: { turnId: "successor-turn", userMessageCount: 2 },
+              threadId: "successor-thread",
+            });
+            successorLink = readLink(params.targetKey);
           }
           if (
             [
@@ -411,11 +396,7 @@ describe("Codex initialization through the registered session deletion owner", (
         };
         const child = loadSessionEntry(identity);
         const binding = bindingStore.read(identity);
-        const link = readSessionUpstreamLinkInDatabase(
-          openOpenClawStateDatabase().db,
-          params.targetKey,
-          "main",
-        );
+        const link = readLink(params.targetKey);
         if (failure === "lost response" || failure === "readiness publication") {
           expect(child?.initializationPending).toBeUndefined();
           expect(child?.sessionId).toBe(childSessionId);

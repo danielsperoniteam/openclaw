@@ -20,20 +20,19 @@ vi.mock("../scripts/lib/managed-child-process.mts", async (importOriginal) => ({
   runManagedCommand: lifecycleMock,
 }));
 
-async function runTransaction(
-  stop: string,
-  restart: string,
-  fixture: {
-    root: string;
-    build: () => Promise<{ exitCode: number; admissionRefused?: true }>;
-    lifecycle: (command: string) => Promise<number>;
-  },
-) {
+async function runTransaction(fixture: {
+  build: () => Promise<{ exitCode: number; admissionRefused?: true }>;
+  lifecycle?: (command: string) => Promise<number>;
+  events?: string[];
+}) {
   buildMock.mockImplementation(fixture.build);
-  lifecycleMock.mockImplementation(({ args }: { args: string[] }) => fixture.lifecycle(args[1]!));
-  const cwd = vi.spyOn(process, "cwd").mockReturnValue(fixture.root);
+  lifecycleMock.mockImplementation(({ args }: { args: string[] }) => {
+    fixture.events?.push(args[1]!);
+    return fixture.lifecycle?.(args[1]!) ?? Promise.resolve(0);
+  });
+  const cwd = vi.spyOn(process, "cwd").mockReturnValue(workdir);
   try {
-    return await runUpdateGatewayBuild(stop, restart, shimDir);
+    return await runUpdateGatewayBuild("stop", "restart", shimDir);
   } finally {
     cwd.mockRestore();
   }
@@ -42,6 +41,15 @@ async function runTransaction(
 let scratch: string;
 let workdir: string;
 let shimDir: string;
+const commandSuccess = (stdout = "") => ({
+  code: 0,
+  stdout,
+  stderr: "",
+  signal: null,
+  killed: false,
+  termination: "exit" as const,
+  noOutputTimedOut: false,
+});
 beforeEach(() => {
   scratch = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-update-build-"));
   workdir = path.join(scratch, "checkout");
@@ -150,15 +158,7 @@ describe("source update build output transaction", () => {
         if (argv.includes("build")) {
           writeRuntime(directory!, await git(directory!, "rev-parse", "HEAD"), "candidate");
         }
-        return {
-          code: 0,
-          stdout: argv.includes("--version") ? "12.4.0" : "",
-          stderr: "",
-          signal: null,
-          killed: false,
-          termination: "exit",
-          noOutputTimedOut: false,
-        };
+        return commandSuccess(argv.includes("--version") ? "12.4.0" : "");
       }
       const result = await command(argv, options);
       if (argv.includes("index-pack")) {
@@ -227,15 +227,7 @@ describe("source update build output transaction", () => {
       if (mode === "late") {
         command.mockImplementationOnce(async () => {
           retainCommandProcessCleanup(Promise.resolve("uncertain"));
-          return {
-            stdout: "a".repeat(40),
-            stderr: "",
-            code: 0,
-            signal: null,
-            killed: false,
-            termination: "exit",
-            noOutputTimedOut: false,
-          };
+          return commandSuccess("a".repeat(40));
         });
       }
       const cwd = vi.spyOn(process, "cwd").mockReturnValue(workdir);
@@ -264,8 +256,7 @@ describe("source update build output transaction", () => {
         writeOutput(output, `old:${output}`);
       }
       const events: string[] = [];
-      const result = runTransaction("stop", "restart", {
-        root: workdir,
+      const result = runTransaction({
         lifecycle: async (command) => {
           expect(fs.existsSync(path.join(resolveDistArtifactLockPath(workdir), "owner.json"))).toBe(
             true,
@@ -318,8 +309,7 @@ describe("source update build output transaction", () => {
     async (restartCode) => {
       writeOutput("dist/control-ui", "preserved UI");
       writeOutput("dist", "old");
-      const result = runTransaction("stop", "restart", {
-        root: workdir,
+      const result = runTransaction({
         lifecycle: async (command) => (command === "stop" ? 0 : restartCode),
         build: async () => {
           expect(readOutput("dist/control-ui")).toBe("preserved UI");
@@ -346,8 +336,7 @@ describe("source update build output transaction", () => {
   it("does not build or replace outputs after a failed stop", async () => {
     writeOutput("dist", "old");
     let built = false;
-    const code = await runTransaction("stop", "restart", {
-      root: workdir,
+    const code = await runTransaction({
       lifecycle: async () => 23,
       build: async () => {
         built = true;
@@ -364,12 +353,8 @@ describe("source update build output transaction", () => {
     writeOutput("dist", "old");
     const events: string[] = [];
     await expect(
-      runTransaction("stop", "restart", {
-        root: workdir,
-        lifecycle: async (command) => {
-          events.push(command);
-          return 0;
-        },
+      runTransaction({
+        events,
         build: async () => {
           writeOutput("dist", "partial");
           throw Object.assign(new Error("writer cleanup uncertain"), {
@@ -391,12 +376,8 @@ describe("source update build output transaction", () => {
     fs.writeFileSync(path.join(outside, "marker"), "outside");
     const events: string[] = [];
     await expect(
-      runTransaction("stop", "restart", {
-        root: workdir,
-        lifecycle: async (command) => {
-          events.push(command);
-          return 0;
-        },
+      runTransaction({
+        events,
         build: async () => {
           fs.rmSync(path.join(workdir, "dist"), { recursive: true });
           fs.symlinkSync(outside, path.join(workdir, "dist"));
@@ -413,12 +394,8 @@ describe("source update build output transaction", () => {
     writeOutput("dist", "old");
     const events: string[] = [];
     const inode = fs.statSync(path.join(workdir, "dist", "marker")).ino;
-    const code = await runTransaction("stop", "restart", {
-      root: workdir,
-      lifecycle: async (command) => {
-        events.push(command);
-        return 0;
-      },
+    const code = await runTransaction({
+      events,
       build: async () => {
         events.push("build");
         writeOutput("dist", "old");
@@ -440,12 +417,8 @@ describe("source update build output transaction", () => {
     fs.symlinkSync(outside, path.join(workdir, "packages"));
     const lifecycle: string[] = [];
     await expect(
-      runTransaction("stop", "restart", {
-        root: workdir,
-        lifecycle: async (command) => {
-          lifecycle.push(command);
-          return 0;
-        },
+      runTransaction({
+        events: lifecycle,
         build: async () => ({ exitCode: 0 }),
       }),
     ).rejects.toThrow("symbolic link");

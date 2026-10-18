@@ -1,9 +1,8 @@
-// Release check tests cover release validation script behavior.
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { bundledDistPluginFile } from "openclaw/plugin-sdk/test-fixtures";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { collectBundledExtensionManifestErrors } from "../scripts/lib/bundled-extension-manifest.ts";
 import { listBundledPluginPackArtifacts } from "../scripts/lib/bundled-plugin-build-entries.mjs";
 import { resolveNpmJsonEntries } from "../scripts/lib/npm-json-output.mts";
@@ -21,13 +20,22 @@ import {
 } from "../scripts/release-check.ts";
 import { COMPLETION_SKIP_PLUGIN_COMMANDS_ENV } from "../src/cli/completion-runtime.ts";
 
-function makeItem(shortVersion: string, sparkleVersion: string, channel?: string): string {
-  const channelElement = channel ? `<sparkle:channel>${channel}</sparkle:channel>` : "";
-  return `<item><title>${shortVersion}</title><sparkle:shortVersionString>${shortVersion}</sparkle:shortVersionString><sparkle:version>${sparkleVersion}</sparkle:version>${channelElement}</item>`;
-}
+const tempRoots: string[] = [];
+afterEach(() => {
+  for (const root of tempRoots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
-function makePackResult(filename: string, unpackedSize: number) {
-  return { filename, unpackedSize };
+function fixture(files: Record<string, string> = {}) {
+  const root = mkdtempSync(join(tmpdir(), "openclaw-release-check-"));
+  tempRoots.push(root);
+  for (const [file, content] of Object.entries(files)) {
+    const target = join(root, file);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, content, "utf8");
+  }
+  return root;
 }
 
 const requiredBundledPluginPackPaths = listBundledPluginPackArtifacts();
@@ -37,7 +45,8 @@ await import("openclaw/plugin-sdk/channel-outbound");
 
 describe("collectAppcastSparkleVersionErrors", () => {
   it("requires lane-floor builds on and after lane-floor cutover", () => {
-    const xml = `<rss><channel>${makeItem("2026.3.1", "202603010")}</channel></rss>`;
+    const xml =
+      "<rss><channel><item><title>2026.3.1</title><sparkle:shortVersionString>2026.3.1</sparkle:shortVersionString><sparkle:version>202603010</sparkle:version></item></channel></rss>";
 
     expect(collectAppcastSparkleVersionErrors(xml)).toEqual([
       "appcast item '2026.3.1' has sparkle:version 202603010 below lane floor 2026030190.",
@@ -105,26 +114,18 @@ describe("packed CLI smoke", () => {
   });
 
   it("keeps bundled plugin activation on the built-in runtime", () => {
-    const homeDir = mkdtempSync(join(tmpdir(), "openclaw-release-activation-config-"));
-    try {
-      writePackedBundledPluginActivationConfig(homeDir);
-      const config = JSON.parse(
-        readFileSync(join(homeDir, ".openclaw", "openclaw.json"), "utf8"),
-      ) as Record<string, unknown>;
+    const homeDir = fixture();
+    writePackedBundledPluginActivationConfig(homeDir);
+    const config = JSON.parse(
+      readFileSync(join(homeDir, ".openclaw", "openclaw.json"), "utf8"),
+    ) as Record<string, unknown>;
 
-      expect(config).toMatchObject({
-        agents: {
-          defaults: {
-            models: { "openai/*": { agentRuntime: { id: "openclaw" } } },
-          },
-        },
-        channels: { telegram: { enabled: true } },
-        plugins: { enabled: true, allow: ["telegram"], entries: { telegram: { enabled: true } } },
-      });
-      expect(config).not.toHaveProperty("models");
-    } finally {
-      rmSync(homeDir, { recursive: true, force: true });
-    }
+    expect(config).toMatchObject({
+      agents: { defaults: { models: { "openai/*": { agentRuntime: { id: "openclaw" } } } } },
+      channels: { telegram: { enabled: true } },
+      plugins: { enabled: true, allow: ["telegram"], entries: { telegram: { enabled: true } } },
+    });
+    expect(config).not.toHaveProperty("models");
   });
 
   it("does not admit provider credentials through smoke overrides", () => {
@@ -266,60 +267,32 @@ describe("collectBundledExtensionManifestErrors", () => {
 // statSync().mode never reports execute bits, so these tests are meaningless there.
 describe.skipIf(process.platform === "win32")("collectSkillShellScriptExecutableErrors", () => {
   it("flags non-executable shell scripts under skills/*/scripts", () => {
-    const root = mkdtempSync(join(tmpdir(), "openclaw-release-check-"));
-    const scriptPath = join(root, "skills", "openai-whisper-api", "scripts", "transcribe.sh");
-    mkdirSync(join(root, "skills", "openai-whisper-api", "scripts"), { recursive: true });
-    writeFileSync(scriptPath, "#!/usr/bin/env bash\necho test\n", "utf8");
-    chmodSync(scriptPath, 0o644);
-
-    try {
-      expect(collectSkillShellScriptExecutableErrors(root)).toEqual([
-        "skill shell script is not executable: skills/openai-whisper-api/scripts/transcribe.sh",
-      ]);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    const script = "skills/openai-whisper-api/scripts/transcribe.sh";
+    const root = fixture({ [script]: "#!/usr/bin/env bash\necho test\n" });
+    chmodSync(join(root, script), 0o644);
+    expect(collectSkillShellScriptExecutableErrors(root)).toEqual([
+      "skill shell script is not executable: skills/openai-whisper-api/scripts/transcribe.sh",
+    ]);
   });
 });
 
 describe("collectForbiddenPackPaths", () => {
   it("blocks root dist chunks that still reference private qa lab sources", () => {
-    const tempRoot = mkdtempSync(join(tmpdir(), "openclaw-release-private-qa-"));
+    const tempRoot = fixture({
+      "dist/entry.js": "//#region extensions/qa-lab/src/runtime-api.ts\n",
+      "CHANGELOG.md": "local QA notes mention extensions/qa-lab/\n",
+    });
 
-    try {
-      mkdirSync(join(tempRoot, "dist"), { recursive: true });
-      writeFileSync(
-        join(tempRoot, "dist", "entry.js"),
-        "//#region extensions/qa-lab/src/runtime-api.ts\n",
-        "utf8",
-      );
-      writeFileSync(join(tempRoot, "CHANGELOG.md"), "local QA notes mention extensions/qa-lab/\n");
-
-      expect(collectForbiddenPackContentPaths(["dist/entry.js", "CHANGELOG.md"], tempRoot)).toEqual(
-        ["dist/entry.js"],
-      );
-    } finally {
-      rmSync(tempRoot, { recursive: true, force: true });
-    }
+    expect(collectForbiddenPackContentPaths(["dist/entry.js", "CHANGELOG.md"], tempRoot)).toEqual([
+      "dist/entry.js",
+    ]);
   });
 
   it("blocks root plugin SDK declarations that still reference private test helpers", () => {
-    const tempRoot = mkdtempSync(join(tmpdir(), "openclaw-release-private-sdk-"));
+    const file = "dist/plugin-sdk/channel-test-helpers.d.ts";
+    const tempRoot = fixture({ [file]: "//#region src/plugin-sdk/test-helpers/session.ts\n" });
 
-    try {
-      mkdirSync(join(tempRoot, "dist", "plugin-sdk"), { recursive: true });
-      writeFileSync(
-        join(tempRoot, "dist", "plugin-sdk", "channel-test-helpers.d.ts"),
-        "//#region src/plugin-sdk/test-helpers/session.ts\n",
-        "utf8",
-      );
-
-      expect(
-        collectForbiddenPackContentPaths(["dist/plugin-sdk/channel-test-helpers.d.ts"], tempRoot),
-      ).toEqual(["dist/plugin-sdk/channel-test-helpers.d.ts"]);
-    } finally {
-      rmSync(tempRoot, { recursive: true, force: true });
-    }
+    expect(collectForbiddenPackContentPaths([file], tempRoot)).toEqual([file]);
   });
 });
 
@@ -342,7 +315,7 @@ describe("createPackedPluginSdkTypescriptSmokeProject", () => {
 
 describe("resolveNpmJsonEntries", () => {
   it("normalizes npm <=11 arrays and npm 12 name-keyed objects", () => {
-    const entry = makePackResult("openclaw-2026.7.2.tgz", 120_354_302);
+    const entry = { filename: "openclaw-2026.7.2.tgz", unpackedSize: 120_354_302 };
 
     expect(resolveNpmJsonEntries([entry])).toEqual([entry]);
     expect(resolveNpmJsonEntries(entry)).toEqual([entry]);

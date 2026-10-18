@@ -155,20 +155,21 @@ describe("persistent skill usage through registered Codex dynamic tools", () => 
       .all();
   }
 
-  function expectedUsageRow(count: number) {
-    return {
+  async function expectUsage(count: number) {
+    await waitForDiagnosticEventsDrained();
+    await unregisterUsage();
+    const row = {
       skill_file: skillFile,
       skill_name: skillName,
       skill_source: "workspace",
       use_count: count,
       last_agent_id: "main",
     };
+    expect(usageRows()).toEqual(count === 0 ? [] : [row]);
   }
 
   async function expectNoUsage() {
-    await waitForDiagnosticEventsDrained();
-    await unregisterUsage();
-    expect(usageRows()).toEqual([]);
+    await expectUsage(0);
     expect(consumeRunSkillUsage(runId)).toEqual([]);
     expect(trustedEvents).toEqual([]);
   }
@@ -182,15 +183,11 @@ describe("persistent skill usage through registered Codex dynamic tools", () => 
         success: true,
         contentItems: [{ type: "inputText", text: "# Daily brief\n" }],
       });
-      await waitForDiagnosticEventsDrained();
-      await unregisterUsage();
-      expect(usageRows()).toEqual([expectedUsageRow(1)]);
+      await expectUsage(1);
       unregisterUsage = registerSkillUsageTracking({ env: testState.env });
       expect(await call("read-2")).toMatchObject({ success: true });
-      await waitForDiagnosticEventsDrained();
-      await unregisterUsage();
+      await expectUsage(2);
       expect(execute).toHaveBeenCalledTimes(2);
-      expect(usageRows()).toEqual([expectedUsageRow(2)]);
       expect(consumeRunSkillUsage(runId)).toEqual([
         { name: skillName, source: "workspace", activation: "read", skillFile },
       ]);
@@ -250,9 +247,7 @@ describe("persistent skill usage through registered Codex dynamic tools", () => 
   it("preserves explicit tool-dispatched skill command activation", async () => {
     const { call } = createBridge({ command: true });
     expect(await call("skill-command")).toMatchObject({ success: true });
-    await waitForDiagnosticEventsDrained();
-    await unregisterUsage();
-    expect(usageRows()).toEqual([expectedUsageRow(1)]);
+    await expectUsage(1);
     expect(consumeRunSkillUsage(runId)).toEqual([
       { name: skillName, source: "workspace", activation: "command", skillFile },
     ]);
