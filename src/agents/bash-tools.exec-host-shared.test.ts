@@ -15,17 +15,11 @@ import {
   resolveExecHostApprovalContext,
   sendExecApprovalFollowupResult,
 } from "./bash-tools.exec-host-shared.js";
+import { getTextContent } from "./test-helpers/agent-tools-fs-helpers.js";
 
 const mocks = vi.hoisted(() => {
   function approvals(security = "allowlist", ask = "off", askFallback = "deny") {
-    const policy = { security, ask, askFallback, autoAllowSkills: false };
-    return {
-      defaults: policy,
-      agent: { ...policy },
-      allowlist: [],
-      file: { version: 1, agents: {} },
-      hash: "approvals-hash",
-    };
+    return { agent: { security, ask, askFallback } };
   }
   return {
     approvals,
@@ -74,19 +68,15 @@ describe("sendExecApprovalFollowupResult", () => {
       throw new Error("synthetic delivery import failure");
     });
     vi.doMock("./bash-tools.exec-approval-followup.js", loadDelivery);
-    try {
-      const target = { approvalId: "approval-import-failure" };
-      await sendExecApprovalFollowupResult(target, "Exec finished");
-      await sendExecApprovalFollowupResult(target, "Exec finished");
-      expect(loadDelivery).toHaveBeenCalled();
-      expect(logWarn).toHaveBeenCalledExactlyOnceWith(
-        expect.stringContaining(
-          "exec approval followup dispatch failed (id=approval-import-failure):",
-        ),
-      );
-    } finally {
-      vi.doUnmock("./bash-tools.exec-approval-followup.js");
-    }
+    const target = { approvalId: "approval-import-failure" };
+    await sendExecApprovalFollowupResult(target, "Exec finished");
+    await sendExecApprovalFollowupResult(target, "Exec finished");
+    expect(loadDelivery).toHaveBeenCalled();
+    expect(logWarn).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining(
+        "exec approval followup dispatch failed (id=approval-import-failure):",
+      ),
+    );
   });
 
   it("suppresses approval-not-found followup dispatch failures", async () => {
@@ -118,11 +108,13 @@ describe("sendExecApprovalFollowupResult", () => {
       agentId: "research",
       sessionKey,
       expectedSessionId: "session-original",
+      internalRuntimeHandoffId: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      ),
+      idempotencyKey: expect.stringMatching(
+        new RegExp(`^exec-approval-followup:${approvalId}:nonce:`),
+      ),
     });
-    expect(call.internalRuntimeHandoffId).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-    );
-    expect(call.idempotencyKey).toMatch(new RegExp(`^exec-approval-followup:${approvalId}:nonce:`));
     expect(call.idempotencyKey).not.toContain(call.internalRuntimeHandoffId ?? "");
     expect(call).not.toHaveProperty("bashElevated");
     expect(call).not.toHaveProperty("execApprovalFollowupToken");
@@ -174,21 +166,19 @@ describe("sendExecApprovalFollowupResult", () => {
   });
 });
 
-describe("resolveExecHostApprovalContext", () => {
-  it("clamps host security, ask mode, and fallback to the stricter caller policy", async () => {
-    mocks.resolveExecApprovals.mockResolvedValue(mocks.approvals("full", "off", "full"));
-    await expect(
-      resolveExecHostApprovalContext({
-        agentId: "agent-main",
-        security: "allowlist",
-        ask: "always",
-        host: "gateway",
-      }),
-    ).resolves.toMatchObject({
-      hostSecurity: "allowlist",
-      hostAsk: "always",
-      askFallback: "allowlist",
-    });
+it("clamps host security, ask mode, and fallback to the stricter caller policy", async () => {
+  mocks.resolveExecApprovals.mockResolvedValue(mocks.approvals("full", "off", "full"));
+  await expect(
+    resolveExecHostApprovalContext({
+      agentId: "agent-main",
+      security: "allowlist",
+      ask: "always",
+      host: "gateway",
+    }),
+  ).resolves.toMatchObject({
+    hostSecurity: "allowlist",
+    hostAsk: "always",
+    askFallback: "allowlist",
   });
 });
 
@@ -305,7 +295,7 @@ describe("buildExecApprovalPendingToolResult", () => {
   it("keeps a local /approve prompt when the initiating Discord surface is disabled", () => {
     const result = buildResult({ allowedDecisions: ["allow-once", "deny"] });
     expect(result.details.status).toBe("approval-pending");
-    const text = result.content.find((part) => part.type === "text")?.text ?? "";
+    const text = getTextContent(result);
     expect(text).toContain("/approve approval-slug allow-once");
     expect(text).not.toContain("native chat exec approvals are not configured on Discord");
   });
@@ -322,7 +312,7 @@ describe("buildExecApprovalPendingToolResult", () => {
       host: "node",
       nodeId: "node-mac-1",
     });
-    const text = result.content.find((part) => part.type === "text")?.text ?? "";
+    const text = getTextContent(result);
     expect(text).toContain(
       "Print the Control UI URL with `openclaw dashboard --no-open`, open it in a browser, then use the approval inbox.",
     );
@@ -332,50 +322,37 @@ describe("buildExecApprovalPendingToolResult", () => {
   });
 });
 
-describe("buildHeadlessExecApprovalDeniedMessage", () => {
-  it.each([
-    {
-      trigger: "cron",
-      host: "gateway",
-      target: "--gateway",
-      label: "Automation",
-      surface: "Control UI or a macOS/iOS/Android app",
-      standingGrant: true,
-    },
-    {
-      trigger: undefined,
-      host: "node",
-      target: "--node <id|name|ip>",
-      label: "Headless",
-      surface: "Control UI or a chat channel with exec approvals",
-      standingGrant: false,
-    },
-  ] as const)(
-    "names usable approval surfaces and policy inspection for $label runs",
-    ({ trigger, host, target, label, surface, standingGrant }) => {
-      const text = buildHeadlessExecApprovalDeniedMessage({
-        trigger,
-        host,
-        security: "allowlist",
-        ask: "on-miss",
-        askFallback: "deny",
-      });
-      expect(text).toContain(`${label} runs cannot wait for interactive exec approval`);
-      expect(text).toContain('tools.exec.mode="full"');
-      expect(text).toContain('host approvals to security="full" and ask="off"');
-      expect(text).toContain(`openclaw approvals get ${target}`);
-      expect(text).toContain(surface);
-      expect(text).not.toContain("both files");
-      expect(text).not.toContain("openclaw.sqlite");
-      expect(text).not.toContain("TUI");
-      expect(text).not.toContain("terminal UI");
-      if (standingGrant) {
-        expect(text).toContain("standing grant");
-      } else {
-        expect(text).toContain("rerun interactively");
-        expect(text).not.toContain("standing grant");
-        expect(text).not.toContain("--gateway");
-      }
-    },
-  );
-});
+it.each([
+  ["cron", "gateway", "--gateway", "Automation", "Control UI or a macOS/iOS/Android app", true],
+  [
+    undefined,
+    "node",
+    "--node <id|name|ip>",
+    "Headless",
+    "Control UI or a chat channel with exec approvals",
+    false,
+  ],
+] as const)(
+  "names usable approval surfaces and policy inspection for %s/%s runs",
+  (trigger, host, target, label, surface, standingGrant) => {
+    const text = buildHeadlessExecApprovalDeniedMessage({
+      trigger,
+      host,
+      security: "allowlist",
+      ask: "on-miss",
+      askFallback: "deny",
+    });
+    expect(text).toContain(`${label} runs cannot wait for interactive exec approval`);
+    expect(text).toContain('tools.exec.mode="full"');
+    expect(text).toContain('host approvals to security="full" and ask="off"');
+    expect(text).toContain(`openclaw approvals get ${target}`);
+    expect(text).toContain(surface);
+    expect(text).not.toMatch(/both files|openclaw\.sqlite|TUI|terminal UI/u);
+    if (standingGrant) {
+      expect(text).toContain("standing grant");
+    } else {
+      expect(text).toContain("rerun interactively");
+      expect(text).not.toMatch(/standing grant|--gateway/u);
+    }
+  },
+);

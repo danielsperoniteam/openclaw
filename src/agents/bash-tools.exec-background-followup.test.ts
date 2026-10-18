@@ -21,7 +21,14 @@ import {
 import { waitForExecScope } from "./bash-process-registry.js";
 import { resetProcessRegistryForTests } from "./bash-process-registry.test-support.js";
 import { createExecTool } from "./bash-tools.exec-run.js";
-import type { ExecToolDefaults, ExecToolDetails } from "./bash-tools.exec-types.js";
+import type { ExecToolDefaults } from "./bash-tools.exec-types.js";
+import {
+  admitModelTurn,
+  completionConfig,
+  fullGatewayExec,
+  nodeCommand,
+  runningSession,
+} from "./bash-tools.lifecycle.test-support.js";
 import { createProcessTool } from "./bash-tools.process.js";
 import type { RunEmbeddedAgentParams } from "./embedded-agent-runner/run/params.js";
 import { runEmbeddedAgent } from "./embedded-agent.js";
@@ -46,19 +53,7 @@ beforeAll(async () => {
     label: "exec-followup",
     env: { OPENCLAW_TEST_FAST: "0" },
   });
-  config = {
-    agents: {
-      entries: { main: { workspace: state.workspaceDir } },
-      defaults: {
-        workspace: state.workspaceDir,
-        skipBootstrap: true,
-        model: { primary: "mock-openai/gpt-5.6-luna" },
-        models: { "mock-openai/gpt-5.6-luna": { agentRuntime: { id: "openclaw" } } },
-      },
-    },
-    plugins: { enabled: false },
-    skills: { load: { watch: false } },
-  };
+  config = completionConfig(state.workspaceDir);
   await state.writeConfig(config);
   openOpenClawStateDatabase();
 });
@@ -66,13 +61,7 @@ beforeAll(async () => {
 beforeEach(() => {
   setRuntimeConfigSnapshot(config);
   model.mockReset().mockImplementation(async (params: RunEmbeddedAgentParams) => {
-    await expectDefined(params.preparedRunAdmission, "real completion admission").admit(
-      "gateway",
-      params.runId,
-    );
-    params.onExecutionPhase?.({ phase: "model_call_started" });
-    await params.onExecutionStarted?.();
-    await params.onAgentEvent?.({ stream: "lifecycle", data: { phase: "start" } });
+    await admitModelTurn(params);
     return { payloads: [{ text: "NO_REPLY" }], meta: { durationMs: 1 } };
   });
   vi.spyOn(sessionEvents, "enqueueSessionEventForHost").mockImplementation((text, options) => {
@@ -111,13 +100,6 @@ async function seedOrigin(sessionKey: string, spawnedBy?: string) {
   );
 }
 
-function nodeCommand(source: string): string {
-  const quote = (value: string) =>
-    `'${value.replaceAll("'", process.platform === "win32" ? "''" : "'\\''")}'`;
-  const command = `${quote(process.execPath)} -e ${quote(source)}`;
-  return process.platform === "win32" ? `& ${command}` : command;
-}
-
 async function completion(signal: AbortSignal) {
   const receipt = expectDefined(receipts.at(-1), "ordinary completion receipt");
   expect(await withinTest(receipt.accepted, signal)).toEqual({ ok: true });
@@ -130,9 +112,7 @@ async function completion(signal: AbortSignal) {
 function backgroundExec(sessionKey: string, overrides: ExecToolDefaults = {}) {
   return createExecTool({
     config,
-    host: "gateway",
-    security: "full",
-    ask: "off",
+    ...fullGatewayExec,
     sessionKey,
     scopeKey: sessionKey,
     notifyOnExit: true,
@@ -141,19 +121,9 @@ function backgroundExec(sessionKey: string, overrides: ExecToolDefaults = {}) {
   });
 }
 
-function runningSession(details: ExecToolDetails) {
-  expect(details.status).toBe("running");
-  if (details.status !== "running") {
-    throw new Error("Expected a background process");
-  }
-  return details;
-}
-
 test("does not advertise detached continuation when process is unavailable", async () => {
   const exec = createExecTool({
-    host: "gateway",
-    security: "full",
-    ask: "off",
+    ...fullGatewayExec,
     processToolAvailabilityRef: { value: false },
     notifyOnExit: false,
   });

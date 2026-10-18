@@ -42,6 +42,11 @@ vi.mock("./shell-snapshot.js", async (importOriginal) => {
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const python3 = resolveExecutablePath("python3", { useCache: false });
+const allowedReview = {
+  decision: "allow-once",
+  risk: "low",
+  rationale: "list fixture files",
+} as const;
 
 function completed(details: ExecToolDetails) {
   if (details.status !== "completed") {
@@ -63,11 +68,7 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
     vi.stubEnv("PATH", "/usr/bin:/bin");
     vi.stubEnv("SHELL", "/bin/bash");
     vi.stubEnv("OPENCLAW_EXEC_SHELL_SNAPSHOT", "1");
-    saveExecApprovals({
-      version: 1,
-      defaults: { security: "allowlist", ask: "on-miss", askFallback: "deny" },
-      agents: {},
-    });
+    setPolicy("allowlist");
     resetProcessRegistryForTests();
     boundary.prepare.mockReset().mockResolvedValue(undefined);
     const liveSupervisor = createProcessSupervisor();
@@ -102,11 +103,7 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
     });
   }
   function reviewer() {
-    return vi.fn<ExecAutoReviewer>(async () => ({
-      decision: "allow-once",
-      risk: "low",
-      rationale: "list fixture files",
-    }));
+    return vi.fn<ExecAutoReviewer>(async () => allowedReview);
   }
 
   function setPolicy(security: "allowlist" | "deny", allowlisted = false) {
@@ -202,15 +199,11 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
       if (shadowed && mode === "auto") {
         review.mockImplementation(async () => {
           fs.symlinkSync(fs.realpathSync(interpreter), path.join(earlierBin, "python"));
-          return { decision: "allow-once", risk: "low", rationale: "list fixture files" };
+          return allowedReview;
         });
       }
       if (mode === "ask") {
-        approve("allow-once", () => {
-          if (shadowed) {
-            fs.symlinkSync(fs.realpathSync(interpreter), path.join(earlierBin, "python"));
-          }
-        });
+        approve("allow-once");
       }
       // Gateway login-shell PATH is cached; select the fixture through its explicit exec setting.
       const result = await tool(review, mode, [earlierBin, path.dirname(interpreter)]).execute(

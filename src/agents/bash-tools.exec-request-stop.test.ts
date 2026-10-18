@@ -9,7 +9,6 @@ import * as routedReplies from "../auto-reply/reply/route-reply.js";
 import * as sessionEvents from "../auto-reply/reply/session-event-handoff.js";
 import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import { replaceSessionEntry } from "../config/sessions/session-accessor.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { canRequesterAbortChatRun } from "../gateway/server-methods/chat-abort-authorization.js";
 import { readExecRequestOwners, withExecRequestTurn } from "../infra/exec-request-context.js";
 import {
@@ -35,7 +34,14 @@ import {
 } from "./bash-process-registry.js";
 import { resetProcessRegistryForTests } from "./bash-process-registry.test-support.js";
 import { createExecTool } from "./bash-tools.exec-run.js";
-import type { ExecToolDefaults, ExecToolDetails } from "./bash-tools.exec-types.js";
+import type { ExecToolDefaults } from "./bash-tools.exec-types.js";
+import {
+  admitModelTurn,
+  completionConfig,
+  fullGatewayExec,
+  nodeCommand,
+  runningSession,
+} from "./bash-tools.lifecycle.test-support.js";
 import type { RunEmbeddedAgentParams } from "./embedded-agent-runner/run/params.js";
 import { runEmbeddedAgent } from "./embedded-agent.js";
 
@@ -45,13 +51,6 @@ const model = vi.mocked(runEmbeddedAgent);
 await import("../auto-reply/reply/get-reply-from-config.runtime.js").then((runtime) =>
   runtime.prewarmConfigDrivenReplyRuntime(),
 );
-
-function nodeCommand(source: string): string {
-  const quote = (value: string) =>
-    `'${value.replaceAll("'", process.platform === "win32" ? "''" : "'\\''")}'`;
-  const command = `${quote(process.execPath)} -e ${quote(source)}`;
-  return process.platform === "win32" ? `& ${command}` : command;
-}
 
 function captureCancellation(
   target: Parameters<typeof captureExecRequestCancellation>[0],
@@ -66,14 +65,6 @@ function captureCancellation(
       { deviceId, isAdmin: false },
     ),
   );
-}
-
-function runningSession(details: ExecToolDetails) {
-  expect(details.status).toBe("running");
-  if (details.status !== "running") {
-    throw new Error("Expected an ordinary yielded command");
-  }
-  return details.sessionId;
 }
 
 test.for([
@@ -105,26 +96,11 @@ test.for([
           agentId: "main",
         };
         const continuationScope = `routed-continuation:${sessionScope}`;
-        const config: OpenClawConfig = {
-          agents: {
-            entries: { main: { workspace: directory } },
-            defaults: {
-              workspace: directory,
-              skipBootstrap: true,
-              model: { primary: "mock-openai/gpt-5.6-luna" },
-              models: { "mock-openai/gpt-5.6-luna": { agentRuntime: { id: "openclaw" } } },
-            },
-          },
-          session: { scope: sessionScope },
-          plugins: { enabled: false },
-          skills: { load: { watch: false } },
-        };
+        const config = { ...completionConfig(directory), session: { scope: sessionScope } };
         const execTool = (defaults: ExecToolDefaults) =>
           createExecTool({
             config,
-            host: "gateway",
-            security: "full",
-            ask: "off",
+            ...fullGatewayExec,
             cwd: directory,
             allowBackground: true,
             notifyOnExit: true,
@@ -179,11 +155,7 @@ test.for([
         let continuedProcess: ProcessSession | undefined;
         let continuationRuns = 0;
         model.mockReset().mockImplementation(async (params: RunEmbeddedAgentParams) => {
-          const admission = expectDefined(params.preparedRunAdmission, "ordinary reply admission");
-          await admission.admit("gateway", params.runId);
-          params.onExecutionPhase?.({ phase: "model_call_started" });
-          await params.onExecutionStarted?.();
-          await params.onAgentEvent?.({ stream: "lifecycle", data: { phase: "start" } });
+          await admitModelTurn(params);
           if (params.prompt.includes("Later human request")) {
             return {
               payloads: [{ text: "Later human request succeeded" }],
@@ -205,7 +177,7 @@ test.for([
               timeoutSeconds: 60,
             });
             continuedProcess = expectDefined(
-              getSession(runningSession(running.details)),
+              getSession(runningSession(running.details).sessionId),
               "continued process",
             );
           }
@@ -257,7 +229,7 @@ test.for([
             });
             return exec.execute("routed-completion", { command, yieldMs: 10, timeoutSeconds: 60 });
           });
-          const sessionId = runningSession(started.details);
+          const { sessionId } = runningSession(started.details);
           await fs.writeFile(releasePath, "release");
           await waitForExecScope(origin.sessionKey);
           expect(getFinishedSession(sessionId)?.exitCode).toBe(0);
