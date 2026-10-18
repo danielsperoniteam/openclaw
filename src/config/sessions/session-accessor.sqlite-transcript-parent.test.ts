@@ -1,5 +1,5 @@
 import path from "node:path";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, expect, it, vi } from "vitest";
 import { trackSqliteStatementExecutions } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import { requireNodeSqlite } from "../../infra/node-sqlite.js";
 import { runSqliteImmediateTransactionSync } from "../../infra/sqlite-transaction.js";
@@ -25,8 +25,9 @@ import {
 import { replaceTranscriptEventsSync } from "./session-accessor.sqlite-transcript-write.test-support.js";
 
 const sessionDirs = useSessionStoreTempDirs(afterAll, "openclaw-ancestry-");
+afterEach(() => vi.restoreAllMocks());
 
-async function createTranscript(events: TranscriptEvent[]) {
+async function createTranscript(events: TranscriptEvent[] = chain("root")) {
   const scope = {
     agentId: "main",
     sessionId: "ancestry",
@@ -70,6 +71,10 @@ function message(id: string, parentId: string | null): TranscriptEvent {
   return { type: "message", id, parentId, message: { role: "user", content: id } };
 }
 
+function chain(...ids: string[]): TranscriptEvent[] {
+  return ids.map((id, index) => message(id, ids[index - 1] ?? null));
+}
+
 function assistant(eventId: string, parentId?: string) {
   return { eventId, parentId, message: { role: "assistant", content: eventId } };
 }
@@ -77,36 +82,30 @@ function assistant(eventId: string, parentId?: string) {
 it.each(["event", "message"] as const)(
   "keeps %s append rollback with its owning worker transaction without a savepoint",
   async (kind) => {
-    const { database, scope, append, transaction } = await createTranscript([
-      message("root", null),
-    ]);
+    const { database, scope, append, transaction } = await createTranscript();
     const before = loadTranscriptEventsSync(scope);
     expect(() => append("outside-transaction", undefined, database)).toThrow(
       "Transcript write lost its owning transaction",
     );
     const transactionSql = vi.spyOn(database.db, "exec");
-    try {
-      expect(() =>
-        transaction((current) => {
-          const snapshot =
-            kind === "event"
-              ? appendTranscriptEventSnapshotSync(
-                  scope,
-                  { type: "custom", id: "rolled-back", parentId: "root" },
-                  {},
-                  undefined,
-                  undefined,
-                  current,
-                )
-              : append("rolled-back", undefined, current);
-          expect(snapshot.ok).toBe(true);
-          throw new Error("owning request refused commit");
-        }),
-      ).toThrow("owning request refused commit");
-      expect(transactionSql.mock.calls.some(([sql]) => /SAVEPOINT/i.test(sql))).toBe(false);
-    } finally {
-      transactionSql.mockRestore();
-    }
+    expect(() =>
+      transaction((current) => {
+        const snapshot =
+          kind === "event"
+            ? appendTranscriptEventSnapshotSync(
+                scope,
+                { type: "custom", id: "rolled-back", parentId: "root" },
+                {},
+                undefined,
+                undefined,
+                current,
+              )
+            : append("rolled-back", undefined, current);
+        expect(snapshot.ok).toBe(true);
+        throw new Error("owning request refused commit");
+      }),
+    ).toThrow("owning request refused commit");
+    expect(transactionSql.mock.calls.some(([sql]) => /SAVEPOINT/i.test(sql))).toBe(false);
     expect(loadTranscriptEventsSync(scope)).toEqual(before);
     const next = append("committed");
     expect(next).toMatchObject({ ok: true, value: { result: { messageId: "committed" } } });
@@ -116,14 +115,10 @@ it.each(["event", "message"] as const)(
 it.each(["dirty", "unclassified"] as const)(
   "shares append metadata without retaining facts across rollback or foreign %s writes",
   async (change) => {
-    const {
-      database,
-      scope,
-      append: appendSnapshot,
-      transaction,
-    } = await createTranscript([message("root", null), message("tail", "root")]);
+    const fixture = await createTranscript(chain("root", "tail"));
+    const { database, scope, transaction } = fixture;
     const append = (id: string, parentId: string) => {
-      const snapshot = appendSnapshot(id, parentId);
+      const snapshot = fixture.append(id, parentId);
       if (!snapshot.ok) {
         throw new Error(`Append refused: ${snapshot.error.code}`);
       }
@@ -133,16 +128,14 @@ it.each(["dirty", "unclassified"] as const)(
       requireNativeSqliteDatabase(database.db),
       ["projection", "tail"],
       (sql) => {
-        if (!/^select /i.test(sql)) {
-          return null;
-        }
-        if (sql.includes('"session_transcript_index_state"')) {
-          return "projection";
-        }
-        return /^select "seq" from "transcript_events"/i.test(sql) &&
-          sql.includes('order by "seq" desc')
-          ? "tail"
-          : null;
+        return !/^select /i.test(sql)
+          ? null
+          : sql.includes('"session_transcript_index_state"')
+            ? "projection"
+            : /^select "seq" from "transcript_events"/i.test(sql) &&
+                sql.includes('order by "seq" desc')
+              ? "tail"
+              : null;
       },
     );
     let first: ReturnType<typeof append>;
@@ -194,12 +187,12 @@ it.each(["dirty", "unclassified"] as const)(
 );
 
 it("returns the newer visible tail after native identity-insert reentry", async () => {
-  const { append } = await createTranscript([message("root", null)]);
+  const { append } = await createTranscript();
   const { StatementSync } = requireNodeSqlite();
   // oxlint-disable-next-line typescript/unbound-method -- Forwarded below with the original native receiver.
   const original = StatementSync.prototype.run;
   let reentered = false;
-  const spy = vi.spyOn(StatementSync.prototype, "run").mockImplementation(
+  vi.spyOn(StatementSync.prototype, "run").mockImplementation(
     new Proxy(original, {
       apply(target, receiver, args) {
         const value = Reflect.apply(target, receiver, args);
@@ -209,77 +202,64 @@ it("returns the newer visible tail after native identity-insert reentry", async 
           args.includes("outer")
         ) {
           reentered = true;
-          const nested = append("nested", "outer");
-          expect(nested.ok).toBe(true);
+          expect(append("nested", "outer").ok).toBe(true);
         }
         return value;
       },
     }),
   );
-  try {
-    const result = append("outer", "root");
-    expect(reentered).toBe(true);
-    expect(result).toMatchObject({
-      ok: true,
-      value: {
-        result: { messageId: "outer", anchor: { entryId: "outer", rawSeq: 2 } },
-        visibleTail: { entryId: "nested" },
-        after: { rawSeq: 3 },
-      },
-    });
-  } finally {
-    spy.mockRestore();
-  }
+  const result = append("outer", "root");
+  expect(reentered).toBe(true);
+  expect(result).toMatchObject({
+    ok: true,
+    value: {
+      result: { messageId: "outer", anchor: { entryId: "outer", rawSeq: 2 } },
+      visibleTail: { entryId: "nested" },
+      after: { rawSeq: 3 },
+    },
+  });
 });
 
-describe("SQLite transcript append ancestry", () => {
-  const linear = [message("root", null), message("tail", "root")];
-  const cycle = [message("cycle-a", "cycle-b"), message("cycle-b", "cycle-a")];
-  it.each([
-    ["dangling ancestor", [message("tail", "missing")], "missing", "tail"],
-    ["unrelated cycle", cycle, "outside", "outside"],
-    ["cycle without root", cycle, null, null],
-    [
-      "invalid leaf navigation fallback",
-      [...linear, { type: "leaf", id: "invalid", parentId: "tail", targetId: "missing" }],
-      "root",
-      "tail",
-    ],
-    [
-      "parentless navigation fallback",
-      [
-        ...linear,
-        { type: "message", id: "parentless", message: { role: "user", content: "late" } },
-      ],
-      "root",
-      "root",
-    ],
-  ] satisfies [string, TranscriptEvent[], string | null, string | null][])(
-    "preserves %s",
-    async (_name, events, parentId, expected) => {
-      const { parent } = await createTranscript(events);
-      expect(parent(parentId)).toBe(expected);
-    },
-  );
+const linear = chain("root", "tail");
+const cycle = [message("cycle-a", "cycle-b"), message("cycle-b", "cycle-a")];
+it.each([
+  ["dangling ancestor", [message("tail", "missing")], "missing", "tail"],
+  ["unrelated cycle", cycle, "outside", "outside"],
+  ["cycle without root", cycle, null, null],
+  [
+    "invalid leaf navigation fallback",
+    [...linear, { type: "leaf", id: "invalid", parentId: "tail", targetId: "missing" }],
+    "root",
+    "tail",
+  ],
+  [
+    "parentless navigation fallback",
+    [...linear, { type: "message", id: "parentless", message: { role: "user", content: "late" } }],
+    "root",
+    "root",
+  ],
+] satisfies [string, TranscriptEvent[], string | null, string | null][])(
+  "preserves %s",
+  async (_name, events, parentId, expected) => {
+    const { parent } = await createTranscript(events);
+    expect(parent(parentId)).toBe(expected);
+  },
+);
 
-  it("does not traverse an ancestor from another session", async () => {
-    const { scope, parent } = await createTranscript([message("tail", "foreign")]);
-    const other = { ...scope, sessionId: "other", sessionKey: "agent:main:other" };
-    await upsertSessionEntryCore(other, { sessionId: other.sessionId, updatedAt: 1 });
-    replaceTranscriptEventsSync(other, [message("foreign", "root")]);
-    expect(parent("root")).toBe("root");
-  });
+it("does not traverse an ancestor from another session", async () => {
+  const { scope, parent } = await createTranscript([message("tail", "foreign")]);
+  const other = { ...scope, sessionId: "other", sessionKey: "agent:main:other" };
+  await upsertSessionEntryCore(other, { sessionId: other.sessionId, updatedAt: 1 });
+  replaceTranscriptEventsSync(other, [message("foreign", "root")]);
+  expect(parent("root")).toBe("root");
 });
 
 it.each(["missing-prepared", "missing-admitted", "overflow-prepared"] as const)(
   "preserves prepared assistant %s refusal before parsing newer messages",
   async (scenario) => {
-    const { database, scope } = await createTranscript([
-      message("admitted", null),
-      message("prepared", "admitted"),
-      message("poison", "prepared"),
-      message("tail", "poison"),
-    ]);
+    const { database, scope } = await createTranscript(
+      chain("admitted", "prepared", "poison", "tail"),
+    );
     database.db
       .prepare("UPDATE transcript_events SET event_json = '{' WHERE session_id = ? AND seq = 3")
       .run(scope.sessionId);

@@ -1,9 +1,11 @@
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDeferred } from "../../../test/helpers/promise.js";
+import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
 import { createTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { runSqliteImmediateTransactionSync } from "../../infra/sqlite-transaction.js";
 import { runSessionMutation } from "../../sessions/session-controller.lifecycle.js";
 import {
   closeOpenClawAgentDatabaseByPathAsync,
@@ -12,6 +14,7 @@ import {
   openOpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseAsync } from "../../state/openclaw-state-db.js";
+import { requireNativeSqliteDatabase } from "../../test-utils/native-sqlite.js";
 import {
   cleanupSessionLifecycleArtifactsCore,
   deleteSessionEntryLifecycle,
@@ -45,10 +48,7 @@ describe("SQLite lifecycle cleanup reclamation", () => {
   beforeEach(() => {
     storePath = path.join(
       tempDirs.make("openclaw-session-cleanup-reclamation-"),
-      "agents",
-      "main",
-      "sessions",
-      "sessions.json",
+      "agents/main/sessions/sessions.json",
     );
   });
   afterEach(async () => {
@@ -67,9 +67,7 @@ describe("SQLite lifecycle cleanup reclamation", () => {
   });
   function database() {
     const target = resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" });
-    if (!target.path) {
-      throw new Error("expected reclamation database path");
-    }
+    assert.ok(target.path, "expected reclamation database path");
     return openOpenClawAgentDatabase({ agentId: "main", path: target.path });
   }
   const cleanup = (
@@ -88,6 +86,10 @@ describe("SQLite lifecycle cleanup reclamation", () => {
     await closeOpenClawAgentDatabasesAsync();
     closeOpenClawAgentDatabasesForTest();
   }
+  const archive = (sessionId: string) =>
+    database()
+      .db.prepare("SELECT * FROM session_transcript_archives WHERE session_id = ?")
+      .get(sessionId);
 
   it.each(["replace", "delete"] as const)(
     "rejects a stale entry plan before mutation after an awaited %s",
@@ -107,9 +109,7 @@ describe("SQLite lifecycle cleanup reclamation", () => {
       vi.spyOn(reclamation, "runSessionDeletionPlanning").mockImplementationOnce(
         async (...args) => {
           const result = await prepare(...args);
-          if (result.operation !== "entry" || result.value.kind !== "ready") {
-            throw new Error("Expected the original entry to finish deletion planning");
-          }
+          assert.ok(result.operation === "entry" && result.value.kind === "ready");
           expect(result.value.value.targetSnapshot).toMatchObject([
             { sessionKey: current.sessionKey, entry },
           ]);
@@ -138,12 +138,11 @@ describe("SQLite lifecycle cleanup reclamation", () => {
         await entered.promise;
         deletion = deleteSessionEntryLifecycle(deletionParams);
         // Preparation observes the old row while the preceding lifecycle owner is held.
-        await Promise.race([
+        await awaitGateBeforeSettlement(
           previous,
-          deletion.then(() => {
-            throw new Error("Deletion completed without waiting for the preceding lifecycle owner");
-          }),
-        ]);
+          deletion,
+          "Deletion completed without waiting for the preceding lifecycle owner",
+        );
         await expect(deletion).resolves.toEqual({
           archivedTranscripts: [],
           deleted: false,
@@ -176,9 +175,7 @@ describe("SQLite lifecycle cleanup reclamation", () => {
     await replaceSessionEntry(current, { sessionId: current.sessionId, updatedAt });
     await replaceTranscriptEvents(current, events);
     const expectedEntry = loadSessionEntry(current);
-    if (!expectedEntry) {
-      throw new Error("expected guarded entry");
-    }
+    assert.ok(expectedEntry, "expected guarded entry");
     const replacement = { ...expectedEntry, label: "concurrent replacement" };
     let materializations = 0;
     hook.after = () => {
@@ -192,11 +189,12 @@ describe("SQLite lifecycle cleanup reclamation", () => {
       storePath,
       target: { canonicalKey: current.sessionKey, storeKeys: [current.sessionKey] },
     });
-    expect(result).toMatchObject({ deleted: false, expectedEntryMismatch: true });
+    expect(result).toMatchObject({
+      deleted: false,
+      expectedEntryMismatch: true,
+      archivedTranscripts: [expect.objectContaining({ sessionId: history.sessionId })],
+    });
     expect(materializations).toBe(2);
-    expect(result.archivedTranscripts).toEqual([
-      expect.objectContaining({ sessionId: history.sessionId }),
-    ]);
     await expect(loadTranscriptEvents(history)).resolves.toEqual([]);
     expect(loadSessionEntry(current)).toEqual(replacement);
     await expect(loadTranscriptEvents(current)).resolves.toEqual(events);
@@ -223,13 +221,9 @@ describe("SQLite lifecycle cleanup reclamation", () => {
     expect(loadSessionEntry(history)).toMatchObject(current);
     await expect(loadTranscriptEvents(history)).resolves.toEqual([]);
     const db = database();
-    const archive = db.db
-      .prepare("SELECT archive_name FROM session_transcript_archives WHERE session_id = ?")
-      .get(history.sessionId);
-    if (typeof archive?.archive_name !== "string") {
-      throw new Error("expected published orphan archive");
-    }
-    const archivePath = path.join(path.dirname(storePath), archive.archive_name);
+    const archiveName = archive(history.sessionId)?.archive_name;
+    assert.ok(typeof archiveName === "string", "expected published orphan archive");
+    const archivePath = path.join(path.dirname(storePath), archiveName);
     const bytes = fs.readFileSync(archivePath);
     fs.rmSync(archivePath);
     db.db
@@ -241,11 +235,7 @@ describe("SQLite lifecycle cleanup reclamation", () => {
       archivedTranscriptArtifacts: 0,
     });
     expect(fs.readFileSync(archivePath)).toEqual(bytes);
-    expect(
-      database()
-        .db.prepare("SELECT published_at FROM session_transcript_archives WHERE session_id = ?")
-        .get(history.sessionId),
-    ).toEqual({ published_at: expect.any(Number) });
+    expect(archive(history.sessionId)).toMatchObject({ published_at: expect.any(Number) });
     expect(loadSessionEntry(history)).toMatchObject(current);
   });
 
@@ -269,14 +259,10 @@ describe("SQLite lifecycle cleanup reclamation", () => {
     const last = db.db
       .prepare("SELECT max(seq) AS seq FROM transcript_events WHERE session_id = ?")
       .get(current.sessionId)?.seq;
-    if (typeof last !== "number" && typeof last !== "bigint") {
-      throw new Error("expected transcript sequence");
-    }
+    assert.ok(typeof last === "number" || typeof last === "bigint", "expected transcript sequence");
     const initialSeq = Number(last);
     const eventJson = JSON.stringify(event);
-    // sqlite-allow-raw -- bulk fixture setup stays outside the measured cleanup commit.
-    db.db.exec("BEGIN IMMEDIATE");
-    try {
+    runSqliteImmediateTransactionSync(requireNativeSqliteDatabase(db.db), () => {
       for (let index = 1; index < rows; index += 1) {
         insert.run(current.sessionId, initialSeq + index, eventJson, now - 600_000 + index);
       }
@@ -286,13 +272,7 @@ describe("SQLite lifecycle cleanup reclamation", () => {
         JSON.stringify({ type: "metadata", runId: "unrelated" }),
         now,
       );
-      // sqlite-allow-raw -- commits the deterministic fixture before measurement.
-      db.db.exec("COMMIT");
-    } catch (error) {
-      // sqlite-allow-raw -- releases the failed fixture transaction.
-      db.db.exec("ROLLBACK");
-      throw error;
-    }
+    });
     const samples: number[] = [];
     let previous = 0;
     let heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -323,13 +303,7 @@ describe("SQLite lifecycle cleanup reclamation", () => {
         .prepare("SELECT count(*) AS count FROM transcript_events WHERE session_id = ?")
         .get(current.sessionId),
     ).toEqual({ count: 0 });
-    expect(
-      db.db
-        .prepare(
-          "SELECT archive_sha256, published_at FROM session_transcript_archives WHERE session_id = ?",
-        )
-        .get(current.sessionId),
-    ).toMatchObject({
+    expect(archive(current.sessionId)).toMatchObject({
       archive_sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       published_at: expect.any(Number),
     });

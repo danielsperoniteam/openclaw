@@ -23,7 +23,6 @@ import { recordSessionParticipant } from "./session-accessor.sqlite-participants
 import {
   applySessionEntryCanonicalReplacements,
   applySessionEntryExactReplacements,
-  type SessionEntryCanonicalReplacement,
 } from "./session-accessor.sqlite-replacement-projection.js";
 import { listSessionMembersInDatabase } from "./session-sharing-store.kernel.js";
 import { addSessionMember } from "./session-sharing-store.native.js";
@@ -42,10 +41,12 @@ function observePublication(sessionKey: string) {
   return { stop, read: () => published };
 }
 
-const replacements = (rows: SessionEntryCanonicalReplacement[]) => () => ({
-  result: undefined,
-  replacements: rows,
-});
+const replacements =
+  <T>(rows: T[]) =>
+  () => ({
+    result: undefined,
+    replacements: rows,
+  });
 
 const participantIdentity = (id: string) => ({
   type: "remote" as const,
@@ -70,19 +71,12 @@ it("persists and publishes a snapshot restored by a later canonical replacement"
       await applySessionEntryExactReplacements({
         storePath: database.path,
         sessionKeys: [sessionKey],
-        update: () => ({
-          result: undefined,
-          replacements: [
-            {
-              sessionKey,
-              entry: { ...entry, updatedAt: 2, skillsSnapshot: { prompt: "new", skills: [] } },
-            },
-            {
-              sessionKey,
-              entry: { ...entry, updatedAt: 3, label: "final" },
-            },
-          ],
-        }),
+        update: replacements(
+          [
+            { ...entry, updatedAt: 2, skillsSnapshot: { prompt: "new", skills: [] } },
+            { ...entry, updatedAt: 3, label: "final" },
+          ].map((replacement) => ({ sessionKey, entry: replacement })),
+        ),
       });
       const expected = { label: "final", skillsSnapshot: { prompt: "old" } };
       expect(publication.read()?.fullEntry).toMatchObject(expected);
@@ -101,14 +95,16 @@ it("preserves shared-window exclusion provenance across canonical replacements",
     const a = "agent:main:replacement-window-a";
     const b = "agent:main:replacement-window-b";
     const entry = { sessionId: "shared", updatedAt: 1 };
+    const window = () =>
+      database.db
+        .prepare(
+          "SELECT session_key, hook_external_content_source FROM session_windows WHERE session_id = ?",
+        )
+        .get("shared");
     for (const sessionKey of [a, b]) {
       replaceSessionEntrySync({ agentId: "main", storePath: database.path, sessionKey }, entry);
     }
-    expect(
-      database.db
-        .prepare("SELECT session_key FROM session_windows WHERE session_id = ?")
-        .get("shared"),
-    ).toEqual({ session_key: b });
+    expect(window()?.session_key).toBe(b);
     await applySessionEntryCanonicalReplacements({
       storePath: database.path,
       sessionKeys: [a, b],
@@ -121,13 +117,7 @@ it("preserves shared-window exclusion provenance across canonical replacements",
         { sessionKey: b, previousSessionKeys: [], entry: { ...entry, updatedAt: 21 } },
       ]),
     });
-    expect(
-      database.db
-        .prepare(
-          "SELECT session_key, hook_external_content_source FROM session_windows WHERE session_id = ?",
-        )
-        .get("shared"),
-    ).toEqual({ session_key: b, hook_external_content_source: "gmail" });
+    expect(window()).toEqual({ session_key: b, hook_external_content_source: "gmail" });
     expect(
       listTranscriptInstancesFromDatabase({
         database,

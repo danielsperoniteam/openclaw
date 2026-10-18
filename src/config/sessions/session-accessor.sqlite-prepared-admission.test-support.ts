@@ -11,29 +11,41 @@ import {
   type OpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseAsync } from "../../state/openclaw-state-db.js";
+import type { SqliteReclamationWorker } from "./session-accessor.sqlite-reclamation-worker-lifetime.js";
 import * as reclamationWorker from "./session-accessor.sqlite-reclamation-worker.js";
 
-type ReclamationWorker = Parameters<
-  Parameters<typeof reclamationWorker.withSqliteReclamationWorker>[2]
->[0];
+type ReclamationRun = Parameters<SqliteReclamationWorker["run"]>[0];
 
-function interceptReclamationWorker(intercept: (worker: ReclamationWorker) => () => void) {
+function interceptReclamationWorker(
+  intercept: (params: ReclamationRun) => ReclamationRun,
+  preparing?: () => void,
+) {
   const withWorker = reclamationWorker.withSqliteReclamationWorker;
   vi.spyOn(reclamationWorker, "withSqliteReclamationWorker").mockImplementation(
-    (options, claim, run, assertCurrent, signal) =>
+    (options, claim, run, ...rest) =>
       withWorker(
         options,
         claim,
         async (worker) => {
-          const restore = intercept(worker);
+          const runWorker = worker.run.bind(worker);
+          const prepare = worker.prepare.bind(worker);
+          const runSpy = vi
+            .spyOn(worker, "run")
+            .mockImplementation((params) => runWorker(intercept(params)));
+          const prepareSpy =
+            preparing &&
+            vi.spyOn(worker, "prepare").mockImplementation((params) => {
+              preparing();
+              return prepare(params);
+            });
           try {
             return await run(worker);
           } finally {
-            restore();
+            runSpy.mockRestore();
+            prepareSpy?.mockRestore();
           }
         },
-        assertCurrent,
-        signal,
+        ...rest,
       ),
   );
 }
@@ -45,33 +57,26 @@ export function holdReclamationAdmission(databasePath: string) {
   const entered = createDeferred();
   const release = createDeferred();
   let admissions = 0;
-  const pause = async () => {
-    admissions += 1;
-    entered.resolve();
-    await release.promise;
-  };
-  interceptReclamationWorker((worker) => {
-    const execute = worker.run.bind(worker);
-    const spy = vi.spyOn(worker, "run").mockImplementation((params) => {
-      if (
-        params.plan.databaseOptions.path !== databasePath ||
-        params.plan.kind !== "lifecycle-projection-commit"
-      ) {
-        return execute(params);
-      }
-      return execute({
-        ...params,
-        withWriteAdmission: async (performWrite, diagnostics) => {
-          return params.withWriteAdmission(async (...admissionArgs) => {
-            if (!admissionArgs[0]) {
-              await pause();
-            }
-            return performWrite(...admissionArgs);
-          }, diagnostics);
-        },
-      });
-    });
-    return () => spy.mockRestore();
+  interceptReclamationWorker((params) => {
+    if (
+      params.plan.databaseOptions.path !== databasePath ||
+      params.plan.kind !== "lifecycle-projection-commit"
+    ) {
+      return params;
+    }
+    return {
+      ...params,
+      withWriteAdmission: async (performWrite, diagnostics) => {
+        return params.withWriteAdmission(async (...admissionArgs) => {
+          if (!admissionArgs[0]) {
+            admissions += 1;
+            entered.resolve();
+            await release.promise;
+          }
+          return performWrite(...admissionArgs);
+        }, diagnostics);
+      },
+    };
   });
   return {
     release,
@@ -120,9 +125,7 @@ export function observePreparedAdmission(
     release.resolve();
   }
   const children: Array<{
-    closed: boolean;
-    code: number | null;
-    signal: string | null;
+    close?: [number | null, string | null];
     phases: integrity.SqliteIntegrityWorkerPhase[];
     resultOk?: boolean;
   }> = [];
@@ -130,12 +133,7 @@ export function observePreparedAdmission(
     if (!forkingIntegrity) {
       return;
     }
-    const row: (typeof children)[number] = {
-      closed: false,
-      code: null,
-      signal: null,
-      phases: [],
-    };
+    const row: (typeof children)[number] = { phases: [] };
     children.push(row);
     child.on("message", (message: integrity.SqliteIntegrityWorkerMessage) => {
       if ("type" in message) {
@@ -147,9 +145,7 @@ export function observePreparedAdmission(
     void own(
       new Promise<void>((resolve) => {
         child.once("close", (code, signal) => {
-          row.closed = true;
-          row.code = code;
-          row.signal = signal;
+          row.close = [code, signal];
           resolve();
         });
       }),
@@ -203,9 +199,7 @@ export function observePreparedAdmission(
       expect(children.length).toBeLessThanOrEqual(count * 4);
       for (const child of children) {
         expect(child).toEqual({
-          closed: true,
-          code: 0,
-          signal: null,
+          close: [0, null],
           resultOk: true,
           phases: ["opening", "checking", "closing"],
         });
@@ -285,49 +279,43 @@ export function observePreparedWorkerAdmission({
 }
 
 export function observeRetainedMaintenanceFinalizer(databasePath: string) {
-  const finalizers: Array<{
-    database: OpenClawAgentReadOnlyDatabase | undefined;
-    current: boolean;
-    open: boolean;
-    expired: boolean;
-  }> = [];
+  const finalizers: Array<
+    [
+      database: OpenClawAgentReadOnlyDatabase | undefined,
+      current: boolean,
+      open: boolean,
+      expired: boolean,
+    ]
+  > = [];
   let preparations = 0;
-  interceptReclamationWorker((worker) => {
-    const prepare = worker.prepare.bind(worker);
-    const execute = worker.run.bind(worker);
-    const prepareSpy = vi.spyOn(worker, "prepare").mockImplementation((params) => {
-      preparations += 1;
-      return prepare(params);
-    });
-    const runSpy = vi.spyOn(worker, "run").mockImplementation((params) => {
+  interceptReclamationWorker(
+    (params) => {
       if (
         params.plan.databaseOptions.path === databasePath &&
         params.plan.kind === "maintenance-finalize"
       ) {
         const owner = params.validationOwner;
         const retained = owner && "database" in owner ? owner : undefined;
-        finalizers.push({
-          database: retained?.database,
-          current: retained?.isCurrent() ?? false,
-          open: retained?.database.db.isOpen ?? false,
-          expired:
-            retained !== undefined &&
+        finalizers.push([
+          retained?.database,
+          retained?.isCurrent() ?? false,
+          retained?.database.db.isOpen ?? false,
+          retained !== undefined &&
             getOpenClawAgentDatabaseValidation(retained.database) === undefined,
-        });
+        ]);
       }
-      return execute(params);
-    });
-    return () => {
-      prepareSpy.mockRestore();
-      runSpy.mockRestore();
-    };
-  });
+      return params;
+    },
+    () => {
+      preparations += 1;
+    },
+  );
   return {
     expectExpired(database: OpenClawAgentDatabase) {
       expect(preparations, "retained finalization must not use cold preparation").toBe(0);
       expect(finalizers).toHaveLength(1);
-      expect(finalizers[0]?.database).toBe(database);
-      expect(finalizers[0]).toMatchObject({ current: true, open: true, expired: true });
+      expect(finalizers[0]?.[0]).toBe(database);
+      expect(finalizers[0]?.slice(1)).toEqual([true, true, true]);
     },
   };
 }

@@ -26,7 +26,6 @@ import {
 } from "../../state/openclaw-state-db.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
 import { requireNativeSqliteDatabase } from "../../test-utils/native-sqlite.js";
-import { ensureSessionEntrySync } from "./session-accessor.sqlite-initial-entry.js";
 import { withSqliteSessionPageReclamation } from "./session-accessor.sqlite-page-reclamation.js";
 import { runSqliteSessionReclamation } from "./session-accessor.sqlite-reclamation-run.js";
 import { createLifecycleArtifactReclamationPlan } from "./session-accessor.sqlite-reclamation.js";
@@ -39,36 +38,22 @@ import {
 const hooks = vi.hoisted(() => ({
   admitted: undefined as (() => void) | undefined,
 }));
-vi.mock("./session-accessor.sqlite-reclamation-worker.js", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("./session-accessor.sqlite-reclamation-worker.js")>();
+vi.mock("./session-accessor.sqlite-scope.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./session-accessor.sqlite-scope.js")>();
   return {
     ...actual,
-    withSqliteReclamationWorker: ((options, claim, run, assertRequestCurrent, signal) =>
-      actual.withSqliteReclamationWorker(
-        options,
-        claim,
-        async (worker) => {
-          const originalRun = worker.run.bind(worker);
-          const spy = vi.spyOn(worker, "run").mockImplementation((params) =>
-            originalRun({
-              ...params,
-              withWriteAdmission: (admit, diagnostics) =>
-                params.withWriteAdmission(async (refusal) => {
-                  hooks.admitted?.();
-                  return admit(refusal);
-                }, diagnostics),
-            }),
-          );
-          try {
-            return await run(worker);
-          } finally {
-            spy.mockRestore();
+    runExclusiveSqliteSessionWrite: ((scope, run, operation, ...rest) =>
+      actual.runExclusiveSqliteSessionWrite(
+        scope,
+        async () => {
+          if (operation === "session.reclamation.worker-commit") {
+            hooks.admitted?.();
           }
+          return run();
         },
-        assertRequestCurrent,
-        signal,
-      )) satisfies typeof actual.withSqliteReclamationWorker,
+        operation,
+        ...rest,
+      )) satisfies typeof actual.runExclusiveSqliteSessionWrite,
   };
 });
 
@@ -83,12 +68,6 @@ afterEach(async () => {
 function createFixture() {
   const env = { OPENCLAW_STATE_DIR: tempDirs.make("openclaw-reclamation-wal-") };
   const options = { agentId: "main", env };
-  for (const sessionId of ["parent", "child"]) {
-    ensureSessionEntrySync(
-      { ...options, sessionKey: `agent:main:${sessionId}` },
-      { sessionId, updatedAt: 1 },
-    );
-  }
   const database = openOpenClawAgentDatabase(options);
   return {
     database,
@@ -122,7 +101,7 @@ test.each(["reclaim", "resource-close", "shared-state-close"] as const)(
     expect(database.walMaintenance.checkpoint()).toBe(true);
     const { DatabaseSync } = requireNodeSqlite();
     const reader = new DatabaseSync(database.path, { readOnly: true });
-    const parentReclaim = vi.spyOn(database.walMaintenance, "reclaimFreePages");
+    using parentReclaim = vi.spyOn(database.walMaintenance, "reclaimFreePages");
     const ordering: string[] = [];
     const params = {
       storePath: database.path,
@@ -260,7 +239,6 @@ test.each(["reclaim", "resource-close", "shared-state-close"] as const)(
         }
         reader.close();
       }
-      parentReclaim.mockRestore();
       relay.mockRestore();
       observeAdmission.mockRestore();
       await Promise.allSettled([following]);
@@ -319,7 +297,7 @@ test("periodic vacuum waits for an admitted reclamation to settle", async () => 
     nativeSettled: boolean;
   }> = [];
   const databasePathKey = sqliteReaderDatabasePathKey(database.path);
-  const observeAdmission = probe.admission(workerAdmission, (request, grant, admit) => {
+  using _ = probe.admission(workerAdmission, (request, grant, admit) => {
     if (
       (request.stage === "transaction" || request.stage === "commit") &&
       targetsDatabase(request.facts, databasePathKey)
@@ -328,7 +306,7 @@ test("periodic vacuum waits for an admitted reclamation to settle", async () => 
     }
     admit(request, grant);
   });
-  const execSpy = vi.spyOn(database.db, "exec");
+  using execSpy = vi.spyOn(database.db, "exec");
   const scheduled = observeSqliteWalPeriodicWork();
   let maintenance: ReturnType<typeof configureSqliteWalMaintenance>;
   try {
@@ -378,8 +356,6 @@ test("periodic vacuum waits for an admitted reclamation to settle", async () => 
     for (const stop of stopObservingWorkers) {
       stop();
     }
-    observeAdmission.mockRestore();
-    execSpy.mockRestore();
     await maintenance.stop();
     await Promise.all(periodicWork);
     if (database.db.isOpen) {

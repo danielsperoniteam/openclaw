@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { trackSqliteStatementExecutions } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import {
@@ -45,202 +45,202 @@ const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
 
 beforeEach(() => setRuntimeConfigSnapshot({}));
 
-function createFixture(sessionKey = "agent:main:plain") {
-  const env = { OPENCLAW_STATE_DIR: tempDirs.make("canonical-metadata-") };
+function createFixture(
+  sessionKey = "agent:main:plain",
+  env: NodeJS.ProcessEnv = { OPENCLAW_STATE_DIR: tempDirs.make("canonical-metadata-") },
+) {
   const scope = { agentId: "main", env, sessionKey };
   const put = (key: string, entry: Partial<SessionEntry> = {}) =>
     replaceSessionEntrySync(
       { ...scope, sessionKey: key },
       { sessionId: key, updatedAt: 1, ...entry },
     );
-  return { scope, put };
+  return {
+    scope,
+    put,
+    read: (projection?: "full" | "list", key = sessionKey) =>
+      loadSessionEntryReadOnly({ ...scope, sessionKey: key, projection }),
+    byId: (sessionId: string) =>
+      loadSessionEntryByIdReadOnly({ ...scope, sessionId, projection: "list" }),
+    retain: (sessionId: string) =>
+      runOpenClawAgentWriteTransaction(
+        (database) =>
+          ensureTranscriptSessionRoot(
+            database,
+            { ...scope, sessionKey: `agent:main:${sessionId}`, sessionId },
+            1,
+          ),
+        scope,
+      ),
+  };
 }
 
-describe("canonical SQLite metadata reads", () => {
-  it("omits saved prompts from metadata reads and transcript batches", async () => {
-    const { scope, put } = createFixture();
-    const { sessionKey } = scope;
-    expect(loadSessionEntryReadOnly({ ...scope, projection: "list" })).toBeUndefined();
-    expect(fs.existsSync(resolveOpenClawAgentSqlitePath(scope))).toBe(false);
-    const savedPrompt = "saved prompt ".repeat(40_000);
-    put(sessionKey, {
-      lifecycleRevision: "original",
-      skillsSnapshot: { prompt: savedPrompt, skills: [] },
-      systemPromptReport: {
-        source: "run",
-        generatedAt: 1,
-        systemPrompt: { chars: 1, projectContextChars: 0, nonProjectContextChars: 1 },
-        injectedWorkspaceFiles: [],
-        skills: { promptChars: 1, entries: [] },
-        tools: { listChars: 0, schemaChars: 0, entries: [] },
-      },
-    });
-    assignSessionOwner(scope, {
-      owner: { type: "agent", id: "owner" },
-      assignedBy: { type: "human", id: "assigner" },
-      assignedAt: 10,
-    });
-    recordSessionParticipant(scope, {
-      identity: { type: "profile", id: "person" },
-      promptedAt: 10,
-    });
-    const expected = { ...loadSessionEntryReadOnly(scope)! };
-    delete expected.skillsSnapshot;
-    delete expected.systemPromptReport;
-    const database = openOpenClawAgentDatabase(scope);
-    const queries = trackSqliteStatementExecutions(
-      requireNativeSqliteDatabase(database.db),
-      ["entries"],
-      (sql) => (/(?:from|join)\s+"session_nodes"/i.test(sql) ? "entries" : null),
-    );
-    try {
-      expect(loadSessionEntryReadOnly({ ...scope, projection: "list" })).toEqual(expected);
-      expect(queries.textBytes.entries).toBeLessThan(2048);
-      queries.textBytes.entries = 0;
-      queries.counts.entries = 0;
-      runOpenClawAgentWriteTransaction((writer) => {
-        expect(
-          appendTranscriptEventsInTransaction(
-            writer,
-            resolveSqliteTranscriptScope({ ...scope, sessionId: sessionKey }),
-            [
-              { type: "custom", id: "first", parentId: null, data: "synthetic" },
-              { type: "custom", id: "second", parentId: "first", data: "synthetic" },
-            ],
-          ),
-        ).toBe(2);
-      }, scope);
-      expect(queries.counts.entries).toBeGreaterThan(0);
-      expect(queries.textBytes.entries).toBeLessThan(4096);
-    } finally {
-      queries.restore();
-    }
-    // Ordinary reads and subsequent writes must still own the complete prompt payload.
-    expect(loadSessionEntryReadOnly(scope)?.skillsSnapshot?.prompt).toBe(savedPrompt);
-    expect(
-      loadSessionEntryReadOnly({ ...scope, sessionKey: sessionKey.replace("agent:", "AGENT:") }),
-    ).toEqual(loadSessionEntryReadOnly(scope));
-    await patchSessionEntryCore(scope, (entry) => {
-      expect(entry.skillsSnapshot?.prompt).toBe(savedPrompt);
-      return { label: "renamed" };
-    });
-    expect(loadSessionEntryReadOnly(scope)).toMatchObject({
-      label: "renamed",
-      skillsSnapshot: { prompt: savedPrompt },
-    });
+it("omits saved prompts from metadata reads and transcript batches", async () => {
+  const { scope, put, read } = createFixture();
+  const { sessionKey } = scope;
+  expect(read("list")).toBeUndefined();
+  expect(fs.existsSync(resolveOpenClawAgentSqlitePath(scope))).toBe(false);
+  const savedPrompt = "saved prompt ".repeat(40_000);
+  put(sessionKey, {
+    lifecycleRevision: "original",
+    skillsSnapshot: { prompt: savedPrompt, skills: [] },
+    systemPromptReport: {
+      source: "run",
+      generatedAt: 1,
+      systemPrompt: { chars: 1, projectContextChars: 0, nonProjectContextChars: 1 },
+      injectedWorkspaceFiles: [],
+      skills: { promptChars: 1, entries: [] },
+      tools: { listChars: 0, schemaChars: 0, entries: [] },
+    },
   });
-
-  it("validates a folded sibling before selecting or preparing the exact opaque target", async () => {
-    const sessionKey = "agent:main:matrix:channel:!Mixed:example.org";
-    const { scope, put } = createFixture(sessionKey);
-    const sibling = sessionKey.toLowerCase();
-    for (const key of [sessionKey, sibling]) {
-      put(key);
-    }
-    loadSessionEntryReadOnly(scope);
-    const database = openOpenClawAgentDatabase(scope);
-    markCanonicalSessionValidationPending(database, [sibling]);
-    database.db.prepare("UPDATE session_nodes SET entry_json = ? WHERE session_key = ?").run(
-      JSON.stringify({
-        sessionId: sibling,
-        updatedAt: 1,
-        delivery: normalizeSessionDeliveryState({
-          context: { channel: "matrix", to: "!Mixed:example.org" },
-        }),
-      }),
-      sibling,
-    );
-    database.db
-      .prepare("UPDATE session_nodes SET entry_valid = 1 WHERE session_key = ?")
-      .run(sibling);
-    for (const projection of ["full", "list"] as const) {
-      expect(() => loadSessionEntryReadOnly({ ...scope, projection })).toThrow(
-        "non-canonical persisted row",
-      );
-      expect(() =>
-        listSessionEntriesReadOnly({
-          ...scope,
-          projection,
-          sessionKeys: [sessionKey],
-          includeParticipants: false,
-        }),
-      ).toThrow("non-canonical persisted row");
-    }
-    const shouldAppend = vi.fn(() => true);
-    await expect(
-      persistSessionTranscriptTurn(
-        { ...scope, sessionId: sessionKey },
-        {
-          expectedSessionId: sessionKey,
-          messages: [{ message: { role: "user", content: "must not prepare" }, shouldAppend }],
-          updateMode: "none",
-        },
-      ),
-    ).rejects.toThrow("non-canonical persisted row");
-    expect(shouldAppend).not.toHaveBeenCalled();
+  assignSessionOwner(scope, {
+    owner: { type: "agent", id: "owner" },
+    assignedBy: { type: "human", id: "assigner" },
+    assignedAt: 10,
+  });
+  recordSessionParticipant(scope, {
+    identity: { type: "profile", id: "person" },
+    promptedAt: 10,
+  });
+  const expected = { ...read()! };
+  delete expected.skillsSnapshot;
+  delete expected.systemPromptReport;
+  const database = openOpenClawAgentDatabase(scope);
+  const queries = trackSqliteStatementExecutions(
+    requireNativeSqliteDatabase(database.db),
+    ["entries"],
+    (sql) => (/(?:from|join)\s+"session_nodes"/i.test(sql) ? "entries" : null),
+  );
+  try {
+    expect(read("list")).toEqual(expected);
+    expect(queries.textBytes.entries).toBeLessThan(2048);
+    queries.textBytes.entries = 0;
+    queries.counts.entries = 0;
+    runOpenClawAgentWriteTransaction((writer) => {
+      expect(
+        appendTranscriptEventsInTransaction(
+          writer,
+          resolveSqliteTranscriptScope({ ...scope, sessionId: sessionKey }),
+          [
+            { type: "custom", id: "first", parentId: null, data: "synthetic" },
+            { type: "custom", id: "second", parentId: "first", data: "synthetic" },
+          ],
+        ),
+      ).toBe(2);
+    }, scope);
+    expect(queries.counts.entries).toBeGreaterThan(0);
+    expect(queries.textBytes.entries).toBeLessThan(4096);
+  } finally {
+    queries.restore();
+  }
+  expect(read()?.skillsSnapshot?.prompt).toBe(savedPrompt);
+  expect(read(undefined, sessionKey.replace("agent:", "AGENT:"))).toEqual(read());
+  await patchSessionEntryCore(scope, (entry) => {
+    expect(entry.skillsSnapshot?.prompt).toBe(savedPrompt);
+    return { label: "renamed" };
+  });
+  expect(read()).toMatchObject({
+    label: "renamed",
+    skillsSnapshot: { prompt: savedPrompt },
   });
 });
 
-describe("current session ID entry reads", () => {
-  it("preserves visible listing order and excludes retained generations", () => {
-    const fixture = createFixture();
-    const scope = {
-      agentId: fixture.scope.agentId,
-      env: fixture.scope.env,
-      projection: "list" as const,
-    };
-    for (const name of ["z-shared", "a-shared", "internal-session-effects:shared"]) {
-      fixture.put(`agent:main:${name}`, {
-        sessionId: "shared",
-        label: name,
-        spawnDepth: 2,
-        skillsSnapshot: { prompt: "saved prompt", skills: [] },
-      });
-    }
-    fixture.put("agent:main:internal-session-effects:hidden", { sessionId: "hidden" });
-    for (const sessionId of ["previous", "current"]) {
-      fixture.put("agent:main:rolled-over", { sessionId });
-    }
-    runOpenClawAgentWriteTransaction((database) => {
-      ensureTranscriptSessionRoot(
-        database,
-        { ...scope, sessionKey: "agent:main:retained", sessionId: "retained" },
-        1,
-      );
-    }, scope);
-
-    const selected = loadSessionEntryByIdReadOnly({ ...scope, sessionId: "shared" });
-    expect(selected).toEqual(
-      listSessionEntriesReadOnly(scope).find(({ entry }) => entry.sessionId === "shared"),
-    );
-    expect(selected).toMatchObject({
-      sessionKey: "agent:main:a-shared",
-      entry: { sessionId: "shared", label: "a-shared", spawnDepth: 2 },
+it("validates a folded sibling before selecting or preparing the exact opaque target", async () => {
+  const sessionKey = "agent:main:matrix:channel:!Mixed:example.org";
+  const { scope, put, read } = createFixture(sessionKey);
+  const sibling = sessionKey.toLowerCase();
+  for (const key of [sessionKey, sibling]) {
+    put(key);
+  }
+  read();
+  const database = openOpenClawAgentDatabase(scope);
+  markCanonicalSessionValidationPending(database, [sibling]);
+  database.db.prepare("UPDATE session_nodes SET entry_json = ? WHERE session_key = ?").run(
+    JSON.stringify({
+      sessionId: sibling,
+      updatedAt: 1,
+      delivery: normalizeSessionDeliveryState({
+        context: { channel: "matrix", to: "!Mixed:example.org" },
+      }),
+    }),
+    sibling,
+  );
+  database.db
+    .prepare("UPDATE session_nodes SET entry_valid = 1 WHERE session_key = ?")
+    .run(sibling);
+  for (const projection of ["full", "list"] as const) {
+    expect(() => read(projection)).toThrow("non-canonical persisted row");
+    expect(() =>
+      listSessionEntriesReadOnly({
+        ...scope,
+        projection,
+        sessionKeys: [sessionKey],
+        includeParticipants: false,
+      }),
+    ).toThrow("non-canonical persisted row");
+  }
+  const shouldAppend = vi.fn(() => true);
+  await expect(
+    persistSessionTranscriptTurn(
+      { ...scope, sessionId: sessionKey },
+      {
+        expectedSessionId: sessionKey,
+        messages: [{ message: { role: "user", content: "must not prepare" }, shouldAppend }],
+        updateMode: "none",
+      },
+    ),
+  ).rejects.toThrow("non-canonical persisted row");
+  expect(shouldAppend).not.toHaveBeenCalled();
+});
+it("preserves visible listing order and excludes retained generations", () => {
+  const { scope, put, byId, retain } = createFixture();
+  for (const name of ["z-shared", "a-shared", "internal-session-effects:shared"]) {
+    put(`agent:main:${name}`, {
+      sessionId: "shared",
+      label: name,
+      spawnDepth: 2,
+      skillsSnapshot: { prompt: "saved prompt", skills: [] },
     });
-    expect(selected?.entry.skillsSnapshot).toBeUndefined();
-    expect(loadSessionEntryByIdReadOnly({ ...scope, sessionId: "current" })).toMatchObject({
-      sessionKey: "agent:main:rolled-over",
-      entry: { sessionId: "current" },
-    });
-    for (const sessionId of ["previous", "retained", "hidden", "missing"]) {
-      expect(loadSessionEntryByIdReadOnly({ ...scope, sessionId })).toBeUndefined();
-    }
-  });
+  }
+  put("agent:main:internal-session-effects:hidden", { sessionId: "hidden" });
+  for (const sessionId of ["previous", "current"]) {
+    put("agent:main:rolled-over", { sessionId });
+  }
+  retain("retained");
 
-  it("leaves a missing store absent", () => {
-    const root = tempDirs.make("openclaw-session-by-id-missing-");
-    const env = { OPENCLAW_STATE_DIR: path.join(root, "state") };
-    expect(
-      loadSessionEntryByIdReadOnly({ agentId: "main", env, sessionId: "missing" }),
-    ).toBeUndefined();
-    expect(fs.readdirSync(root)).toEqual([]);
+  const selected = byId("shared");
+  expect(selected).toEqual(
+    listSessionEntriesReadOnly({ ...scope, projection: "list" }).find(
+      ({ entry }) => entry.sessionId === "shared",
+    ),
+  );
+  expect(selected).toMatchObject({
+    sessionKey: "agent:main:a-shared",
+    entry: { sessionId: "shared", label: "a-shared", spawnDepth: 2 },
   });
+  expect(selected?.entry.skillsSnapshot).toBeUndefined();
+  expect(byId("current")).toMatchObject({
+    sessionKey: "agent:main:rolled-over",
+    entry: { sessionId: "current" },
+  });
+  for (const sessionId of ["previous", "retained", "hidden", "missing"]) {
+    expect(byId(sessionId)).toBeUndefined();
+  }
+});
+
+it("leaves a missing store absent", () => {
+  const root = tempDirs.make("openclaw-session-by-id-missing-");
+  const env = { OPENCLAW_STATE_DIR: path.join(root, "state") };
+  expect(
+    loadSessionEntryByIdReadOnly({ agentId: "main", env, sessionId: "missing" }),
+  ).toBeUndefined();
+  expect(fs.readdirSync(root)).toEqual([]);
 });
 
 it("preserves delivery JSON semantics, retained windows, and invalid-row failures", async () => {
   await withOpenClawTestState({ label: "narrow-delivery" }, async (state) => {
     setRuntimeConfigSnapshot({});
-    const scope = { agentId: "main", env: state.env };
+    const { scope, put, retain } = createFixture("agent:main:plain", state.env);
     const delivery = normalizeSessionDeliveryState({
       context: {
         channel: "matrix",
@@ -267,12 +267,10 @@ it("preserves delivery JSON semantics, retained windows, and invalid-row failure
     const database = openOpenClawAgentDatabase(scope);
     for (const [name] of cases) {
       const sessionKey = `agent:main:${name}`;
-      replaceSessionEntrySync({ ...scope, sessionKey }, entry);
+      put(sessionKey, entry);
     }
     const retained = "agent:main:retained";
-    runOpenClawAgentWriteTransaction((db) => {
-      ensureTranscriptSessionRoot(db, { ...scope, sessionKey: retained, sessionId: "retained" }, 1);
-    }, scope);
+    retain("retained");
     const keys = [...cases.map(([name]) => `agent:main:${name}`), retained, "agent:main:missing"];
     const read = (projection: "list" | "delivery") =>
       readExactSessionEntryCandidatesInDatabase(
@@ -289,20 +287,9 @@ it("preserves delivery JSON semantics, retained windows, and invalid-row failure
     }
     expect(read("delivery")).toEqual([
       ...cases.map(([, stored], index) => {
-        const fields: Record<string, unknown> = JSON.parse(stored);
-        return {
-          ok: true,
-          value: [
-            {
-              sessionKey: keys[index],
-              entry: Object.fromEntries(
-                Object.entries(fields).filter(([key]) =>
-                  ["sessionId", "updatedAt", "delivery", "groupId"].includes(key),
-                ),
-              ),
-            },
-          ],
-        };
+        const projected: Record<string, unknown> = JSON.parse(stored);
+        delete projected.unused;
+        return { ok: true, value: [{ sessionKey: keys[index], entry: projected }] };
       }),
       { ok: true, value: [] },
       { ok: true, value: [] },
