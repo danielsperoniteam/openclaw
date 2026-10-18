@@ -1,13 +1,14 @@
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { prepareSecretsRuntimeFastPathSnapshot } from "../../secrets/runtime-fast-path.js";
 import {
-  activateSecretsRuntimeSnapshotState,
-  getActiveSecretsRuntimeSnapshotState,
-  getActiveSecretsRuntimeSnapshotRevisionState,
-  graftActiveSecretsRuntimeAuthState,
-  prepareSecretsRuntimeSnapshotRestoreState,
-  activateSecretsRuntimeSnapshotStateIfCurrent,
+  activateSecretsRuntimeSnapshotState as activateSnapshot,
+  getActiveSecretsRuntimeSnapshotState as activeSnapshot,
+  getActiveSecretsRuntimeSnapshotRevisionState as activeRevision,
+  graftActiveSecretsRuntimeAuthState as graftAuthState,
+  prepareSecretsRuntimeSnapshotRestoreState as prepareRestore,
+  activateSecretsRuntimeSnapshotStateIfCurrent as restoreIfCurrent,
 } from "../../secrets/runtime-state.js";
 import { closeOpenClawAgentDatabaseByPathAsync } from "../../state/openclaw-agent-db.js";
 import { withEnv } from "../../test-utils/env.js";
@@ -17,8 +18,7 @@ import {
 } from "./persisted.js";
 import {
   getRuntimeAuthProfileStoreCredentialsRevision,
-  getRuntimeAuthProfileStoreSnapshotsRevision,
-  listOwnedRuntimeAuthProfileStoreSnapshots,
+  listOwnedRuntimeAuthProfileStoreSnapshots as listSnapshots,
   prepareRuntimeAuthProfileStoreSnapshots,
   replaceOwnedRuntimeAuthProfileStoreSnapshots,
   setRuntimeAuthProfileStoreSnapshot as setSnapshot,
@@ -42,20 +42,22 @@ const { tempDirs, saveOptions, apiKey, store, snapshotAt, unreadableOuter, seedR
   createAuthOwnerTestFixtures();
 
 type Root = Awaited<ReturnType<typeof seedRoot>>;
-function update(
-  root: Root,
-  agentDir: string | undefined,
-  mutate: (store: AuthProfileStore) => void,
-) {
+function update(root: Root, agentDir: string | undefined, changes: Partial<AuthProfileStore>) {
   return updateAuthProfileStoreWithLock({
     stateDir: root.stateDir,
     agentDir,
     saveOptions,
     updater: (current) => {
-      mutate(current);
+      Object.assign(current, changes);
       return true;
     },
   });
+}
+const usageStats = (lastUsed: number) => ({ lastUsed, cooldownUntil: lastUsed + 60_000 });
+function ownedBy(root: Root) {
+  return listSnapshots().filter(({ databasePath }) =>
+    [root.sharedPath, root.agentPath].includes(databasePath),
+  );
 }
 function bindSnapshot(root: Root, agentDir: string) {
   withEnv(root.env, () => setSnapshot(readStore(agentDir), agentDir));
@@ -71,9 +73,7 @@ function prepare(
     agentDirs: [agentDir],
     loadAuthStore,
   });
-  if (!prepared) {
-    throw new Error("missing prepared snapshot");
-  }
+  assert(prepared, "missing prepared snapshot");
   return prepared;
 }
 function commitShared(root: Root, baseline: ReturnType<typeof capturePersistence>, key: string) {
@@ -85,13 +85,13 @@ function commitShared(root: Root, baseline: ReturnType<typeof capturePersistence
   });
 }
 function restoreActive(
-  snapshot: NonNullable<ReturnType<typeof getActiveSecretsRuntimeSnapshotState>>,
+  snapshot: NonNullable<ReturnType<typeof activeSnapshot>>,
   ownedSnapshot: typeof snapshot,
-  expectedRevision: ReturnType<typeof getActiveSecretsRuntimeSnapshotRevisionState>,
+  expectedRevision: ReturnType<typeof activeRevision>,
 ) {
   expect(
-    activateSecretsRuntimeSnapshotStateIfCurrent(
-      prepareSecretsRuntimeSnapshotRestoreState({
+    restoreIfCurrent(
+      prepareRestore({
         snapshot,
         ownedSnapshot,
         expectedRevision,
@@ -111,24 +111,20 @@ describe("explicit auth state ownership", () => {
       const agentDir = first.agentDir;
       const profileId = "local";
       const updateBookkeeping = (root: Root, lastUsed: number) =>
-        update(root, agentDir, (current) => {
-          current.usageStats = { [profileId]: { lastUsed, cooldownUntil: lastUsed + 60_000 } };
-        });
+        update(root, agentDir, { usageStats: { [profileId]: usageStats(lastUsed) } });
 
-      await update(first, undefined, (current) => {
-        const sharedProfileId = bookkeepingOwner === "cleared-local" ? "local" : "shared";
-        if (bookkeepingOwner === "cleared-local") {
-          current.profiles.local = apiKey("shared-local");
-        }
-        current.usageStats = { [sharedProfileId]: { lastUsed: 30, cooldownUntil: 60_030 } };
-      });
       const sharedProfileId = bookkeepingOwner === "cleared-local" ? "local" : "shared";
+      await update(first, undefined, {
+        profiles: {
+          ...store("first").profiles,
+          ...(bookkeepingOwner === "cleared-local" ? { local: apiKey("shared-local") } : {}),
+        },
+        usageStats: { [sharedProfileId]: usageStats(30) },
+      });
       expect(readSharedStore(first.env)?.usageStats?.[sharedProfileId]?.lastUsed).toBe(30);
       await updateBookkeeping(first, 10);
       if (bookkeepingOwner === "mixed-live") {
-        await update(second, undefined, (current) => {
-          current.usageStats = { shared: { lastUsed: 40 } };
-        });
+        await update(second, undefined, { usageStats: { shared: { lastUsed: 40 } } });
       }
       bindSnapshot(second, agentDir);
       const prepared = prepare(first, agentDir);
@@ -138,8 +134,14 @@ describe("explicit auth state ownership", () => {
 
       await closeOpenClawAgentDatabaseByPathAsync(first.agentPath);
       if (bookkeepingOwner === "cleared-local") {
-        await update(second, agentDir, (current) => {
-          delete current.usageStats;
+        await updateAuthProfileStoreWithLock({
+          stateDir: second.stateDir,
+          agentDir,
+          saveOptions,
+          updater: (current) => {
+            delete current.usageStats;
+            return true;
+          },
         });
       } else {
         await updateBookkeeping(second, 20);
@@ -150,18 +152,12 @@ describe("explicit auth state ownership", () => {
       expect(snapshotAt(first.agentPath)?.runtimeInheritsMainState === true).toBe(
         bookkeepingOwner === "mixed-live",
       );
-      activateSecretsRuntimeSnapshotState({ ...prepared, refreshHandler: null });
+      activateSnapshot({ ...prepared, refreshHandler: null });
       const expectedLastUsed = bookkeepingOwner === "cleared-local" ? 30 : 20;
-      expect(snapshotAt(first.agentPath)?.usageStats?.[profileId]).toEqual({
-        lastUsed: expectedLastUsed,
-        cooldownUntil: expectedLastUsed + 60_000,
-      });
-
-      expect(snapshotAt(first.agentPath)?.usageStats?.[sharedProfileId]).toEqual({
-        lastUsed: 30,
-        cooldownUntil: 60_030,
-      });
-      expect(snapshotAt(first.agentPath)?.runtimeInheritsMainState).toBe(true);
+      const usage = snapshotAt(first.agentPath)?.usageStats;
+      expect(usage?.[profileId]).toEqual(usageStats(expectedLastUsed));
+      expect(usage?.[sharedProfileId]).toEqual(usageStats(30));
+      expect(snapshotAt(first.agentPath)).toMatchObject({ runtimeInheritsMainState: true });
     },
   );
 
@@ -170,16 +166,14 @@ describe("explicit auth state ownership", () => {
     const second = await seedRoot("second");
     const assertOuterUnchanged = unreadableOuter("future");
     replaceRuntimeAuthProfileStoreSnapshots(
-      listOwnedRuntimeAuthProfileStoreSnapshots().map((entry) => {
+      listSnapshots().map((entry) => {
         if (entry.databasePath === first.agentPath) {
           entry.store.usageStats = { shared: { lastUsed: 123 } };
         }
         return entry;
       }),
     );
-    await update(second, undefined, (current) => {
-      current.profiles.shared = apiKey("updated-second");
-    });
+    await update(second, undefined, { profiles: { shared: apiKey("updated-second") } });
     expect(snapshotAt(second.agentPath)?.profiles.shared).toEqual(apiKey("updated-second"));
     expect(snapshotAt(first.agentPath)?.profiles.shared).toEqual(apiKey("first"));
     assertOuterUnchanged();
@@ -195,6 +189,7 @@ describe("explicit auth state ownership", () => {
         seedRoot(currentKey),
       ]);
       const agentDir = tempDirs.make("openclaw-auth-owner-rebound-agent-");
+      const agentPath = resolveAuthProfileDatabasePath(agentDir);
       if (mode === "rollback") {
         await persistAuthProfileBatch({
           stateDir: first.stateDir,
@@ -205,26 +200,22 @@ describe("explicit auth state ownership", () => {
           [first, 10],
           [second, 20],
         ] as const) {
-          await update(root, undefined, (current) => {
-            current.usageStats = { shared: { lastUsed } };
-          });
+          await update(root, undefined, { usageStats: { shared: { lastUsed } } });
         }
       }
       const activate = (root: typeof first) => {
         const prepared = prepare(root, agentDir);
-        activateSecretsRuntimeSnapshotState({ ...prepared, refreshHandler: null });
+        activateSnapshot({ ...prepared, refreshHandler: null });
       };
       activate(first);
-      const baseline = getActiveSecretsRuntimeSnapshotState()!;
+      const baseline = activeSnapshot()!;
       activate(second);
-      const owned = getActiveSecretsRuntimeSnapshotState()!;
-      const revision = getActiveSecretsRuntimeSnapshotRevisionState();
+      const owned = activeSnapshot()!;
+      const revision = activeRevision();
       const expected = mode === "rollback" ? first : third;
       if (mode === "rollback") {
-        await closeOpenClawAgentDatabaseByPathAsync(resolveAuthProfileDatabasePath(agentDir));
-        await update(second, agentDir, (current) => {
-          current.usageStats = { local: { lastUsed: 25 } };
-        });
+        await closeOpenClawAgentDatabaseByPathAsync(agentPath);
+        await update(second, agentDir, { usageStats: { local: { lastUsed: 25 } } });
       }
       if (mode !== "rollback") {
         withEnv(third.env, () => setSnapshot(store(currentKey), agentDir));
@@ -232,28 +223,22 @@ describe("explicit auth state ownership", () => {
       vi.stubEnv("OPENCLAW_STATE_DIR", third.stateDir);
       if (mode === "graft") {
         const prepared = prepare(first, agentDir);
-        graftActiveSecretsRuntimeAuthState(prepared.snapshot);
-        activateSecretsRuntimeSnapshotState({ ...prepared, refreshHandler: null });
+        graftAuthState(prepared.snapshot);
+        activateSnapshot({ ...prepared, refreshHandler: null });
       } else {
         restoreActive(baseline, owned, revision);
       }
-      expect(snapshotAt(resolveAuthProfileDatabasePath(agentDir))?.profiles.shared).toEqual(
+      expect(snapshotAt(agentPath)?.profiles.shared).toEqual(
         apiKey(mode === "rollback" ? "first" : currentKey),
       );
       if (mode === "rollback") {
-        expect(
-          snapshotAt(resolveAuthProfileDatabasePath(agentDir))?.usageStats?.local?.lastUsed,
-        ).toBe(25);
-        expect(
-          snapshotAt(resolveAuthProfileDatabasePath(agentDir))?.usageStats?.shared?.lastUsed,
-        ).toBe(10);
+        expect(snapshotAt(agentPath)?.usageStats).toMatchObject({
+          local: { lastUsed: 25 },
+          shared: { lastUsed: 10 },
+        });
       }
-      await update(expected, undefined, (current) => {
-        current.profiles.shared = apiKey("updated-owner");
-      });
-      expect(snapshotAt(resolveAuthProfileDatabasePath(agentDir))?.profiles.shared).toEqual(
-        apiKey("updated-owner"),
-      );
+      await update(expected, undefined, { profiles: { shared: apiKey("updated-owner") } });
+      expect(snapshotAt(agentPath)?.profiles.shared).toEqual(apiKey("updated-owner"));
     },
   );
 
@@ -264,9 +249,7 @@ describe("explicit auth state ownership", () => {
     withEnv(first.env, () => setSnapshot(store("same"), agentDir));
     const prepared = prepare(first, agentDir, () => store("same"));
     withEnv(second.env, () => setSnapshot(store("same"), agentDir));
-    expect(() =>
-      activateSecretsRuntimeSnapshotState({ ...prepared, refreshHandler: null }),
-    ).toThrow("stale");
+    expect(() => activateSnapshot({ ...prepared, refreshHandler: null })).toThrow("stale");
   });
 
   it("retains a removed snapshot owner through secrets activation rollback", async () => {
@@ -274,45 +257,22 @@ describe("explicit auth state ownership", () => {
     const second = await seedRoot("second");
     const captured = withEnv(first.env, () => {
       const activate = (authStores: Array<{ agentDir: string; store: AuthProfileStore }>) => {
-        activateSecretsRuntimeSnapshotState({
-          snapshot: {
-            sourceConfig: {},
-            config: {},
-            authStores: prepareRuntimeAuthProfileStoreSnapshots(authStores),
-            authStoreCredentialsRevision: getRuntimeAuthProfileStoreCredentialsRevision(),
-            authStoreSnapshotsRevision: getRuntimeAuthProfileStoreSnapshotsRevision(),
-            warnings: [],
-            webTools: {
-              search: { providerSource: "none", diagnostics: [] },
-              fetch: { providerSource: "none", diagnostics: [] },
-              diagnostics: [],
-            },
-          },
-          refreshContext: null,
-          refreshHandler: null,
-        });
+        const prepared = prepare(first, first.agentDir);
+        prepared.snapshot.authStores = prepareRuntimeAuthProfileStoreSnapshots(authStores);
+        activateSnapshot({ ...prepared, refreshHandler: null });
       };
-      activate([
-        {
-          agentDir: first.agentDir,
-          store: readStore(first.agentDir),
-        },
-      ]);
-      const baseline = getActiveSecretsRuntimeSnapshotState();
+      activate([{ agentDir: first.agentDir, store: readStore(first.agentDir) }]);
+      const baseline = activeSnapshot();
       activate([]);
-      const owned = getActiveSecretsRuntimeSnapshotState();
-      if (!baseline || !owned) {
-        throw new Error("missing activated secrets snapshot");
-      }
-      return { baseline, owned, revision: getActiveSecretsRuntimeSnapshotRevisionState() };
+      const owned = activeSnapshot();
+      assert(baseline && owned, "missing activated secrets snapshot");
+      return { baseline, owned, revision: activeRevision() };
     });
     expect(snapshotAt(first.agentPath)).toBeUndefined();
     vi.stubEnv("OPENCLAW_STATE_DIR", second.stateDir);
     restoreActive(captured.baseline, captured.owned, captured.revision);
     expect(snapshotAt(first.agentPath)?.profiles.shared).toEqual(apiKey("first"));
-    await update(first, undefined, (current) => {
-      current.profiles.shared = apiKey("updated-first");
-    });
+    await update(first, undefined, { profiles: { shared: apiKey("updated-first") } });
     expect(snapshotAt(first.agentPath)?.profiles.shared).toEqual(apiKey("updated-first"));
     expect(readSharedStore(second.env)?.profiles.shared).toEqual(apiKey("second"));
   });
@@ -323,107 +283,84 @@ describe("explicit auth state ownership", () => {
     withEnv({ ...root.env, OPENCLAW_AGENT_DIR: relocated }, () => {
       setSnapshot(readStore(root.agentDir), root.agentDir);
     });
-    await update(root, undefined, (current) => {
-      current.profiles.shared = apiKey("updated");
-    });
+    await update(root, undefined, { profiles: { shared: apiKey("updated") } });
     expect(snapshotAt(root.agentPath)?.profiles.shared).toEqual(apiKey("updated"));
     expect(fs.readdirSync(relocated)).toEqual([]);
   });
 
-  it("rejects a save whose explicit state root disagrees with the captured owner", async () => {
-    const root = await seedRoot("first");
-    const otherStateDir = tempDirs.make("openclaw-auth-owner-mismatch-");
-    const baseline = capturePersistence(undefined, {
-      stateDir: root.stateDir,
-    });
-    expect(() =>
-      saveIfUnchanged({
-        snapshot: baseline,
-        stateDir: otherStateDir,
-        store: store("must-not-write"),
-        options: saveOptions,
-      }),
-    ).toThrow("owner");
-    expect(readSharedStore(root.env)?.profiles.shared).toEqual(apiKey("first"));
-    expect(fs.readdirSync(otherStateDir)).toEqual([]);
-  });
-
-  it("rejects rollback whose explicit state root disagrees with the committed owner", async () => {
-    const root = await seedRoot("first");
-    const otherStateDir = tempDirs.make("openclaw-auth-owner-mismatch-");
-    const baseline = capturePersistence(undefined, {
-      stateDir: root.stateDir,
-    });
-    const committed = commitShared(root, baseline, "committed");
-    expect(() =>
-      restorePersistence(baseline, committed.owned, undefined, {
-        stateDir: otherStateDir,
-      }),
-    ).toThrow("owner");
-    expect(readSharedStore(root.env)?.profiles.shared).toEqual(apiKey("committed"));
-    expect(fs.readdirSync(otherStateDir)).toEqual([]);
-  });
-
-  it.each(["invalid"] as const)(
-    "publishes and compensates only the selected root under %s outer state",
-    async (kind) => {
-      const first = await seedRoot("first");
-      const second = await seedRoot("second");
-      const otherSnapshots = listOwnedRuntimeAuthProfileStoreSnapshots().filter(
-        (entry) =>
-          entry.databasePath === second.sharedPath || entry.databasePath === second.agentPath,
-      );
-      const assertOuterUnchanged = unreadableOuter(kind);
-      const baseline = capturePersistence(undefined, {
-        stateDir: first.stateDir,
-      });
-      const committed = commitShared(first, baseline, "temporary");
-      expect(readSharedStore(first.env)?.profiles.shared).toEqual(apiKey("temporary"));
-      expect(snapshotAt(first.sharedPath)?.profiles.shared).toEqual(apiKey("first"));
-      expect(committed.publishRuntimeSnapshots()).toBe(true);
-      expect(snapshotAt(first.sharedPath)?.profiles.shared).toEqual(apiKey("temporary"));
-      const derived = snapshotAt(first.agentPath);
-      expect(derived?.profiles).toMatchObject({
-        shared: apiKey("temporary"),
-        local: apiKey("first-local"),
-      });
-      if (!derived) {
-        throw new Error("missing first-root derived snapshot");
+  it.each(["save", "rollback"] as const)(
+    "rejects %s whose explicit state root disagrees with its owner",
+    async (operation) => {
+      const root = await seedRoot("first");
+      const otherStateDir = tempDirs.make("openclaw-auth-owner-mismatch-");
+      const baseline = capturePersistence(undefined, { stateDir: root.stateDir });
+      if (operation === "save") {
+        expect(() =>
+          saveIfUnchanged({
+            snapshot: baseline,
+            stateDir: otherStateDir,
+            store: store("must-not-write"),
+            options: saveOptions,
+          }),
+        ).toThrow("owner");
+      } else {
+        const committed = commitShared(root, baseline, "committed");
+        expect(() =>
+          restorePersistence(baseline, committed.owned, undefined, { stateDir: otherStateDir }),
+        ).toThrow("owner");
       }
-      derived.profiles.external = {
-        type: "token",
-        provider: "anthropic",
-        token: "runtime-only-fixture",
-      };
-      derived.runtimeExternalProfileIds = ["external"];
-      replaceOwnedRuntimeAuthProfileStoreSnapshots(
-        listOwnedRuntimeAuthProfileStoreSnapshots().map((entry) => {
-          if (entry.databasePath === first.agentPath) {
-            entry.store = derived;
-          }
-          return entry;
-        }),
+      expect(readSharedStore(root.env)?.profiles.shared).toEqual(
+        apiKey(operation === "save" ? "first" : "committed"),
       );
-
-      restorePersistence(baseline, committed.owned);
-
-      expect(readSharedStore(first.env)?.profiles.shared).toEqual(apiKey("first"));
-      expect(snapshotAt(first.sharedPath)?.profiles.shared).toEqual(apiKey("first"));
-      expect(snapshotAt(first.agentPath)?.profiles).toEqual({
-        shared: apiKey("first"),
-        local: apiKey("first-local"),
-        external: derived.profiles.external,
-      });
-      expect(
-        listOwnedRuntimeAuthProfileStoreSnapshots().filter(
-          (entry) =>
-            entry.databasePath === second.sharedPath || entry.databasePath === second.agentPath,
-        ),
-      ).toEqual(otherSnapshots);
-      expect(readSharedStore(second.env)?.profiles.shared).toEqual(apiKey("second"));
-      assertOuterUnchanged();
+      expect(fs.readdirSync(otherStateDir)).toEqual([]);
     },
   );
+
+  it("publishes and compensates only the selected root under invalid outer state", async () => {
+    const first = await seedRoot("first");
+    const second = await seedRoot("second");
+    const otherSnapshots = ownedBy(second);
+    const assertOuterUnchanged = unreadableOuter("invalid");
+    const baseline = capturePersistence(undefined, { stateDir: first.stateDir });
+    const committed = commitShared(first, baseline, "temporary");
+    expect(readSharedStore(first.env)?.profiles.shared).toEqual(apiKey("temporary"));
+    expect(snapshotAt(first.sharedPath)?.profiles.shared).toEqual(apiKey("first"));
+    expect(committed.publishRuntimeSnapshots()).toBe(true);
+    expect(snapshotAt(first.sharedPath)?.profiles.shared).toEqual(apiKey("temporary"));
+    const derived = snapshotAt(first.agentPath);
+    expect(derived?.profiles).toMatchObject({
+      shared: apiKey("temporary"),
+      local: apiKey("first-local"),
+    });
+    assert(derived, "missing first-root derived snapshot");
+    derived.profiles.external = {
+      type: "token",
+      provider: "anthropic",
+      token: "runtime-only-fixture",
+    };
+    derived.runtimeExternalProfileIds = ["external"];
+    replaceOwnedRuntimeAuthProfileStoreSnapshots(
+      listSnapshots().map((entry) => {
+        if (entry.databasePath === first.agentPath) {
+          entry.store = derived;
+        }
+        return entry;
+      }),
+    );
+
+    restorePersistence(baseline, committed.owned);
+
+    expect(readSharedStore(first.env)?.profiles.shared).toEqual(apiKey("first"));
+    expect(snapshotAt(first.sharedPath)?.profiles.shared).toEqual(apiKey("first"));
+    expect(snapshotAt(first.agentPath)?.profiles).toEqual({
+      shared: apiKey("first"),
+      local: apiKey("first-local"),
+      external: derived.profiles.external,
+    });
+    expect(ownedBy(second)).toEqual(otherSnapshots);
+    expect(readSharedStore(second.env)?.profiles.shared).toEqual(apiKey("second"));
+    assertOuterUnchanged();
+  });
 
   it("keeps concurrent batch compensation bound to its captured shared owner", async () => {
     const roots = await Promise.all([seedRoot("first"), seedRoot("second")]);
@@ -479,9 +416,7 @@ describe("explicit auth state ownership", () => {
       profiles: [{ profileId: "oauth", credential: oauth }],
     });
     const freshAgentDir = tempDirs.make("openclaw-auth-owner-fresh-agent-");
-    await update(first, freshAgentDir, (current) => {
-      current.profiles.oauth = oauth;
-    });
+    await update(first, freshAgentDir, { profiles: { oauth } });
     expect(readPersistedStore(freshAgentDir)?.profiles.oauth).toBeUndefined();
     // Existing local ownership is intentionally preserved, not retroactively deduplicated.
     expect(readPersistedStore(first.agentDir)?.profiles.oauth).toEqual(oauth);

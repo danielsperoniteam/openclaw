@@ -67,24 +67,35 @@ function save(current: AuthProfileStore, agentDir?: string) {
   saveAuthProfileStore(current, agentDir, saveOptions);
 }
 function seedInherited(shared: AuthProfileStore, local: AuthProfileStore, agentDir: string) {
-  save(shared);
-  save(local, agentDir);
-  setRuntimeAuthProfileStoreSnapshot(shared);
-  setRuntimeAuthProfileStoreSnapshot(
-    mergeLocalAuthProfileStoreWithInheritedStore(local, shared),
-    agentDir,
-  );
+  seedSnapshot(shared);
+  seedSnapshot(local, agentDir, shared);
 }
-function updateSelected(key: string, agentDir?: string, sharedStoreWrite = false) {
+function update(
+  changes: { profiles?: Record<string, string>; order?: string[] },
+  agentDir?: string,
+  sharedStoreWrite = false,
+) {
   return updateAuthProfileStoreWithLock({
     agentDir,
     sharedStoreWrite,
     saveOptions,
     updater(current) {
-      current.profiles.selected = credential(key);
+      if (changes.profiles) {
+        Object.assign(current.profiles, makeStore(changes.profiles).profiles);
+      }
+      if (changes.order) {
+        current.order = { fixture: changes.order };
+      }
       return true;
     },
   });
+}
+function seedSnapshot(current: AuthProfileStore, agentDir?: string, inherited?: AuthProfileStore) {
+  save(current, agentDir);
+  setRuntimeAuthProfileStoreSnapshot(
+    inherited ? mergeLocalAuthProfileStoreWithInheritedStore(current, inherited) : current,
+    agentDir,
+  );
 }
 const withState = (run: Parameters<typeof withOpenClawTestState>[1]) =>
   withOpenClawTestState({ scenario: "minimal" }, run);
@@ -132,11 +143,10 @@ it.each(["shared", "agent"] as const)(
   async (target) => {
     await withState(async (state) => {
       const agentDir = target === "agent" ? state.agentDir("child") : undefined;
-      const original = credential("synthetic-before");
       const replacement = credential("synthetic-after");
       save(makeStore({ selected: "synthetic-before" }), agentDir);
       const readCurrent = await prepareCredentialReader(state.env, agentDir);
-      expect(readCurrent()).toEqual(original);
+      expect(readCurrent()).toEqual(credential("synthetic-before"));
       let mode: "credential" | "metadata" | "rollback" = "credential";
       let grants = 0;
       let receipts = 0;
@@ -173,34 +183,16 @@ it.each(["shared", "agent"] as const)(
             publish(receipt);
           }),
       );
-      const update = (updater: (store: AuthProfileStore) => boolean) =>
-        updateAuthProfileStoreWithLock({
-          agentDir,
-          sharedStoreWrite: target === "shared",
-          saveOptions,
-          updater,
-        });
       try {
-        await update((store) => {
-          store.profiles.selected = replacement;
-          return true;
-        });
-        expect(receipts).toBe(1);
-        expect(settled).toEqual([replacement]);
+        await update({ profiles: { selected: "synthetic-after" } }, agentDir, target === "shared");
+        expect({ receipts, settled }).toEqual({ receipts: 1, settled: [replacement] });
         expect(readCurrent()).toEqual(replacement);
         mode = "metadata";
-        await update((store) => {
-          store.order = { fixture: ["selected"] };
-          return true;
-        });
-        expect(receipts).toBe(1);
-        expect(settled).toHaveLength(1);
+        await update({ order: ["selected"] }, agentDir, target === "shared");
+        expect({ receipts, count: settled.length }).toEqual({ receipts: 1, count: 1 });
         mode = "rollback";
         await expect(
-          update((store) => {
-            store.profiles.selected = credential("synthetic-refused");
-            return true;
-          }),
+          update({ profiles: { selected: "synthetic-refused" } }, agentDir, target === "shared"),
         ).rejects.toThrow("synthetic credential commit refusal");
         expect(grants).toBe(3);
         expect(settled).toEqual([replacement, replacement]);
@@ -245,9 +237,11 @@ it("keeps shared credentials denied after worker death without a native outcome"
       });
     });
     try {
-      const failure = await updateSelected("synthetic-uncertain", undefined, true).catch(
-        (error: unknown) => error,
-      );
+      const failure = await update(
+        { profiles: { selected: "synthetic-uncertain" } },
+        undefined,
+        true,
+      ).catch((error: unknown) => error);
       expect(terminated).toBeDefined();
       expect(hasSqliteWorkerOutcomeUnknown(failure)).toBe(true);
       expect(readCurrent).toThrow();
@@ -278,11 +272,7 @@ it("keeps env-only agent callbacks isolated when saving", async () => {
     );
 
     const result = await withEnvOnlyAuthProfileStore(() =>
-      updateAuthProfileStoreWithLock({
-        agentDir: localDir,
-        saveOptions,
-        updater,
-      }),
+      updateAuthProfileStoreWithLock({ agentDir: localDir, saveOptions, updater }),
     );
     expect(updater).toHaveBeenCalledOnce();
     expect(result).toEqual(explicit);
@@ -357,9 +347,7 @@ it.each(["stale", "newer-write", "rebound-owner"])(
   async (scenario) => {
     await withState(async (state) => {
       const agentDir = state.agentDir("child");
-      const initial = makeStore({ selected: "synthetic-before" });
-      save(initial, agentDir);
-      setRuntimeAuthProfileStoreSnapshot(initial, agentDir);
+      seedSnapshot(makeStore({ selected: "synthetic-before" }), agentDir);
       const capture = executions.captureOpenClawAgentDatabaseExecution;
       let execution: ReturnType<typeof capture> | undefined;
       vi.spyOn(executions, "captureOpenClawAgentDatabaseExecution").mockImplementation(
@@ -392,7 +380,9 @@ it.each(["stale", "newer-write", "rebound-owner"])(
           throw new SqliteWorkerError("Synthetic lost commit acknowledgment", "outcome-unknown");
         },
       );
-      await expect(updateSelected("synthetic-committed", agentDir)).rejects.toThrow();
+      await expect(
+        update({ profiles: { selected: "synthetic-committed" } }, agentDir),
+      ).rejects.toThrow();
       expect(readPersistedStore(agentDir)?.profiles.selected).toEqual(
         credential(scenario === "newer-write" ? "synthetic-newer" : "synthetic-committed"),
       );
@@ -409,64 +399,29 @@ it.each(["stale", "newer-write", "rebound-owner"])(
   },
 );
 
-it("drops incomplete incremental views after an acknowledged shared publication fails", async () => {
-  await withState(async (state) => {
-    const shared = makeStore({ selected: "synthetic-before", other: "synthetic-other" });
-    const agentDir = state.agentDir("child");
-    seedInherited(shared, makeStore({}), agentDir);
-    let unregister = () => {};
-    vi.spyOn(publication, "publishAuthProfileStoreUpdate").mockImplementation(async () => {
-      const newer = readPersistedStore()!;
-      newer.profiles.other = credential("synthetic-native");
-      save(newer);
-      unregister = registerRuntimeAuthProfileStoreMutationListener(() => {
-        throw new Error("synthetic invalidation observer failure");
-      });
-      throw new Error("synthetic publication interruption");
-    });
-    try {
-      await updateSelected("synthetic-committed", undefined, true);
-    } finally {
-      unregister();
-    }
-    const expected = {
-      selected: credential("synthetic-committed"),
-      other: credential("synthetic-native"),
-    };
-    expect(readPersistedStore()?.profiles).toEqual(expected);
-    expect(loadAuthProfileStoreForRuntime(agentDir, { syncExternalCli: false }).profiles).toEqual(
-      expected,
-    );
-  });
-});
-
 it.each([
-  { target: "shared", changed: "selected", rollback: false },
-  { target: "shared", changed: "other", rollback: false },
-  { target: "agent", changed: "selected", rollback: false },
-  { target: "shared", changed: "selected", rollback: true },
+  { target: "shared", changed: "selected", outcome: "commit" },
+  { target: "shared", changed: "other", outcome: "commit" },
+  { target: "agent", changed: "selected", outcome: "commit" },
+  { target: "shared", changed: "selected", outcome: "rollback" },
+  { target: "shared", changed: "other", outcome: "interrupted" },
 ])(
-  "reconciles an overtaking $target native save of $changed (rollback=$rollback)",
-  async ({ target, changed, rollback }) => {
+  "reconciles an overtaking $target native save of $changed ($outcome)",
+  async ({ target, changed, outcome }) => {
     await withState(async (state) => {
       const agentDir = target === "agent" ? state.agentDir("child") : undefined;
       const initial = makeStore({ selected: "synthetic-before", other: "synthetic-other" });
-      save(initial, agentDir);
-      setRuntimeAuthProfileStoreSnapshot(initial, agentDir);
+      seedSnapshot(initial, agentDir);
       const derivedDir = state.agentDir("derived");
       if (target === "shared") {
-        const empty = makeStore({});
-        save(empty, derivedDir);
-        setRuntimeAuthProfileStoreSnapshot(
-          mergeLocalAuthProfileStoreWithInheritedStore(empty, initial),
-          derivedDir,
-        );
+        seedSnapshot(makeStore({}), derivedDir, initial);
       }
+      let unregister = () => {};
       const publish = publication.publishAuthProfileStoreUpdate;
       vi.spyOn(publication, "publishAuthProfileStoreUpdate").mockImplementation(async (...args) => {
         const newer = readPersistedStore(agentDir)!;
         newer.profiles[changed] = credential("synthetic-native");
-        if (rollback) {
+        if (outcome === "rollback") {
           expect(() =>
             runAuthProfileWriteTransaction(agentDir, () => {
               save(newer, agentDir);
@@ -476,69 +431,79 @@ it.each([
         } else {
           save(newer, agentDir);
         }
+        if (outcome === "interrupted") {
+          unregister = registerRuntimeAuthProfileStoreMutationListener(() => {
+            throw new Error("synthetic invalidation observer failure");
+          });
+          throw new Error("synthetic publication interruption");
+        }
         return publish(...args);
       });
-      await updateSelected("synthetic-worker", agentDir);
+      try {
+        await update(
+          { profiles: { selected: "synthetic-worker" } },
+          agentDir,
+          outcome === "interrupted",
+        );
+      } finally {
+        unregister();
+      }
       const expected: AuthProfileStore["profiles"] = {
         ...initial.profiles,
         selected: credential("synthetic-worker"),
       };
-      if (!rollback) {
+      if (outcome !== "rollback") {
         expected[changed] = credential("synthetic-native");
       }
       expect(readPersistedStore(agentDir)?.profiles).toEqual(expected);
-      expect(snapshot(agentDir)?.profiles).toEqual(expected);
-      if (target === "shared") {
-        expect(snapshot(derivedDir)?.profiles).toEqual(expected);
+      if (outcome === "interrupted") {
+        expect(
+          loadAuthProfileStoreForRuntime(derivedDir, { syncExternalCli: false }).profiles,
+        ).toEqual(expected);
+      } else {
+        expect(snapshot(agentDir)?.profiles).toEqual(expected);
+        if (target === "shared") {
+          expect(snapshot(derivedDir)?.profiles).toEqual(expected);
+        }
       }
     });
   },
 );
 
-it.each(["selected"])(
-  "does not retain old inherited order when a native rotation of %s overtakes state publication",
-  async (profileId) => {
-    await withState(async (state) => {
-      const shared = makeStore(
-        { selected: "synthetic-shared", other: "synthetic-other", third: "synthetic-third" },
-        { order: { fixture: ["selected", "other", "third"] } },
-      );
-      const local = makeStore({ selected: "synthetic-local" });
-      const agentDir = state.agentDir("child");
-      seedInherited(shared, local, agentDir);
-      const prepare = sqliteRead.prepareAgentAuthProfileRowsRead;
-      let rotated = false;
-      vi.spyOn(sqliteRead, "prepareAgentAuthProfileRowsRead").mockImplementation((options) => {
-        const reader = prepare(options);
-        return {
-          ...reader,
-          async read() {
-            const rows = await reader.read();
-            if (!rotated) {
-              rotated = true;
-              const newer = readPersistedStore()!;
-              newer.profiles[profileId] = credential("synthetic-rotated");
-              save(newer);
-            }
-            return rows;
-          },
-        };
-      });
-      await updateAuthProfileStoreWithLock({
-        sharedStoreWrite: true,
-        saveOptions,
-        updater(store) {
-          store.order = { fixture: ["selected", "third", "other"] };
-          return true;
+it("does not retain inherited order when a native rotation overtakes state publication", async () => {
+  await withState(async (state) => {
+    const shared = makeStore(
+      { selected: "synthetic-shared", other: "synthetic-other", third: "synthetic-third" },
+      { order: { fixture: ["selected", "other", "third"] } },
+    );
+    const local = makeStore({ selected: "synthetic-local" });
+    const agentDir = state.agentDir("child");
+    seedInherited(shared, local, agentDir);
+    const prepare = sqliteRead.prepareAgentAuthProfileRowsRead;
+    let rotated = false;
+    vi.spyOn(sqliteRead, "prepareAgentAuthProfileRowsRead").mockImplementation((options) => {
+      const reader = prepare(options);
+      return {
+        ...reader,
+        async read() {
+          const rows = await reader.read();
+          if (!rotated) {
+            rotated = true;
+            const newer = readPersistedStore()!;
+            newer.profiles.selected = credential("synthetic-rotated");
+            save(newer);
+          }
+          return rows;
         },
-      });
-      expect(rotated).toBe(true);
-      const published = loadAuthProfileStoreForRuntime(agentDir, { syncExternalCli: false });
-      expect(published.order).toEqual({ fixture: ["selected", "third", "other"] });
-      expect(published.profiles.selected).toEqual(local.profiles.selected);
+      };
     });
-  },
-);
+    await update({ order: ["selected", "third", "other"] }, undefined, true);
+    expect(rotated).toBe(true);
+    const published = loadAuthProfileStoreForRuntime(agentDir, { syncExternalCli: false });
+    expect(published.order).toEqual({ fixture: ["selected", "third", "other"] });
+    expect(published.profiles.selected).toEqual(local.profiles.selected);
+  });
+});
 
 it("keeps a shared rotation that commits while a local save awaits publication", async () => {
   await withState(async (state) => {
@@ -552,26 +517,12 @@ it("keeps a shared rotation that commits while a local save awaits publication",
       async (owner, committed, assertCurrent, nativeCommits, committedIsCurrent) => {
         if (!rotated && owner.databasePath !== owner.sharedDatabasePath) {
           rotated = true;
-          await updateAuthProfileStoreWithLock({
-            sharedStoreWrite: true,
-            saveOptions,
-            updater(store) {
-              store.profiles.shared = credential("synthetic-shared-after");
-              return true;
-            },
-          });
+          await update({ profiles: { shared: "synthetic-shared-after" } }, undefined, true);
         }
         return publish(owner, committed, assertCurrent, nativeCommits, committedIsCurrent);
       },
     );
-    await updateAuthProfileStoreWithLock({
-      agentDir,
-      saveOptions,
-      updater(store) {
-        store.profiles.local = credential("synthetic-local-after");
-        return true;
-      },
-    });
+    await update({ profiles: { local: "synthetic-local-after" } }, agentDir);
     expect(rotated).toBe(true);
     expect(snapshot(agentDir)?.profiles).toEqual({
       local: credential("synthetic-local-after"),
