@@ -78,15 +78,13 @@ it.for(
     { name: "verified requester opting out", optedOut: true },
     { name: "authorized collaboration in a normal task session", collaborative: true },
     { name: "nested delegation retains only originating task credit", nested: true },
-  ].map((scenario, index) => ({
-    linked: true,
-    collaborative: false,
-    visible: true,
-    optedOut: false,
-    nested: false,
-    ...scenario,
-    eventId: (100000000000000010n + BigInt(index)).toString(),
-  })),
+  ].map((scenario, index) =>
+    Object.assign(
+      { linked: true, collaborative: false, visible: true, optedOut: false, nested: false },
+      scenario,
+      { eventId: (100000000000000010n + BigInt(index)).toString() },
+    ),
+  ),
 )(
   "generates correct Discord task commit metadata: $name",
   async ({ linked, collaborative, visible, optedOut, nested, eventId }) => {
