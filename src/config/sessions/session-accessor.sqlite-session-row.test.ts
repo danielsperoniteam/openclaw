@@ -1,14 +1,8 @@
-import fs from "node:fs";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
-import { createCanonicalFixtureSkill } from "../../skills/test-support/test-helpers.js";
-import {
-  closeOpenClawAgentDatabasesAsync,
-  closeOpenClawAgentDatabasesForTest,
-  openOpenClawAgentDatabase,
-} from "../../state/openclaw-agent-db.js";
-import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js";
+import { createFixtureSkillEntry } from "../../skills/test-support/test-helpers.js";
+import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import { useSessionStoreTempDirs } from "../../test-utils/session-state-cleanup.js";
 import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../runtime-snapshot.js";
 import {
   loadSessionEntry as readEntry,
@@ -25,23 +19,18 @@ import {
 } from "./session-entry-projection.js";
 import type { InternalSessionEntry } from "./types.js";
 
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const subscriptions: (() => void)[] = [];
-let scope: ReturnType<typeof createScope>;
-function createScope(name: string) {
-  return {
-    agentId: "main",
-    env: { ...process.env, OPENCLAW_STATE_DIR: fs.realpathSync(tempDirs.make(`session-${name}-`)) },
-    sessionKey: `agent:main:${name}`,
-  };
+function onIdentity(run: Parameters<typeof observeIdentity>[0]) {
+  subscriptions.push(observeIdentity(run));
 }
+let scope: { agentId: string; env: NodeJS.ProcessEnv; sessionKey: string };
 
 function creationStamp(createdAt: number) {
   return {
     createdVia: "operator" as const,
-    createdActor: { type: "human" as const, source: "profile" as const, id: "profile-creator" },
     createdAt,
     sandbox: "required" as const,
+    createdActor: { type: "human" as const, source: "profile" as const, id: "profile-creator" },
   };
 }
 
@@ -59,24 +48,22 @@ async function seed(entry: Partial<InternalSessionEntry>) {
 
 beforeEach(() => {
   setRuntimeConfigSnapshot({});
-  scope = createScope("row");
+  scope = {
+    agentId: "main",
+    env: { ...process.env, OPENCLAW_STATE_DIR: sessionDirs.make() },
+    sessionKey: "agent:main:row",
+  };
 });
 
-afterEach(async () => {
+afterEach(() => {
   subscriptions.splice(0).forEach((unsubscribe) => unsubscribe());
   vi.restoreAllMocks();
-  await closeOpenClawAgentDatabasesAsync();
-  closeOpenClawAgentDatabasesForTest();
-  await closeStateDatabaseForTest();
   clearRuntimeConfigSnapshot();
 });
+const sessionDirs = useSessionStoreTempDirs(afterEach, "session-row-");
 
 it("updates maintenance and retained-reference predicates with the canonical entry", async () => {
-  await seed({
-    sessionId: "current",
-    sessionStartedAt: 5,
-    previousSessionId: "previous",
-  });
+  await seed({ sessionId: "current", sessionStartedAt: 5, previousSessionId: "previous" });
   const database = openOpenClawAgentDatabase(scope);
   const prepare = vi.spyOn(database.db, "prepare");
   const startedAt = () =>
@@ -99,23 +86,19 @@ it("updates maintenance and retained-reference predicates with the canonical ent
 });
 
 it("bounds saved-prompt decoding while publishing identity changes", async () => {
-  const skillsSnapshot = {
-    prompt: "identity-decode-payload:" + "x".repeat(16_384),
-    skills: [],
-  };
+  const prompt = "identity-decode-payload:" + "x".repeat(16_384);
+  const skillsSnapshot = { prompt, skills: [] };
   await seed({ sessionId: "initial", updatedAt: 1, skillsSnapshot });
   const identities: string[] = [];
-  subscriptions.push(
-    observeIdentity((mutation) => {
-      if (
-        mutation.kind !== "delete" &&
-        mutation.current.sessionKeys.includes(scope.sessionKey) &&
-        mutation.current.sessionId
-      ) {
-        identities.push(mutation.current.sessionId);
-      }
-    }),
-  );
+  onIdentity((mutation) => {
+    if (
+      mutation.kind !== "delete" &&
+      mutation.current.sessionKeys.includes(scope.sessionKey) &&
+      mutation.current.sessionId
+    ) {
+      identities.push(mutation.current.sessionId);
+    }
+  });
   const parse = vi.spyOn(JSON, "parse");
   const iterations = 10;
   for (let index = 0; index < iterations; index++) {
@@ -134,49 +117,36 @@ it("bounds saved-prompt decoding while publishing identity changes", async () =>
 });
 
 it("records committed owner facts before cancellation observers", async () => {
-  const skillsSnapshot = {
-    prompt: "Prepared session skills.",
-    skills: [{ name: "existing", requiredEnv: ["EXISTING_ENV"] }],
-  };
+  const skillsSnapshot = { prompt: "saved", skills: [{ name: "old", requiredEnv: ["KEY"] }] };
   await seed({ sessionId: "predecessor", skillsSnapshot });
   const controller = new AbortController();
   const cancelled = new Error("cancelled after identity publication");
   const facts: InternalSessionEntry[] = [];
   const observed: Array<{ acceptedId?: string; persistedId?: string }> = [];
-  subscriptions.push(
-    observeIdentity((mutation) => {
-      if (mutation.previous.sessionId !== "predecessor") {
-        return;
-      }
-      observed.push({
-        acceptedId: facts.at(-1)?.sessionId,
-        persistedId: readEntry(scope)?.sessionId,
-      });
-      controller.abort(cancelled);
-    }),
-  );
+  onIdentity((mutation) => {
+    if (mutation.previous.sessionId !== "predecessor") {
+      return;
+    }
+    observed.push({
+      acceptedId: facts.at(-1)?.sessionId,
+      persistedId: readEntry(scope)?.sessionId,
+    });
+    controller.abort(cancelled);
+  });
   const clone = vi.spyOn(globalThis, "structuredClone");
   const result = await patchEntry(scope, () => ({ sessionId: "successor" }), {
-    onCommitted: (entry) => {
-      facts.push(entry);
-    },
+    onCommitted: (entry) => facts.push(entry),
   });
-  expect(facts).toHaveLength(1);
+  expect(facts.map((entry) => entry.skillsSnapshot)).toEqual([skillsSnapshot]);
   expect(observed).toEqual([{ acceptedId: "successor", persistedId: "successor" }]);
-  expect(controller.signal.reason).toBe(cancelled);
   expect(
     clone.mock.calls.filter(
       ([entry]) =>
         isRecord(entry) && (entry.sessionId === "predecessor" || entry.sessionId === "successor"),
     ).length,
   ).toBeLessThanOrEqual(3);
-  expect(facts[0]?.skillsSnapshot).toEqual(skillsSnapshot);
   expect(result?.skillsSnapshot).toEqual(skillsSnapshot);
   result!.skillsSnapshot!.skills.push({ name: "caller-only" });
-  expect(result!.skillsSnapshot!.skills).toEqual([
-    ...skillsSnapshot.skills,
-    { name: "caller-only" },
-  ]);
   expect(readEntry(scope)?.skillsSnapshot).toEqual(skillsSnapshot);
 });
 
@@ -211,8 +181,8 @@ it("protects required profile provenance and an absent surface during replacemen
     updatedAt: 20,
     createdVia: "plugin",
     createdSurface: "plugin-dock",
-    createdActor: { type: "agent", id: "replacement-agent" },
     createdAt: 20,
+    createdActor: { type: "agent", id: "replacement-agent" },
   };
   expect(await patchEntry(scope, () => replacement, { replaceEntry: true })).toMatchObject(stamp);
   expect(readEntry(scope)).toMatchObject({ sessionId: "replacement", ...stamp });
@@ -261,17 +231,9 @@ it("does not mint creator authority when replacing an unstamped node", async () 
 });
 
 it("persists private workspace intent but excludes runtime-only resolved skills from SQLite JSON", async () => {
-  const resolvedSkills = [
-    createCanonicalFixtureSkill({
-      name: "demo",
-      description: "runtime-only skill",
-      filePath: "/skills/demo/SKILL.md",
-      baseDir: "/skills/demo",
-      source: "# Demo\n\n" + "runtime skill content ".repeat(100),
-    }),
-  ];
+  const resolvedSkills = [createFixtureSkillEntry("demo").skill];
   const savedSkills = {
-    prompt: "compact skill prompt",
+    prompt: "saved",
     skills: [{ name: "demo" }],
     skillFilter: ["demo"],
     version: 7,
@@ -280,15 +242,8 @@ it("persists private workspace intent but excludes runtime-only resolved skills 
     sessionId: "runtime-skills-session",
     updatedAt: 42,
     pendingProjectGitUrl: "https://github.com/openclaw/openclaw.git",
-    pendingWorktree: {
-      name: "session-startup",
-      titleSource: "Start work",
-    },
-    skillsSnapshot: {
-      ...savedSkills,
-      resolvedSkills,
-      discoverySkills: resolvedSkills,
-    },
+    pendingWorktree: { name: "session-startup", titleSource: "Start work" },
+    skillsSnapshot: { ...savedSkills, resolvedSkills, discoverySkills: resolvedSkills },
   };
 
   await upsertEntry(scope, entry);

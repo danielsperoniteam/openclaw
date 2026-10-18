@@ -4,50 +4,33 @@ import { expect, vi } from "vitest";
 import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
 import * as sqlite from "../../infra/node-sqlite.js";
 import * as integrity from "../../infra/sqlite-integrity-worker.js";
-import type { OpenClawAgentReadOnlyDatabase } from "../../state/openclaw-agent-db-readonly.js";
+import type { OpenClawAgentReadOnlyDatabase as ReadOnlyDatabase } from "../../state/openclaw-agent-db-readonly.js";
 import { getOpenClawAgentDatabaseValidation } from "../../state/openclaw-agent-db-validation-cache.js";
 import {
   closeOpenClawAgentDatabaseByPathAsync,
   type OpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseAsync } from "../../state/openclaw-state-db.js";
-import type { SqliteReclamationWorker } from "./session-accessor.sqlite-reclamation-worker-lifetime.js";
-import * as reclamationWorker from "./session-accessor.sqlite-reclamation-worker.js";
+import { SqliteReclamationWorker as Reclaimer } from "./session-accessor.sqlite-reclamation-worker-lifetime.js";
 
-type ReclamationRun = Parameters<SqliteReclamationWorker["run"]>[0];
+type ReclamationRun = Parameters<Reclaimer["run"]>[0];
 
 function interceptReclamationWorker(
   intercept: (params: ReclamationRun) => ReclamationRun,
   preparing?: () => void,
 ) {
-  const withWorker = reclamationWorker.withSqliteReclamationWorker;
-  vi.spyOn(reclamationWorker, "withSqliteReclamationWorker").mockImplementation(
-    (options, claim, run, ...rest) =>
-      withWorker(
-        options,
-        claim,
-        async (worker) => {
-          const runWorker = worker.run.bind(worker);
-          const prepare = worker.prepare.bind(worker);
-          const runSpy = vi
-            .spyOn(worker, "run")
-            .mockImplementation((params) => runWorker(intercept(params)));
-          const prepareSpy =
-            preparing &&
-            vi.spyOn(worker, "prepare").mockImplementation((params) => {
-              preparing();
-              return prepare(params);
-            });
-          try {
-            return await run(worker);
-          } finally {
-            runSpy.mockRestore();
-            prepareSpy?.mockRestore();
-          }
-        },
-        ...rest,
-      ),
-  );
+  const prototype = Reclaimer.prototype;
+  const run = prototype.run;
+  vi.spyOn(prototype, "run").mockImplementation(function (this: Reclaimer, params) {
+    return run.call(this, intercept(params));
+  });
+  if (preparing) {
+    const prepare = prototype.prepare;
+    vi.spyOn(prototype, "prepare").mockImplementation(function (this: Reclaimer, params) {
+      preparing();
+      return prepare.call(this, params);
+    });
+  }
 }
 
 const expectAdmission = <T>(entered: Promise<T>, operation: Promise<unknown>) =>
@@ -66,16 +49,15 @@ export function holdReclamationAdmission(databasePath: string) {
     }
     return {
       ...params,
-      withWriteAdmission: async (performWrite, diagnostics) => {
-        return params.withWriteAdmission(async (...admissionArgs) => {
+      withWriteAdmission: (performWrite, diagnostics) =>
+        params.withWriteAdmission(async (...admissionArgs) => {
           if (!admissionArgs[0]) {
             admissions += 1;
             entered.resolve();
             await release.promise;
           }
           return performWrite(...admissionArgs);
-        }, diagnostics);
-      },
+        }, diagnostics),
     };
   });
   return {
@@ -95,10 +77,7 @@ export type PreparedAdmissionHooks = {
   integrityPath?: string;
   worker?: (worker: Worker, owner: PreparedIntegrityOwner) => void;
   integrityPhase?: (
-    worker: Worker,
-    owner: PreparedIntegrityOwner,
-    phase: "checking" | "checked",
-    held: boolean,
+    ...args: [Worker, PreparedIntegrityOwner, "checking" | "checked", boolean]
   ) => void;
 };
 type PreparedAdmissionContext = {
@@ -114,9 +93,7 @@ export function observePreparedAdmission(
   { hooks, releases, own }: PreparedAdmissionContext,
   hold = false,
 ) {
-  let parentChecks = 0;
-  let admissions = 0;
-  let settled = 0;
+  const checks = { parent: 0, admissions: 0, settled: 0 };
   let forkingIntegrity = false;
   const entered = createDeferred();
   const release = createDeferred();
@@ -142,14 +119,12 @@ export function observePreparedAdmission(
         row.resultOk = message.ok;
       }
     });
-    void own(
-      new Promise<void>((resolve) => {
-        child.once("close", (code, signal) => {
-          row.close = [code, signal];
-          resolve();
-        });
-      }),
-    );
+    const closed = createDeferred();
+    child.once("close", (code, signal) => {
+      row.close = [code, signal];
+      closed.resolve();
+    });
+    void own(closed.promise);
   };
   vi.spyOn(sqlite, "openNodeSqliteDatabase").mockImplementation((pathname, options) => {
     const database = realOpen(pathname, options);
@@ -162,7 +137,7 @@ export function observePreparedAdmission(
       if (sql === "PRAGMA integrity_check;" || sql === "PRAGMA integrity_check('sqlite_schema');") {
         const all = statement.all.bind(statement);
         statement.all = () => {
-          parentChecks += 1;
+          checks.parent += 1;
           return all();
         };
       }
@@ -174,7 +149,7 @@ export function observePreparedAdmission(
     if (args[0] !== databasePath) {
       return await realIntegrity(...args);
     }
-    admissions += 1;
+    checks.admissions += 1;
     let check: Promise<void>;
     forkingIntegrity = true;
     try {
@@ -183,27 +158,18 @@ export function observePreparedAdmission(
       forkingIntegrity = false;
     }
     entered.resolve();
-    try {
-      await Promise.all([check, release.promise]);
-    } finally {
-      settled += 1;
-    }
+    await Promise.all([check, release.promise]).finally(() => checks.settled++);
   });
   return {
     release,
     expectPending: (operation: Promise<unknown>) => expectAdmission(entered.promise, operation),
     expectHealthy(count: number) {
-      expect(parentChecks, "integrity ran on the caller thread").toBe(0);
-      expect({ admissions, settled }).toEqual({ admissions: count, settled: count });
+      expect(checks).toEqual({ parent: 0, admissions: count, settled: count });
       expect(children.length).toBeGreaterThanOrEqual(count);
       expect(children.length).toBeLessThanOrEqual(count * 4);
-      for (const child of children) {
-        expect(child).toEqual({
-          close: [0, null],
-          resultOk: true,
-          phases: ["opening", "checking", "closing"],
-        });
-      }
+      const phases = ["opening", "checking", "closing"];
+      const expected = { close: [0, null], resultOk: true, phases };
+      children.forEach((child) => expect(child).toEqual(expected));
     },
   };
 }
@@ -220,43 +186,41 @@ export function observePreparedWorkerAdmission({
   expectParentHealthy: () => void;
 }) {
   const entered = createDeferred<PreparedIntegrityOwner>();
-  const counts = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
-  const release = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const counter = () => new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const counts = new Int32Array(counter());
+  const release = new Int32Array(counter());
   const resume = () => {
-    Atomics.store(new Int32Array(release), 0, 1);
-    Atomics.notify(new Int32Array(release), 0);
+    Atomics.store(release, 0, 1);
+    Atomics.notify(release, 0);
   };
   releases.push(resume);
   if (mode === "warm") {
     resume();
   }
-  hooks.integrityChecks = counts;
-  hooks.integrityRelease = release;
-  hooks.integrityFirstCheck =
-    mode === "cold" ? new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT) : undefined;
-  hooks.integrityPath = databasePath;
+  Object.assign(hooks, {
+    integrityChecks: counts.buffer,
+    integrityRelease: release.buffer,
+    integrityFirstCheck: mode === "cold" ? counter() : undefined,
+    integrityPath: databasePath,
+  });
   const workers: Worker[] = [];
-  const checking = { executor: 0, reclamation: 0, other: 0 };
-  const checked = { executor: 0, reclamation: 0, other: 0 };
-  let heldWorker: Worker | undefined;
-  let heldCompleted = false;
+  const phaseCounts = () => ({ executor: 0, reclamation: 0, other: 0 });
+  const phases = { checking: phaseCounts(), checked: phaseCounts() };
+  const heldCheck: { worker?: Worker; completed: boolean } = { completed: false };
   hooks.worker = (worker, owner) => {
     if (owner !== "other") {
       workers.push(worker);
     }
   };
   hooks.integrityPhase = (worker, owner, phase, held) => {
-    if (phase === "checking") {
-      checking[owner] += 1;
-      if (held) {
+    phases[phase][owner] += 1;
+    if (held) {
+      if (phase === "checking") {
         // The atomic claimant, not cross-worker message order, identifies the held check.
-        heldWorker = worker;
+        heldCheck.worker = worker;
         entered.resolve(owner);
-      }
-    } else {
-      checked[owner] += 1;
-      if (held) {
-        heldCompleted = worker === heldWorker;
+      } else {
+        heldCheck.completed = worker === heldCheck.worker;
       }
     }
   };
@@ -267,26 +231,17 @@ export function observePreparedWorkerAdmission({
       expectParentHealthy();
       await closeOpenClawAgentDatabaseByPathAsync(databasePath);
       await closeOpenClawStateDatabaseAsync();
-      expect({ checking, checked }).toEqual({ checking: expected, checked: expected });
-      expect(Atomics.load(new Int32Array(counts), 0)).toBe(
-        expected.executor + expected.reclamation + expected.other,
-      );
-      expect(heldCompleted).toBe(mode === "cold");
-      expect(workers.length).toBeGreaterThan(0);
-      expect(workers.every((worker) => worker.threadId === -1)).toBe(true);
+      expect(phases).toEqual({ checking: expected, checked: expected });
+      const expectedCount = expected.executor + expected.reclamation + expected.other;
+      expect(Atomics.load(counts, 0)).toBe(expectedCount);
+      expect(heldCheck.completed).toBe(mode === "cold");
+      expect([...new Set(workers.map(({ threadId }) => threadId))]).toEqual([-1]);
     },
   };
 }
 
 export function observeRetainedMaintenanceFinalizer(databasePath: string) {
-  const finalizers: Array<
-    [
-      database: OpenClawAgentReadOnlyDatabase | undefined,
-      current: boolean,
-      open: boolean,
-      expired: boolean,
-    ]
-  > = [];
+  const finalizers: Array<[ReadOnlyDatabase | undefined, boolean, boolean, boolean]> = [];
   let preparations = 0;
   interceptReclamationWorker(
     (params) => {
@@ -306,16 +261,13 @@ export function observeRetainedMaintenanceFinalizer(databasePath: string) {
       }
       return params;
     },
-    () => {
-      preparations += 1;
-    },
+    () => preparations++,
   );
   return {
     expectExpired(database: OpenClawAgentDatabase) {
       expect(preparations, "retained finalization must not use cold preparation").toBe(0);
-      expect(finalizers).toHaveLength(1);
+      expect(finalizers.map(([, ...facts]) => facts)).toEqual([[true, true, true]]);
       expect(finalizers[0]?.[0]).toBe(database);
-      expect(finalizers[0]?.slice(1)).toEqual([true, true, true]);
     },
   };
 }

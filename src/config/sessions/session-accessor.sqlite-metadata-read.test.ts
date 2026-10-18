@@ -31,7 +31,9 @@ const stats = (eventCount: number, sizeBytes: number, observedAt?: number, updat
   ...(updatedAt === undefined ? {} : { lastMutationAtMs: updatedAt }),
 });
 const hotStats = stats(1, Buffer.byteLength('{"type":"session"}'), 10, 20);
+const sessionEvent = { seq: 0, eventJson: '{"type":"session"}', createdAt: 1 };
 const sessionIds = ["hot", "cold", "empty", "missing"];
+const fences = [mutation(10, 20), mutation(30, 40), mutation(1, null), mutation(null, null)];
 
 function clearHot(
   db: { exec: (sql: string) => unknown },
@@ -43,18 +45,15 @@ function clearHot(
     WHERE session_id = 'hot';`);
 }
 
-it("preserves hot, cold, missing and repeated IDs across metadata batch boundaries", ({
-  store: { batchStats },
-}) => {
+it("batches hot, cold, missing and repeated IDs", ({ store: { batchStats } }) => {
   const expected = [hotStats, stats(1, 1, 30, 40), stats(0, 0, 1), stats(0, 0)];
   for (const count of [4, 11, 401]) {
     const ids = Array.from({ length: count }, (_, index) => sessionIds[index % sessionIds.length]!);
-    expect(batchStats(ids)).toEqual(
-      Array.from({ length: count }, (_, index) => expected[index % expected.length]),
-    );
+    const plain = ids.map((_, index) => expected[index % expected.length]);
+    expect(batchStats(ids)).toEqual(plain);
     expect(batchStats(ids, true)).toEqual(
       ids.map((id, index) =>
-        Object.assign({}, expected[index % expected.length], {
+        Object.assign({}, plain[index], {
           generation: null,
           cold: id === "cold",
           sessionKey: id === "missing" ? null : `agent:main:${id}`,
@@ -65,9 +64,7 @@ it("preserves hot, cold, missing and repeated IDs across metadata batch boundari
   expect(batchStats([])).toEqual([]);
 });
 
-it("carries committed rewrite identity and bounds in the same stats snapshot", ({
-  store: { transaction, batchStats },
-}) => {
+it("keeps rewrite identity and bounds atomic", ({ store: { transaction, batchStats } }) => {
   const read = () => batchStats(["hot"], true)[0];
   expect(read()).toMatchObject({ generation: null, maxSeq: 0, eventCount: 1, cold: false });
   transaction((current) => {
@@ -109,10 +106,7 @@ function createFixture(env: NodeJS.ProcessEnv, agentId = "main") {
     replaceSessionEntrySync(scope(sessionId), { sessionId, updatedAt: 1 });
   }
   const database = agentDb.openOpenClawAgentDatabase(options);
-  createTranscriptEventInserter(
-    database.db,
-    "hot",
-  )({ seq: 0, eventJson: '{"type":"session"}', createdAt: 1 });
+  createTranscriptEventInserter(database.db, "hot")(sessionEvent);
   database.db.exec(`
     INSERT INTO session_transcript_cold_archives
       (session_id, generation, archive_name, archive_sha256, event_count, raw_bytes,
@@ -140,58 +134,49 @@ function createFixture(env: NodeJS.ProcessEnv, agentId = "main") {
   };
 }
 
-it("reads physical hot and cold presence with mutation pairs off-thread without restoring payloads", async ({
+it("reads hot/cold metadata off-thread without restoring payloads", async ({
   store: { scope },
 }) => {
   const observation = observeSqliteReadSql(requireNodeSqlite().StatementSync.prototype);
-  try {
-    const values = [];
-    for (const id of sessionIds) {
-      const result = await readSessionTranscriptAnchorsAsync(scope(id), {
-        entryIds: [],
-        includeMetadata: true,
-      });
-      values.push(result.metadata);
-    }
-    expect(values).toEqual([
-      { present: true, ...mutation(10, 20) },
-      { present: true, ...mutation(30, 40) },
-      { present: false, ...mutation(1, null) },
-      { present: false, ...mutation(null, null) },
-    ]);
-    expect(
-      observation.queries.filter((query) =>
-        /\b(?:transcript_events|session_windows|session_transcript_cold_archives)\b/i.test(query),
-      ),
-    ).toEqual([]);
-  } finally {
-    observation.restore();
+  using _ = { [Symbol.dispose]: observation.restore };
+  const values = [];
+  for (const id of sessionIds) {
+    const result = await readSessionTranscriptAnchorsAsync(scope(id), {
+      entryIds: [],
+      includeMetadata: true,
+    });
+    values.push(result.metadata);
   }
+  expect(values).toEqual(fences.map((fence, index) => ({ present: index < 2, ...fence })));
+  expect(
+    observation.queries.filter((query) =>
+      /\b(?:transcript_events|session_windows|session_transcript_cold_archives)\b/i.test(query),
+    ),
+  ).toEqual([]);
 });
 
 it.for(["presence", "mutation"] as const)(
-  "keeps fresh bindings and rows without recompiling warm transcript %s reads",
+  "reuses compiled %s reads with fresh bindings and rows",
   (kind, { store }) => {
     const { database, transaction, scope } = store;
     const read = kind === "presence" ? store.present : store.read;
     const expected = {
       presence: [true, true, false, false],
-      mutation: [mutation(10, 20), mutation(30, 40), mutation(1, null), mutation(null, null)],
+      mutation: fences,
     }[kind];
     const readRows = () => sessionIds.map((id) => read(id));
-    const expectRows = () => expect(readRows()).toEqual(expected);
-    expectRows();
+    expect(readRows()).toEqual(expected);
     const inserts = ["cold", "empty"].map((id) => createTranscriptEventInserter(database.db, id));
     const compile = vi.spyOn(getSessionKysely(database.db).getExecutor(), "compileQuery");
     for (let repeat = 0; repeat < 2; repeat += 1) {
-      expectRows();
+      expect(readRows()).toEqual(expected);
     }
     expect(compile).not.toHaveBeenCalled();
     transaction(({ db }) => {
       clearHot(db, null, 50);
       db.exec("DELETE FROM session_transcript_cold_archives WHERE session_id = 'cold'");
       for (const insert of inserts) {
-        insert({ seq: 0, eventJson: '{"type":"session"}', createdAt: 1 });
+        insert(sessionEvent);
       }
     });
     // Lazy write compilation is independent of the warmed metadata readers.
@@ -206,45 +191,39 @@ it.for(["presence", "mutation"] as const)(
   },
 );
 
-it("reads each in-transaction fence advance and restores the prior pair on rollback", ({
-  store,
-}) => {
+it("reads fence advances and restores them on rollback", ({ store }) => {
   const { database, transaction, scope } = store;
-  const read = () => mutations.readTranscriptMutationStateInTransaction(database, "hot");
+  const read = (id = "hot") => mutations.readTranscriptMutationStateInTransaction(database, id);
+  const advance = (id: string, value: number, strictly = false) =>
+    mutations.advanceTranscriptMutationAtInTransaction(database, id, value, { strictly });
   expect(read()).toEqual(mutation(10, 20));
   expect(() =>
-    transaction((current) => {
-      mutations.advanceTranscriptMutationAtInTransaction(current, "hot", 1);
+    transaction(({ db }) => {
+      advance("hot", 1);
       expect(read()).toEqual(mutation(10, 20));
-      mutations.advanceTranscriptMutationAtInTransaction(current, "hot", 25.9);
+      advance("hot", 25.9);
       expect(read()).toEqual(mutation(10, 25));
-      mutations.advanceTranscriptMutationAtInTransaction(current, "empty", 0);
-      expect(mutations.readTranscriptMutationStateInTransaction(current, "empty")).toEqual(
-        mutation(1, 0),
-      );
-      mutations.advanceTranscriptMutationAtInTransaction(current, "empty", 0, { strictly: true });
-      expect(mutations.readTranscriptMutationStateInTransaction(current, "empty")).toEqual(
-        mutation(1, 2),
-      );
-      current.db
-        .prepare("UPDATE session_windows SET transcript_observed_at = 100 WHERE session_id = ?")
-        .run("hot");
-      mutations.advanceTranscriptMutationAtInTransaction(current, "hot", 1, { strictly: true });
+      advance("empty", 0);
+      expect(read("empty")).toEqual(mutation(1, 0));
+      advance("empty", 0, true);
+      expect(read("empty")).toEqual(mutation(1, 2));
+      db.prepare(
+        "UPDATE session_windows SET transcript_observed_at = 100 WHERE session_id = ?",
+      ).run("hot");
+      advance("hot", 1, true);
       expect(read()).toEqual(mutation(100, 101));
-      mutations.advanceTranscriptMutationAtInTransaction(current, "hot", 1, { strictly: true });
+      advance("hot", 1, true);
       expect(store.read()).toEqual(mutation(100, 102));
       throw new Error("rollback fixture");
     }),
   ).toThrow("rollback fixture");
   expect(read()).toEqual(mutation(10, 20));
   expect(metadata.readTranscriptMutationAtSync(scope("hot"))).toBe(20);
-  transaction((current) => {
-    mutations.advanceTranscriptMutationAtInTransaction(current, "hot", 1, { strictly: true });
-  });
+  transaction(() => advance("hot", 1, true));
   expect(read()).toEqual(mutation(10, 21));
 });
 
-it("uses statement snapshots for point metadata reads and preserves a caller's WAL snapshot", ({
+it("keeps point reads atomic and respects caller WAL snapshots", ({
   store: { database, read, present },
 }) => {
   const readStats = () => statistics.readTranscriptStatsFromDatabase(database, "hot");
@@ -260,28 +239,23 @@ it("uses statement snapshots for point metadata reads and preserves a caller's W
   ).toEqual([]);
   exec.mockRestore();
   const peer = new DatabaseSync(database.path);
-  try {
-    runSqliteDeferredTransactionSync(database.db, () => {
-      expectHot();
-      peer.exec("BEGIN IMMEDIATE");
-      clearHot(peer, 100, 200);
-      peer.exec("COMMIT");
-      expect(present()).toBe(true);
-      expectHot();
-    });
-    expect([present(), read(), readStats()]).toEqual([
-      false,
-      mutation(100, 200),
-      stats(0, 0, 100, 200),
-    ]);
-  } finally {
-    peer.close();
-  }
+  using _ = { [Symbol.dispose]: () => peer.close() };
+  runSqliteDeferredTransactionSync(database.db, () => {
+    expectHot();
+    peer.exec("BEGIN IMMEDIATE");
+    clearHot(peer, 100, 200);
+    peer.exec("COMMIT");
+    expect(present()).toBe(true);
+    expectHot();
+  });
+  expect([present(), read(), readStats()]).toEqual([
+    false,
+    mutation(100, 200),
+    stats(0, 0, 100, 200),
+  ]);
 });
 
-it("isolates identical session IDs by native handle and reopens without using a closed reader", ({
-  store: first,
-}) => {
+it("isolates native handles and replaces closed readers", ({ store: first }) => {
   const second = createFixture(first.options.env, "other");
   clearHot(second.database.db, 30, 40);
   for (let repeat = 0; repeat < 2; repeat += 1) {
