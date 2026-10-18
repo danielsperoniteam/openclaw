@@ -30,17 +30,24 @@ async function runTransaction(fixture: {
     fixture.events?.push(args[1]!);
     return fixture.lifecycle?.(args[1]!) ?? Promise.resolve(0);
   });
-  const cwd = vi.spyOn(process, "cwd").mockReturnValue(workdir);
-  try {
-    return await runUpdateGatewayBuild("stop", "restart", shimDir);
-  } finally {
-    cwd.mockRestore();
-  }
+  return await runUpdateGatewayBuild("stop", "restart", shimDir);
 }
 
 let scratch: string;
 let workdir: string;
 let shimDir: string;
+function writeFiles(root: string, files: Record<string, string>) {
+  for (const [file, value] of Object.entries(files)) {
+    const target = path.join(root, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, value);
+  }
+}
+const read = (file: string) => fs.readFileSync(path.join(workdir, file), "utf8");
+const exists = (file: string) => fs.existsSync(path.join(workdir, file));
+const inode = (file: string) => fs.statSync(path.join(workdir, file)).ino;
+const ownerExists = () =>
+  fs.existsSync(path.join(resolveDistArtifactLockPath(workdir), "owner.json"));
 const commandSuccess = (stdout = "") => ({
   code: 0,
   stdout,
@@ -55,6 +62,7 @@ beforeEach(() => {
   workdir = path.join(scratch, "checkout");
   shimDir = path.join(scratch, "bin");
   fs.mkdirSync(shimDir);
+  vi.spyOn(process, "cwd").mockReturnValue(workdir);
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -63,12 +71,9 @@ afterEach(() => {
 
 describe("source update build output transaction", () => {
   const outputs = () => listTsdownOutputRoots();
-  const writeOutput = (output: string, value: string) => {
-    fs.mkdirSync(path.join(workdir, output), { recursive: true });
-    fs.writeFileSync(path.join(workdir, output, "marker"), value);
-  };
-  const readOutput = (output: string) =>
-    fs.readFileSync(path.join(workdir, output, "marker"), "utf8");
+  const writeOutput = (output: string, value: string) =>
+    writeFiles(workdir, { [`${output}/marker`]: value });
+  const readOutput = (output: string) => read(`${output}/marker`);
   const backups = () =>
     fs.readdirSync(workdir).filter((name) => name.startsWith(".update-build-backup."));
   beforeEach(() => fs.mkdirSync(workdir));
@@ -85,44 +90,41 @@ describe("source update build output transaction", () => {
       return result.stdout.trim();
     };
     const writeRuntime = (directory: string, sha: string, marker: string) => {
-      fs.mkdirSync(path.join(directory, "dist/control-ui"), { recursive: true });
-      fs.writeFileSync(path.join(directory, "dist/entry.js"), "// fixture runtime\n");
-      fs.writeFileSync(path.join(directory, "dist/control-ui/index.html"), "ready");
-      fs.writeFileSync(
-        path.join(directory, "dist/build-info.json"),
-        JSON.stringify({ commit: sha, buildId: sha }),
-      );
-      for (const name of [".buildstamp", ".runtime-postbuildstamp"]) {
-        fs.writeFileSync(path.join(directory, "dist", name), JSON.stringify({ head: sha }));
-      }
-      fs.writeFileSync(path.join(directory, "dist/marker"), marker);
+      writeFiles(directory, {
+        "dist/entry.js": "// fixture runtime\n",
+        "dist/control-ui/index.html": "ready",
+        "dist/build-info.json": JSON.stringify({ commit: sha, buildId: sha }),
+        "dist/.buildstamp": JSON.stringify({ head: sha }),
+        "dist/.runtime-postbuildstamp": JSON.stringify({ head: sha }),
+        "dist/marker": marker,
+      });
     };
     await git(workdir, "init", "--initial-branch=main");
     await git(workdir, "config", "user.name", "OpenClaw Test");
     await git(workdir, "config", "user.email", "openclaw@example.com");
     await git(workdir, "config", "commit.gpgsign", "false");
-    fs.writeFileSync(
-      path.join(workdir, "package.json"),
-      JSON.stringify({ name: "openclaw", version: "2026.9.1", packageManager: "pnpm@12.4.0" }),
-    );
-    fs.writeFileSync(path.join(workdir, "pnpm-workspace.yaml"), "packages: []\n");
-    fs.writeFileSync(path.join(workdir, ".gitignore"), "dist/\nnode_modules/\n.artifacts/\n");
+    writeFiles(workdir, {
+      "package.json": JSON.stringify({
+        name: "openclaw",
+        version: "2026.9.1",
+        packageManager: "pnpm@12.4.0",
+      }),
+      "pnpm-workspace.yaml": "packages: []\n",
+      ".gitignore": "dist/\nnode_modules/\n.artifacts/\n",
+    });
     await git(workdir, "add", ".");
     await git(workdir, "commit", "-m", "original");
     const before = await git(workdir, "rev-parse", "HEAD");
     await git(workdir, "checkout", "-b", "target");
-    fs.writeFileSync(path.join(workdir, "target.txt"), "candidate source\n");
+    writeFiles(workdir, { "target.txt": "candidate source\n" });
     await git(workdir, "add", "target.txt");
     await git(workdir, "commit", "-m", "target");
     const target = await git(workdir, "rev-parse", "HEAD");
     await git(workdir, "checkout", "main");
     writeRuntime(workdir, before, "original");
-    fs.mkdirSync(path.join(workdir, "node_modules"));
-    const dependency = path.join(workdir, "node_modules/marker");
-    fs.writeFileSync(dependency, "original dependency");
-    const originalInodes = ["dist/marker", "node_modules/marker"].map(
-      (name) => fs.statSync(path.join(workdir, name)).ino,
-    );
+    writeFiles(workdir, { "node_modules/marker": "original dependency" });
+    const inodes = () => ["dist/marker", "node_modules/marker"].map(inode);
+    const originalInodes = inodes();
     let consumerLive = false;
     let imported = false;
     const observed: boolean[] = [];
@@ -152,8 +154,7 @@ describe("source update build output transaction", () => {
         expect(directory).toBeDefined();
         expect(directory).not.toBe(workdir);
         if (argv.includes("install")) {
-          fs.mkdirSync(path.join(directory!, "node_modules"), { recursive: true });
-          fs.writeFileSync(path.join(directory!, "node_modules/marker"), "candidate dependency");
+          writeFiles(directory!, { "node_modules/marker": "candidate dependency" });
         }
         if (argv.includes("build")) {
           writeRuntime(directory!, await git(directory!, "rev-parse", "HEAD"), "candidate");
@@ -174,19 +175,13 @@ describe("source update build output transaction", () => {
       if (args[1] === "restart-selected") {
         expect(await git(workdir, "rev-parse", "HEAD")).toBe(before);
         expect(readOutput("dist")).toBe("original");
-        expect(fs.readFileSync(dependency, "utf8")).toBe("original dependency");
+        expect(read("node_modules/marker")).toBe("original dependency");
       }
       return 0;
     });
-    const cwd = vi.spyOn(process, "cwd").mockReturnValue(workdir);
-    let outcome: PromiseSettledResult<number>;
-    try {
-      [outcome] = await Promise.allSettled([
-        runUpdateGatewayBuild("stop-selected", "restart-selected", shimDir, target),
-      ]);
-    } finally {
-      cwd.mockRestore();
-    }
+    const [outcome] = await Promise.allSettled([
+      runUpdateGatewayBuild("stop-selected", "restart-selected", shimDir, target),
+    ]);
     expect(imported).toBe(true);
     expect(consumerLive).toBe(true);
     expect(lifecycle).toEqual(["stop-selected", "restart-selected"]);
@@ -195,12 +190,10 @@ describe("source update build output transaction", () => {
       rejection: outcome.status === "rejected" ? String(outcome.reason) : undefined,
       lastObservedConsumerLive: observed.at(-1),
       head: await git(workdir, "rev-parse", "HEAD"),
-      targetSourceExists: fs.existsSync(path.join(workdir, "target.txt")),
+      targetSourceExists: exists("target.txt"),
       runtime: readOutput("dist"),
-      dependency: fs.readFileSync(dependency, "utf8"),
-      inodes: ["dist/marker", "node_modules/marker"].map(
-        (name) => fs.statSync(path.join(workdir, name)).ino,
-      ),
+      dependency: read("node_modules/marker"),
+      inodes: inodes(),
     }).toEqual({
       outcome: "rejected",
       rejection: expect.stringContaining("another managed Gateway"),
@@ -230,21 +223,15 @@ describe("source update build output transaction", () => {
           return commandSuccess("a".repeat(40));
         });
       }
-      const cwd = vi.spyOn(process, "cwd").mockReturnValue(workdir);
       lifecycleMock.mockClear();
-      try {
-        await expect(
-          runUpdateGatewayBuild("stop", "restart", shimDir, "a".repeat(40)),
-        ).rejects.toThrow();
-        const owner = resolveDistArtifactLockPath(workdir);
-        expect(fs.existsSync(path.join(owner, "owner.json"))).toBe(uncertain);
-        expect(fs.existsSync(path.join(owner, "unjoined"))).toBe(uncertain);
-        expect(command).toHaveBeenCalledTimes(1);
-        expect(lifecycleMock).not.toHaveBeenCalled();
-      } finally {
-        command.mockRestore();
-        cwd.mockRestore();
-      }
+      await expect(
+        runUpdateGatewayBuild("stop", "restart", shimDir, "a".repeat(40)),
+      ).rejects.toThrow();
+      const owner = resolveDistArtifactLockPath(workdir);
+      expect(fs.existsSync(path.join(owner, "owner.json"))).toBe(uncertain);
+      expect(fs.existsSync(path.join(owner, "unjoined"))).toBe(uncertain);
+      expect(command).toHaveBeenCalledTimes(1);
+      expect(lifecycleMock).not.toHaveBeenCalled();
     },
   );
 
@@ -258,15 +245,13 @@ describe("source update build output transaction", () => {
       const events: string[] = [];
       const result = runTransaction({
         lifecycle: async (command) => {
-          expect(fs.existsSync(path.join(resolveDistArtifactLockPath(workdir), "owner.json"))).toBe(
-            true,
-          );
+          expect(ownerExists()).toBe(true);
           events.push(command);
           if (command === "restart") {
             for (const output of oldRoots) {
               expect(readOutput(output)).toBe(`old:${output}`);
             }
-            expect(fs.existsSync(path.join(workdir, outputs().at(-1)!))).toBe(false);
+            expect(exists(outputs().at(-1)!)).toBe(false);
           }
           return command === "restart" && mode === "recovery failure" ? 23 : 0;
         },
@@ -277,11 +262,7 @@ describe("source update build output transaction", () => {
             writeOutput(output, "partial");
           }
           if (mode !== "exit") {
-            return vi
-              .fn<() => Promise<{ exitCode: number }>>()
-              .mockRejectedValue(
-                mode === "non-Error rejection" ? "compiler failed" : new Error("build failed"),
-              )();
+            throw mode === "non-Error rejection" ? "compiler failed" : new Error("build failed");
           }
           return { exitCode: 17 };
         },
@@ -326,25 +307,20 @@ describe("source update build output transaction", () => {
       expect(readOutput("dist/control-ui")).toBe("preserved UI");
       expect(backups()).toHaveLength(restartCode ? 1 : 0);
       if (restartCode) {
-        expect(fs.readFileSync(path.join(workdir, backups()[0]!, "dist/marker"), "utf8")).toBe(
-          "old",
-        );
+        expect(read(`${backups()[0]!}/dist/marker`)).toBe("old");
       }
     },
   );
 
   it("does not build or replace outputs after a failed stop", async () => {
     writeOutput("dist", "old");
-    let built = false;
+    const build = vi.fn(async () => ({ exitCode: 0 }));
     const code = await runTransaction({
       lifecycle: async () => 23,
-      build: async () => {
-        built = true;
-        return { exitCode: 0 };
-      },
+      build,
     });
     expect(code).toBe(23);
-    expect(built).toBe(false);
+    expect(build).not.toHaveBeenCalled();
     expect(readOutput("dist")).toBe("old");
     expect(backups()).toEqual([]);
   });
@@ -366,14 +342,13 @@ describe("source update build output transaction", () => {
     expect(events).toEqual(["stop"]);
     expect(readOutput("dist")).toBe("partial");
     expect(backups()).toHaveLength(1);
-    expect(fs.existsSync(path.join(resolveDistArtifactLockPath(workdir), "owner.json"))).toBe(true);
+    expect(ownerExists()).toBe(true);
   });
 
   it("does not restart or follow a replaced output root when restoration is unsafe", async () => {
     writeOutput("dist", "old");
     const outside = path.join(scratch, "outside");
-    fs.mkdirSync(outside);
-    fs.writeFileSync(path.join(outside, "marker"), "outside");
+    writeFiles(outside, { marker: "outside" });
     const events: string[] = [];
     await expect(
       runTransaction({
@@ -393,21 +368,21 @@ describe("source update build output transaction", () => {
   it("does not rm or restore output roots when the live-dist fence refuses before mutation", async () => {
     writeOutput("dist", "old");
     const events: string[] = [];
-    const inode = fs.statSync(path.join(workdir, "dist", "marker")).ino;
+    const originalInode = inode("dist/marker");
     const code = await runTransaction({
       events,
       build: async () => {
         events.push("build");
         writeOutput("dist", "old");
-        fs.writeFileSync(path.join(workdir, "dist", "canary"), "after-backup");
+        writeFiles(workdir, { "dist/canary": "after-backup" });
         return { exitCode: 1, admissionRefused: true };
       },
     });
     expect(code).toBe(1);
     expect(events).toEqual(["stop", "build", "restart"]);
     expect(readOutput("dist")).toBe("old");
-    expect(fs.readFileSync(path.join(workdir, "dist", "canary"), "utf8")).toBe("after-backup");
-    expect(fs.statSync(path.join(workdir, "dist", "marker")).ino).toBe(inode);
+    expect(read("dist/canary")).toBe("after-backup");
+    expect(inode("dist/marker")).toBe(originalInode);
     expect(backups()).toEqual([]);
   });
 
