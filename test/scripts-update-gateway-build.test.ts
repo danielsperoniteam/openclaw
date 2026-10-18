@@ -262,7 +262,11 @@ describe("source update build output transaction", () => {
             writeOutput(output, "partial");
           }
           if (mode !== "exit") {
-            throw mode === "non-Error rejection" ? "compiler failed" : new Error("build failed");
+            return vi
+              .fn<() => Promise<{ exitCode: number }>>()
+              .mockRejectedValue(
+                mode === "non-Error rejection" ? "compiler failed" : new Error("build failed"),
+              )();
           }
           return { exitCode: 17 };
         },

@@ -19,13 +19,15 @@ import { createCodexTestModel } from "./test-support.js";
 
 export { createCodexRuntimePlanFixture } from "./test-support.js";
 
-export const hoisted = vi.hoisted(() => ({
+const hoisted = vi.hoisted(() => ({
   normalizeAgentRuntimeTools:
     vi.fn<typeof import("openclaw/plugin-sdk/agent-harness-runtime").normalizeAgentRuntimeTools>(),
   resolveWebSearchToolPolicy:
     vi.fn<typeof import("openclaw/plugin-sdk/agent-harness").resolveWebSearchToolPolicy>(),
   loadNodeExecAvailability: vi.fn(),
 }));
+
+export { hoisted };
 
 vi.mock("openclaw/plugin-sdk/agent-harness", async (importOriginal) => {
   const actual = await importOriginal<typeof import("openclaw/plugin-sdk/agent-harness")>();

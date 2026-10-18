@@ -1,38 +1,12 @@
-import type { ElementHandle, Locator } from "playwright";
+import { writeFile } from "node:fs/promises";
 import { expect, it } from "vitest";
 import { selectChatLayoutAction } from "../test-helpers/chat-layout-menu.ts";
+import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { revealChatModelOption, selectChatModelOption } from "../test-helpers/select-picker-e2e.ts";
-import {
-  polledAttribute,
-  polledCount,
-  polledText,
-  polledVisible,
-} from "./chat-presentation.test-support.ts";
-import {
-  modelAuthStatus,
-  modelPicker,
-  modelSessionList,
-} from "./chat-runtime-fixtures.test-support.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({ name: "Control UI model and effort controls" });
-const focused = (target: Locator | ElementHandle<HTMLElement | SVGElement>) =>
-  target.evaluate((node) => node === document.activeElement);
-const catalogModel = (
-  id: string,
-  provider: string,
-  name: string,
-  reasoning = false,
-  thinkingLevels: { id: string; label: string }[] = [],
-) => ({ id, provider, name, reasoning, thinkingLevels });
-function sessionList(model: string, provider: string, defaults = {}, row = {}) {
-  const selection = { model, modelProvider: provider };
-  return modelSessionList(
-    { key: "agent:main:main", kind: "direct", ...selection, updatedAt: 1, ...row },
-    { ...selection, contextTokens: 200_000, ...defaults },
-  );
-}
 
 suite.define(() => {
   it.each(["chat", "new"])("keeps a large pending model catalog usable in /%s", async (route) => {
@@ -51,14 +25,46 @@ suite.define(() => {
         sessionInfo: { model: "model-0", modelProvider: "example" },
       });
       await page.goto(`${suite.server.baseUrl}${route}`);
-      const { composer, picker, trigger } = modelPicker(page);
-      await polledAttribute(trigger, "aria-disabled").toBe("false");
+      const composer = page.locator(".agent-chat__input").first();
+      const picker = composer.locator(".chat-controls__model-picker");
+      const trigger = picker.locator("[data-chat-model-select]");
+      await expect.poll(() => trigger.getAttribute("aria-disabled")).toBe("false");
       expect(await picker.locator("[data-chat-model-option]").count()).toBe(0);
       const textarea = composer.locator("textarea").first();
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Performance.enable");
+      const before: { metrics: Array<{ name: string; value: number }> } =
+        await cdp.send("Performance.getMetrics");
+      const started = performance.now();
       await textarea.pressSequentially("catalog proof");
       expect(await textarea.inputValue()).toBe("catalog proof");
+      const after: typeof before = await cdp.send("Performance.getMetrics");
+      const elapsedMs = performance.now() - started;
+      const metric = (name: string, beforeMetrics = before, afterMetrics = after) => {
+        const earlier = beforeMetrics.metrics.find((entry) => entry.name === name)?.value;
+        const later = afterMetrics.metrics.find((entry) => entry.name === name)?.value;
+        if (
+          typeof earlier !== "number" ||
+          !Number.isFinite(earlier) ||
+          typeof later !== "number" ||
+          !Number.isFinite(later)
+        ) {
+          throw new Error(`Missing or invalid CDP metric: ${name}`);
+        }
+        return (later - earlier) * 1_000;
+      };
+      const timings = {
+        route,
+        models: models.length,
+        elapsedMs,
+        scriptMs: metric("ScriptDuration"),
+        taskMs: metric("TaskDuration"),
+      };
+      console.log(JSON.stringify({ proof: "model-catalog-typing", ...timings }));
       await trigger.click();
-      await polledCount(picker.locator("[data-chat-model-option]")).toBe(models.length);
+      await expect
+        .poll(() => picker.locator("[data-chat-model-option]").count())
+        .toBe(models.length);
       expect(await picker.locator("[data-chat-model-catalog-state]").count()).toBe(0);
       const refresh = picker.locator(".chat-controls__model-search-wrap [data-chat-model-refresh]");
       expect(await refresh.textContent()).toContain("Refreshing models for Example…");
@@ -68,6 +74,16 @@ suite.define(() => {
       await trigger.click();
       await trigger.click();
       expect((await gateway.getRequests("models.list")).length).toBe(requestsBeforeReopen);
+      const artifactRoot = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
+      const artifactDir = artifactRoot
+        ? createControlUiE2eArtifactDir(`large-model-catalog-${route}`, artifactRoot)
+        : undefined;
+      if (artifactDir) {
+        await picker.locator(".chat-controls__model-menu").screenshot({
+          path: `${artifactDir}/pending-catalog.png`,
+          animations: "disabled",
+        });
+      }
       const refreshDetails = refresh.getByRole("button");
       const openRefreshTooltip = refresh.locator("openclaw-tooltip[open]");
       await refreshDetails.waitFor({ state: "visible" });
@@ -77,37 +93,65 @@ suite.define(() => {
         await Promise.all(surface.getAnimations().map((animation) => animation.finished));
       });
       await refreshDetails.hover();
-      await polledText(openRefreshTooltip.locator(".tooltip-content")).toBe(
-        "Refreshing models for Example…",
-      );
+      await expect
+        .poll(() => openRefreshTooltip.locator(".tooltip-content").textContent())
+        .toBe("Refreshing models for Example…");
+      if (artifactDir) {
+        await page.screenshot({
+          path: `${artifactDir}/refresh-details.png`,
+          animations: "disabled",
+        });
+      }
       const search = picker.locator("[data-chat-model-search]");
       await search.click();
       await search.press("Tab");
-      expect(await focused(refreshDetails)).toBe(true);
+      expect(await refreshDetails.evaluate((button) => button === document.activeElement)).toBe(
+        true,
+      );
       await refreshDetails.press("Enter");
-      await polledCount(openRefreshTooltip).toBe(1);
+      await expect.poll(() => openRefreshTooltip.count()).toBe(1);
       await refreshDetails.press("Escape");
-      await polledCount(openRefreshTooltip).toBe(0);
+      await expect.poll(() => openRefreshTooltip.count()).toBe(0);
       expect(await picker.getAttribute("open")).not.toBeNull();
       await search.click();
       await refreshDetails.tap();
-      await polledCount(openRefreshTooltip).toBe(1);
+      await expect.poll(() => openRefreshTooltip.count()).toBe(1);
       await search.click();
-      await polledCount(openRefreshTooltip).toBe(0);
-      expect(await focused(search)).toBe(true);
+      await expect.poll(() => openRefreshTooltip.count()).toBe(0);
+      expect(await search.evaluate((input) => input === document.activeElement)).toBe(true);
+      const searchBefore: typeof before = await cdp.send("Performance.getMetrics");
+      const searchStarted = performance.now();
       await search.pressSequentially("Model 0999");
       expect(await search.inputValue()).toBe("Model 0999");
+      const searchAfter: typeof before = await cdp.send("Performance.getMetrics");
+      const searchTimings = {
+        route,
+        models: models.length,
+        elapsedMs: performance.now() - searchStarted,
+        scriptMs: metric("ScriptDuration", searchBefore, searchAfter),
+        taskMs: metric("TaskDuration", searchBefore, searchAfter),
+      };
+      console.log(JSON.stringify({ proof: "model-catalog-search-typing", ...searchTimings }));
       const result = picker.locator('[data-chat-model-option="example/model-999"]');
-      await polledVisible(result).toBe(true);
+      await expect.poll(() => result.isVisible()).toBe(true);
       expect(await picker.locator("[data-chat-model-option]:visible").count()).toBe(1);
       expect(await result.isEnabled()).toBe(true);
       await search.clear();
       await trigger.focus();
       await page.emulateMedia({ reducedMotion: "reduce" });
+      const reducedSearchStarted = performance.now();
       await search.pressSequentially("Model 0999");
       expect(await search.inputValue()).toBe("Model 0999");
-      await polledVisible(result).toBe(true);
+      await expect.poll(() => result.isVisible()).toBe(true);
       expect(await picker.locator("[data-chat-model-option]:visible").count()).toBe(1);
+      console.log(
+        JSON.stringify({
+          proof: "model-catalog-reduced-motion-search",
+          route,
+          models: models.length,
+          elapsedMs: performance.now() - reducedSearchStarted,
+        }),
+      );
       expect(
         await refresh
           .locator(".btn__spinner")
@@ -116,19 +160,49 @@ suite.define(() => {
       for (const request of await gateway.getRequests("models.list")) {
         expect(request.params).not.toHaveProperty("refresh", true);
       }
+      if (artifactDir) {
+        await writeFile(`${artifactDir}/timings.json`, `${JSON.stringify(timings, null, 2)}\n`);
+        await writeFile(
+          `${artifactDir}/search-timings.json`,
+          `${JSON.stringify(searchTimings, null, 2)}\n`,
+        );
+        await page.screenshot({
+          path: `${artifactDir}/filtered-catalog.png`,
+          animations: "disabled",
+        });
+      }
       await refreshDetails.focus();
-      expect(await focused(refreshDetails)).toBe(true);
+      expect(await refreshDetails.evaluate((button) => button === document.activeElement)).toBe(
+        true,
+      );
       await gateway.setMethodResponse("models.list", { models });
       await gateway.emitGatewayEvent("chat.metadata.changed", {});
-      await polledCount(refresh).toBe(0);
-      expect(await focused(search)).toBe(true);
+      await expect.poll(() => refresh.count()).toBe(0);
+      expect(await search.evaluate((input) => input === document.activeElement)).toBe(true);
       expect(await search.inputValue()).toBe("Model 0999");
       await search.press("ArrowDown");
       expect(await result.getAttribute("data-chat-model-highlighted")).not.toBeNull();
       expect(await picker.locator("[data-chat-model-catalog-state]").count()).toBe(0);
       expect(await picker.getAttribute("open")).not.toBeNull();
+      if (artifactDir) {
+        await page.screenshot({
+          path: `${artifactDir}/published-catalog.png`,
+          animations: "disabled",
+        });
+      }
+      const selectionBefore: typeof before = await cdp.send("Performance.getMetrics");
+      const selectionStarted = performance.now();
       await result.click();
-      await polledText(trigger).toContain("Model 0999");
+      await expect.poll(() => trigger.textContent()).toContain("Model 0999");
+      const selectionAfter: typeof before = await cdp.send("Performance.getMetrics");
+      const selectionTimings = {
+        route,
+        models: models.length,
+        elapsedMs: performance.now() - selectionStarted,
+        taskMs: metric("TaskDuration", selectionBefore, selectionAfter),
+      };
+      console.log(JSON.stringify({ proof: "model-catalog-selection", ...selectionTimings }));
+      await cdp.detach();
       if (route === "chat") {
         expect((await gateway.waitForRequest("sessions.patch")).params).toMatchObject({
           expectedSessionId: "session:agent:main:main",
@@ -139,9 +213,16 @@ suite.define(() => {
   });
 
   it.each(["pointer", "keyboard"])("changes only this chat's account (%s)", async (input) => {
+    const artifactRoot = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
+    const artifactDir = artifactRoot
+      ? createControlUiE2eArtifactDir("chat-model-accounts", artifactRoot)
+      : undefined;
     await suite.withPage(
       {
         viewport: { width: 393, height: 852 },
+        ...(artifactDir
+          ? { recordVideo: { dir: artifactDir, size: { width: 1280, height: 900 } } }
+          : {}),
       },
       async ({ page }) => {
         const personal = {
@@ -157,54 +238,94 @@ suite.define(() => {
           label: "Test Person · Work workspace",
           selected: true,
         };
-        const models = [catalogModel("gpt-5.5", "openai", "GPT-5.5")];
+        const models = [
+          {
+            id: "gpt-5.5",
+            provider: "openai",
+            name: "GPT-5.5",
+            reasoning: false,
+            thinkingLevels: [],
+          },
+        ];
         const sessionKey = "agent:main:main";
-        const sessions = sessionList("gpt-5.5", "openai");
-        const inventory = (accounts: (typeof personal)[], nextCursor?: string) => ({
-          profileId: "test-person",
-          accounts,
-          ...(nextCursor ? { nextCursor } : {}),
-          links: [{ provider: "openai", authProfileId: work.authProfileId, updatedAt: 1 }],
-        });
-        const catalog = ({ label, authProfileId }: typeof personal) => ({
-          commands: [],
-          models,
-          accountSelection: { kind: "personal", label, authProfileId, source: "user" },
-        });
+        const sessionList = {
+          count: 1,
+          path: "",
+          ts: 1,
+          defaults: { model: "gpt-5.5", modelProvider: "openai", contextTokens: 200_000 },
+          sessions: [
+            {
+              key: sessionKey,
+              kind: "direct",
+              model: "gpt-5.5",
+              modelProvider: "openai",
+              updatedAt: 1,
+            },
+          ],
+        };
         const gateway = await installMockGateway(page, {
           agentModel: "openai/gpt-5.5",
           models,
           deferredMethods: ["sessions.patch"],
           methodResponses: {
-            "sessions.list": sessions,
-            "models.authStatus": modelAuthStatus(
-              [personal, work].map(({ authProfileId }) => ({
-                profileId: authProfileId,
-                type: "oauth",
-                status: "ok",
-                email: `${authProfileId.slice("openai:".length)}@example.com`,
-              })),
-              { usage: { providerId: "openai", windows: [], plan: "ChatGPT Pro" } },
-            ),
-            "models.list": catalog(personal),
-            // Reopening retries an empty inventory; a populated one stays cached.
-            "users.listModelAccounts": inventory(
-              input === "keyboard" ? [] : [personal],
-              "accounts-page-2",
-            ),
+            "sessions.list": sessionList,
+            "models.authStatus": {
+              ts: 1,
+              providers: [
+                {
+                  provider: "openai",
+                  displayName: "OpenAI",
+                  status: "ok",
+                  profiles: [
+                    {
+                      profileId: personal.authProfileId,
+                      type: "oauth",
+                      status: "ok",
+                      email: "personal@example.com",
+                    },
+                    {
+                      profileId: work.authProfileId,
+                      type: "oauth",
+                      status: "ok",
+                      email: "work@example.com",
+                    },
+                  ],
+                  usage: { providerId: "openai", windows: [], plan: "ChatGPT Pro" },
+                },
+              ],
+            },
+            "models.list": {
+              commands: [],
+              models,
+              accountSelection: {
+                kind: "personal",
+                label: personal.label,
+                authProfileId: personal.authProfileId,
+                source: "user",
+              },
+            },
+            "users.listModelAccounts": {
+              profileId: "test-person",
+              // Reopening retries an empty inventory; a populated one stays cached.
+              accounts: input === "keyboard" ? [] : [personal],
+              nextCursor: "accounts-page-2",
+              links: [{ provider: "openai", authProfileId: work.authProfileId, updatedAt: 1 }],
+            },
           },
         });
         await page.goto(`${suite.server.baseUrl}chat`);
         const composer = page.locator(".agent-chat__input").first();
         const model = composer.locator('[data-chat-model-select="true"]');
-        await polledAttribute(model, "aria-busy").toBe("false");
+        await expect.poll(() => model.getAttribute("aria-busy")).toBe("false");
         await model.click();
         const heading = composer.locator('[data-chat-model-provider="openai"]');
-        await polledText(heading).toContain("Subscription · personal@example.com");
+        await expect
+          .poll(() => heading.textContent())
+          .toContain("Subscription · personal@example.com");
         const account = composer.locator("[data-chat-account-selection]");
         const picker = account;
         const trigger = picker.locator("[data-chat-account-group-toggle]");
-        await polledText(trigger).toContain(personal.label);
+        await expect.poll(() => trigger.textContent()).toContain(personal.label);
         for (const width of [320, 768, 1280]) {
           await page.setViewportSize({ width, height: 900 });
           expect(await heading.getAttribute("title")).toBe("Subscription · personal@example.com");
@@ -220,23 +341,29 @@ suite.define(() => {
               return Boolean(box && box.width > 0 && box.x >= 0 && box.x + box.width <= width + 1);
             })
             .toBe(true);
+          if (artifactDir) {
+            await page.screenshot({
+              animations: "disabled",
+              path: `${artifactDir}/chat-account-${width}.png`,
+            });
+          }
         }
         await trigger.click();
         const more = picker.locator('[data-chat-account-option="more"]');
-        await polledVisible(more).toBe(true);
+        await expect.poll(() => more.isVisible()).toBe(true);
         expect(
           await picker.locator('[data-chat-account-option="current"]').textContent(),
         ).toContain("personal@example.com");
         await trigger.click();
-        await polledVisible(more).toBe(false);
-        await polledVisible(account).toBe(true);
-        await polledAttribute(trigger, "aria-expanded").toBe("false");
+        await expect.poll(() => more.isVisible()).toBe(false);
+        await expect.poll(() => account.isVisible()).toBe(true);
+        await expect.poll(() => trigger.getAttribute("aria-expanded")).toBe("false");
         const refreshRequests = await gateway.getRequests("users.listModelAccounts");
         if (input === "keyboard") {
           await gateway.deferNext("users.listModelAccounts", {});
         }
         await trigger.press("Enter");
-        await polledVisible(more).toBe(true);
+        await expect.poll(() => more.isVisible()).toBe(true);
         const pendingMoreTarget = await more.elementHandle();
         expect(pendingMoreTarget).not.toBeNull();
         if (input === "keyboard") {
@@ -245,16 +372,22 @@ suite.define(() => {
           });
           expect(refresh.params).toEqual({});
           const loading = picker.locator('[data-chat-account-option="loading"]');
-          await polledVisible(loading).toBe(true);
+          await expect.poll(() => loading.isVisible()).toBe(true);
           expect(await pendingMoreTarget!.isDisabled()).toBe(true);
           await pendingMoreTarget!.focus();
-          await gateway.resolveDeferred(
-            "users.listModelAccounts",
-            inventory([personal], "accounts-page-2"),
-          );
-          await polledVisible(loading).toBe(false);
+          await gateway.resolveDeferred("users.listModelAccounts", {
+            profileId: "test-person",
+            accounts: [personal],
+            nextCursor: "accounts-page-2",
+            links: [{ provider: "openai", authProfileId: work.authProfileId, updatedAt: 1 }],
+          });
+          await expect.poll(() => loading.isVisible()).toBe(false);
           await expect.poll(() => pendingMoreTarget!.isEnabled()).toBe(true);
-          await expect.poll(() => focused(pendingMoreTarget!)).toBe(true);
+          await expect
+            .poll(() =>
+              pendingMoreTarget!.evaluate((element) => element === document.activeElement),
+            )
+            .toBe(true);
         } else {
           expect(await gateway.getRequests("users.listModelAccounts")).toEqual(refreshRequests);
         }
@@ -263,73 +396,117 @@ suite.define(() => {
             .locator('[data-chat-account-option="current"]')
             .getAttribute("aria-selected"),
         ).toBe("true");
-        const loading = picker.locator('[data-chat-account-option="loading"]');
-        async function requestPage(cursor: string, checkFocus = false) {
-          const after = (await gateway.getRequests("users.listModelAccounts")).length;
-          await gateway.deferNext("users.listModelAccounts", { cursor });
-          const url = page.url();
-          if (input === "keyboard") {
-            if (checkFocus) {
-              expect(await focused(pendingMoreTarget!)).toBe(true);
-            }
-            await page.keyboard.press("Enter");
-          } else {
-            await pendingMoreTarget!.click();
-          }
-          await expect
-            .poll(
-              async () =>
-                (await gateway.getRequests("users.listModelAccounts")).length > after ||
-                page.url() !== url,
-            )
-            .toBe(true);
-          expect(page.url()).toBe(url);
-          const request = await gateway.waitForRequest("users.listModelAccounts", { after });
-          expect(request.params).toEqual({ cursor });
-          await polledVisible(loading).toBe(true);
-          expect(await pendingMoreTarget!.isDisabled()).toBe(true);
-          if (input === "keyboard") {
-            await page.keyboard.press("Enter");
-          } else {
-            await pendingMoreTarget!.hover();
-            expect(await pendingMoreTarget!.evaluate((row) => row.matches(":hover"))).toBe(true);
-            await page.mouse.down();
-            await page.mouse.up();
-          }
-          expect(await gateway.getRequests("users.listModelAccounts")).toHaveLength(after + 1);
-          expect(page.url()).toBe(url);
+        const inventoryRequests = await gateway.getRequests("users.listModelAccounts");
+        await gateway.deferNext("users.listModelAccounts", { cursor: "accounts-page-2" });
+        const beforePaginationUrl = page.url();
+        if (input === "keyboard") {
+          await page.keyboard.press("Enter");
+        } else {
+          await pendingMoreTarget!.click();
         }
-        await requestPage("accounts-page-2");
-        await polledAttribute(trigger, "aria-expanded").toBe("true");
-        await gateway.resolveDeferred(
-          "users.listModelAccounts",
-          inventory([work], "accounts-page-3"),
+        await expect
+          .poll(async () => {
+            const requests = await gateway.getRequests("users.listModelAccounts");
+            return requests.length > inventoryRequests.length || page.url() !== beforePaginationUrl;
+          })
+          .toBe(true);
+        expect(page.url()).toBe(beforePaginationUrl);
+        const nextPage = await gateway.waitForRequest("users.listModelAccounts", {
+          after: inventoryRequests.length,
+        });
+        expect(nextPage.params).toEqual({ cursor: "accounts-page-2" });
+        const loading = picker.locator('[data-chat-account-option="loading"]');
+        await expect.poll(() => loading.isVisible()).toBe(true);
+        expect(await pendingMoreTarget!.isDisabled()).toBe(true);
+        if (input === "keyboard") {
+          await page.keyboard.press("Enter");
+        } else {
+          await pendingMoreTarget!.hover();
+          expect(await pendingMoreTarget!.evaluate((row) => row.matches(":hover"))).toBe(true);
+          await page.mouse.down();
+          await page.mouse.up();
+        }
+        expect(await gateway.getRequests("users.listModelAccounts")).toHaveLength(
+          inventoryRequests.length + 1,
         );
-        await polledVisible(loading).toBe(false);
+        expect(page.url()).toBe(beforePaginationUrl);
+        await expect.poll(() => trigger.getAttribute("aria-expanded")).toBe("true");
+        await gateway.resolveDeferred("users.listModelAccounts", {
+          profileId: "test-person",
+          accounts: [work],
+          nextCursor: "accounts-page-3",
+          links: [{ provider: "openai", authProfileId: work.authProfileId, updatedAt: 1 }],
+        });
+        await expect.poll(() => loading.isVisible()).toBe(false);
         await expect.poll(() => pendingMoreTarget!.isEnabled()).toBe(true);
-        await requestPage("accounts-page-3", true);
+        const pageRequests = await gateway.getRequests("users.listModelAccounts");
+        await gateway.deferNext("users.listModelAccounts", { cursor: "accounts-page-3" });
+        const beforeLastPageUrl = page.url();
+        if (input === "keyboard") {
+          expect(await pendingMoreTarget!.evaluate((row) => row === document.activeElement)).toBe(
+            true,
+          );
+          await page.keyboard.press("Enter");
+        } else {
+          await pendingMoreTarget!.click();
+        }
+        await expect
+          .poll(async () => {
+            const requests = await gateway.getRequests("users.listModelAccounts");
+            return requests.length > pageRequests.length || page.url() !== beforeLastPageUrl;
+          })
+          .toBe(true);
+        expect(page.url()).toBe(beforeLastPageUrl);
+        const lastPage = await gateway.waitForRequest("users.listModelAccounts", {
+          after: pageRequests.length,
+        });
+        expect(lastPage.params).toEqual({ cursor: "accounts-page-3" });
+        await expect.poll(() => loading.isVisible()).toBe(true);
+        expect(await pendingMoreTarget!.isDisabled()).toBe(true);
+        if (input === "keyboard") {
+          await page.keyboard.press("Enter");
+        } else {
+          await pendingMoreTarget!.hover();
+          expect(await pendingMoreTarget!.evaluate((row) => row.matches(":hover"))).toBe(true);
+          await page.mouse.down();
+          await page.mouse.up();
+        }
+        expect(await gateway.getRequests("users.listModelAccounts")).toHaveLength(
+          pageRequests.length + 1,
+        );
+        expect(page.url()).toBe(beforeLastPageUrl);
         const manage = picker.locator('[data-chat-account-option="manage"]');
         if (input === "keyboard") {
           await manage.focus();
         }
-        await gateway.resolveDeferred("users.listModelAccounts", inventory([]));
-        await polledVisible(loading).toBe(false);
-        await polledVisible(more).toBe(false);
+        await gateway.resolveDeferred("users.listModelAccounts", {
+          profileId: "test-person",
+          accounts: [],
+          links: [{ provider: "openai", authProfileId: work.authProfileId, updatedAt: 1 }],
+        });
+        await expect.poll(() => loading.isVisible()).toBe(false);
+        await expect.poll(() => more.isVisible()).toBe(false);
         if (input === "keyboard") {
-          expect(await focused(manage)).toBe(true);
+          expect(await manage.evaluate((button) => button === document.activeElement)).toBe(true);
         }
         const workOption = picker.locator(
           `[data-chat-account-option="account:${work.authProfileId}"]`,
         );
-        await polledVisible(workOption).toBe(true);
+        await expect.poll(() => workOption.isVisible()).toBe(true);
         expect(await workOption.textContent()).toContain("work@example.com");
+        if (artifactDir) {
+          await page.screenshot({
+            animations: "disabled",
+            path: `${artifactDir}/chat-account-page-2.png`,
+          });
+        }
         await trigger.click();
         const search = composer.locator("[data-chat-model-search]");
         await search.fill("account");
-        await polledVisible(workOption).toBe(true);
+        await expect.poll(() => workOption.isVisible()).toBe(true);
         await search.fill(work.label);
         await search.press("ArrowDown");
-        await polledAttribute(workOption, "data-chat-model-highlighted").toBe("");
+        await expect.poll(() => workOption.getAttribute("data-chat-model-highlighted")).toBe("");
         await search.press("Enter");
         const patch = await gateway.waitForRequest("sessions.patch");
         expect(patch.params).toEqual({
@@ -337,20 +514,35 @@ suite.define(() => {
           key: sessionKey,
           model: `openai/gpt-5.5@${work.authProfileId}`,
         });
-        await polledText(trigger).toContain(personal.label);
+        await expect.poll(() => trigger.textContent()).toContain(personal.label);
         await gateway.resolveDeferred("sessions.patch", { ok: true });
-        await gateway.setMethodResponse("sessions.list", sessions);
-        await gateway.setMethodResponse("models.list", catalog(work));
+        await gateway.setMethodResponse("sessions.list", sessionList);
+        await gateway.setMethodResponse("models.list", {
+          commands: [],
+          models,
+          accountSelection: {
+            kind: "personal",
+            label: work.label,
+            authProfileId: work.authProfileId,
+            source: "user",
+          },
+        });
         await gateway.emitGatewayEvent("chat.metadata.changed", {});
         await gateway.emitGatewayEvent("sessions.changed", {
           key: sessionKey,
           agentId: "main",
           reason: "patch",
         });
-        await polledText(trigger).toContain(work.label);
-        await polledText(heading).toContain("Subscription · work@example.com");
+        await expect.poll(() => trigger.textContent()).toContain(work.label);
+        await expect.poll(() => heading.textContent()).toContain("Subscription · work@example.com");
         expect(await gateway.getRequests("users.selectModelAccount")).toHaveLength(0);
         expect(await gateway.getRequests("users.unlinkAuthProfile")).toHaveLength(0);
+        if (artifactDir) {
+          await page.screenshot({
+            animations: "disabled",
+            path: `${artifactDir}/chat-account-selected.png`,
+          });
+        }
       },
     );
   });
@@ -372,25 +564,61 @@ suite.define(() => {
         const gateway = await installMockGateway(page, {
           agentModel: "openai/gpt-5.6-luna",
           models: [
-            catalogModel("gpt-5.6-luna", "openai", longName, true, thinkingLevels),
-            catalogModel("speed-only", "openai", "Speed only"),
-            catalogModel("basic", "example", "Basic"),
+            {
+              id: "gpt-5.6-luna",
+              provider: "openai",
+              name: longName,
+              reasoning: true,
+              thinkingLevels,
+            },
+            {
+              id: "speed-only",
+              provider: "openai",
+              name: "Speed only",
+              reasoning: false,
+              thinkingLevels: [],
+            },
+            {
+              id: "basic",
+              provider: "example",
+              name: "Basic",
+              reasoning: false,
+              thinkingLevels: [],
+            },
           ],
           methodResponses: {
-            "sessions.list": sessionList(
-              "gpt-5.6-luna",
-              "openai",
-              { thinkingDefault: "high", thinkingLevels },
-              { contextTokens: 200_000, totalTokens: 46_000, totalTokensFresh: true },
-            ),
+            "sessions.list": {
+              count: 1,
+              path: "",
+              ts: 1,
+              defaults: {
+                model: "gpt-5.6-luna",
+                modelProvider: "openai",
+                thinkingDefault: "high",
+                thinkingLevels,
+                contextTokens: 200_000,
+              },
+              sessions: [
+                {
+                  key: "agent:main:main",
+                  kind: "direct",
+                  model: "gpt-5.6-luna",
+                  modelProvider: "openai",
+                  updatedAt: 1,
+                  contextTokens: 200_000,
+                  totalTokens: 46_000,
+                  totalTokensFresh: true,
+                },
+              ],
+            },
           },
         });
         await page.goto(`${suite.server.baseUrl}${route}`);
         const composer = page.locator(".agent-chat__input").first();
         const model = composer.locator('[data-chat-model-select="true"]');
         const effort = composer.locator('[data-chat-thinking-select="true"]');
-        await polledAttribute(model, "aria-label").toContain(longName);
-        await polledVisible(effort).toBe(true);
+        await expect.poll(() => model.getAttribute("aria-label")).toContain(longName);
+        await expect.poll(() => effort.isVisible()).toBe(true);
         for (const width of [320, 375, 393, 430, 560, 768, 1280]) {
           await page.setViewportSize({ width, height: 900 });
           await expect
@@ -435,7 +663,7 @@ suite.define(() => {
           expect(await model.getAttribute("aria-label")).toContain(longName);
           await model.click();
           const menu = composer.locator(".chat-controls__model-menu");
-          await polledVisible(menu).toBe(true);
+          await expect.poll(() => menu.isVisible()).toBe(true);
           expect(await menu.getByText(/^(?:Effort|Speed)$/).count()).toBe(0);
           expect(
             await menu.locator("[data-chat-thinking-slider], [data-chat-speed-option]").count(),
@@ -447,7 +675,19 @@ suite.define(() => {
             .poll(() => menu.getByRole("option", { name: new RegExp(longName) }).count())
             .toBe(1);
           await page.keyboard.press("Escape");
-          await expect.poll(() => focused(model)).toBe(true);
+          await expect
+            .poll(() => model.evaluate((node) => node === document.activeElement))
+            .toBe(true);
+          const artifactRoot = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
+          const artifactDir = artifactRoot
+            ? createControlUiE2eArtifactDir("chat-model-controls", artifactRoot)
+            : undefined;
+          if (artifactDir && [320, 393, 560, 1280].includes(width)) {
+            await page.screenshot({
+              path: `${artifactDir}/${route}-model-effort-${width}-tooltip-${hoverEffort}.png`,
+              animations: "disabled",
+            });
+          }
         }
         await page.setViewportSize({ width: 393, height: 852 });
         await page.emulateMedia({ reducedMotion: "no-preference" });
@@ -468,9 +708,9 @@ suite.define(() => {
         );
         await effort.click();
         const slider = composer.locator('[data-chat-thinking-slider="true"]');
-        await polledVisible(slider).toBe(true);
+        await expect.poll(() => slider.isVisible()).toBe(true);
         await slider.press("Home");
-        await polledAttribute(effort, "data-chat-thinking-value").toBe("low");
+        await expect.poll(() => effort.getAttribute("data-chat-thinking-value")).toBe("low");
         await expect.poll(needleAngle).toBe(-120);
         if (route === "chat") {
           expect((await gateway.waitForRequest("sessions.patch")).params).toMatchObject({
@@ -483,29 +723,31 @@ suite.define(() => {
           "none",
         );
         await slider.press("End");
-        await polledAttribute(effort, "data-chat-thinking-value").toBe("high");
+        await expect.poll(() => effort.getAttribute("data-chat-thinking-value")).toBe("high");
         expect(await needleAngle()).toBe(120);
         // The expanded picker suppresses its trigger hint while owning Escape.
         await slider.hover();
         const openTooltips = page.locator("openclaw-tooltip[open]");
-        await polledCount(openTooltips).toBe(0);
-        expect(await focused(slider)).toBe(true);
+        await expect.poll(() => openTooltips.count()).toBe(0);
+        expect(await slider.evaluate((node) => node === document.activeElement)).toBe(true);
         if (hoverEffort) {
           await effort.hover();
-          await polledCount(openTooltips).toBe(0);
+          await expect.poll(() => openTooltips.count()).toBe(0);
           expect(await slider.isVisible()).toBe(true);
           expect(await slider.inputValue()).toBe("1");
           expect(await effort.getAttribute("data-chat-thinking-value")).toBe("high");
-          expect(await focused(slider)).toBe(true);
+          expect(await slider.evaluate((node) => node === document.activeElement)).toBe(true);
         }
         await page.keyboard.press("Escape");
-        await polledVisible(slider).toBe(false);
-        await expect.poll(() => focused(effort)).toBe(true);
+        await expect.poll(() => slider.isVisible()).toBe(false);
+        await expect
+          .poll(() => effort.evaluate((node) => node === document.activeElement))
+          .toBe(true);
         if (route === "chat") {
           await page.setViewportSize({ width: 1180, height: 900 });
           await selectChatLayoutAction(page, "Open split view");
           const panes = page.locator(".chat-split-view__pane .agent-chat__input");
-          await polledCount(panes).toBe(2);
+          await expect.poll(() => panes.count()).toBe(2);
           await expect
             .poll(() =>
               panes.evaluateAll((inputs) =>
@@ -533,6 +775,16 @@ suite.define(() => {
               ),
             )
             .toBe(true);
+          const artifactRoot = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
+          const artifactDir = artifactRoot
+            ? createControlUiE2eArtifactDir("chat-model-controls", artifactRoot)
+            : undefined;
+          if (artifactDir) {
+            await page.screenshot({
+              path: `${artifactDir}/chat-model-effort-split-tooltip-${hoverEffort}.png`,
+              animations: "disabled",
+            });
+          }
         }
         await model.click();
         await composer.locator("[data-chat-model-search]").fill("Speed only");
@@ -548,8 +800,8 @@ suite.define(() => {
               model: "openai/speed-only",
             });
         } else {
-          await polledCount(effort).toBe(1);
-          await polledAttribute(effort, "aria-label").toBe("Speed: Standard");
+          await expect.poll(() => effort.count()).toBe(1);
+          await expect.poll(() => effort.getAttribute("aria-label")).toBe("Speed: Standard");
           await effort.click();
           await expect
             .poll(() =>
@@ -558,7 +810,7 @@ suite.define(() => {
             .toBe("false");
           await model.click();
           await selectChatModelOption(composer.locator('[data-chat-model-option="example/basic"]'));
-          await polledCount(effort).toBe(0);
+          await expect.poll(() => effort.count()).toBe(0);
         }
       });
     },
@@ -571,26 +823,54 @@ suite.define(() => {
     "keeps $provider $capability capabilities reachable without a model-menu bridge",
     async ({ provider, reasoning }) => {
       await suite.withPage({ viewport: { width: 320, height: 852 } }, async ({ page }) => {
-        const thinking = { thinkingLevels: [], thinkingDefault: "off" };
         const gateway = await installMockGateway(page, {
           agentModel: `${provider}/basic`,
-          models: [{ ...catalogModel("basic", provider, "Basic", reasoning), ...thinking }],
+          models: [
+            {
+              id: "basic",
+              provider,
+              name: "Basic",
+              reasoning,
+              thinkingLevels: [],
+              thinkingDefault: "off",
+            },
+          ],
           methodResponses: {
-            "sessions.list": sessionList("basic", provider, thinking, {
-              ...thinking,
-              contextTokens: 200_000,
-              totalTokens: 46_000,
-              totalTokensFresh: true,
-            }),
+            "sessions.list": {
+              count: 1,
+              path: "",
+              ts: 1,
+              defaults: {
+                model: "basic",
+                modelProvider: provider,
+                thinkingLevels: [],
+                thinkingDefault: "off",
+                contextTokens: 200_000,
+              },
+              sessions: [
+                {
+                  key: "agent:main:main",
+                  kind: "direct",
+                  model: "basic",
+                  modelProvider: provider,
+                  thinkingLevels: [],
+                  thinkingDefault: "off",
+                  contextTokens: 200_000,
+                  totalTokens: 46_000,
+                  totalTokensFresh: true,
+                  updatedAt: 1,
+                },
+              ],
+            },
           },
         });
         await page.goto(`${suite.server.baseUrl}chat`);
         const composer = page.locator(".agent-chat__input");
         const model = composer.locator('[data-chat-model-select="true"]');
-        await polledAttribute(model, "aria-busy").toBe("false");
+        await expect.poll(() => model.getAttribute("aria-busy")).toBe("false");
         const effort = composer.locator('[data-chat-thinking-select="true"]');
         if (provider !== "openai") {
-          await polledCount(effort).toBe(0);
+          await expect.poll(() => effort.count()).toBe(0);
           expect(
             (await gateway.getRequests("sessions.patch")).some(
               ({ params }) => params && Object.hasOwn(params, "thinkingLevel"),
@@ -598,7 +878,7 @@ suite.define(() => {
           ).toBe(false);
           return;
         }
-        await polledAttribute(effort, "aria-label").toBe("Speed: Standard");
+        await expect.poll(() => effort.getAttribute("aria-label")).toBe("Speed: Standard");
         const [modelBox, effortBox, actionsBox] = await Promise.all([
           model.boundingBox(),
           effort.boundingBox(),
@@ -617,9 +897,21 @@ suite.define(() => {
           key: "agent:main:main",
           fastMode: true,
         });
-        await polledAttribute(effort, "aria-label").toBe("Speed: Fast");
+        await expect.poll(() => effort.getAttribute("aria-label")).toBe("Speed: Fast");
         await page.keyboard.press("Escape");
-        await expect.poll(() => focused(effort)).toBe(true);
+        await expect
+          .poll(() => effort.evaluate((node) => node === document.activeElement))
+          .toBe(true);
+        const artifactRoot = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
+        const artifactDir = artifactRoot
+          ? createControlUiE2eArtifactDir("chat-model-controls", artifactRoot)
+          : undefined;
+        if (artifactDir) {
+          await page.screenshot({
+            path: `${artifactDir}/chat-speed-only-320.png`,
+            animations: "disabled",
+          });
+        }
       });
     },
   );
@@ -628,6 +920,10 @@ suite.define(() => {
     "clears %s model search before Escape dismisses the picker",
     async (route) => {
       await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
+        const artifactRoot = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
+        const artifactDir = artifactRoot
+          ? createControlUiE2eArtifactDir(`model-search-escape-${route}`, artifactRoot)
+          : undefined;
         const gateway = await installMockGateway(page, {
           agentModel: "openai/gpt-5.5",
           models: [
@@ -636,29 +932,50 @@ suite.define(() => {
           ],
         });
         await page.goto(`${suite.server.baseUrl}${route}`);
-        const { picker, trigger, search } = modelPicker(page);
-        await polledAttribute(trigger, "aria-disabled").toBe("false");
+        const composer = page.locator(".agent-chat__input").first();
+        const picker = composer.locator(".chat-controls__model-picker");
+        const trigger = picker.locator('[data-chat-model-select="true"]');
+        await expect.poll(() => trigger.getAttribute("aria-disabled")).toBe("false");
         await trigger.click();
-        await polledCount(picker.locator("[data-chat-model-option]")).toBe(2);
+        await expect.poll(() => picker.locator("[data-chat-model-option]").count()).toBe(2);
         await revealChatModelOption(picker.locator('[data-chat-model-option="openai/gpt-5.5"]'));
         await revealChatModelOption(
           picker.locator('[data-chat-model-option="anthropic/claude-sonnet-4-6"]'),
         );
+        const search = picker.locator("[data-chat-model-search]");
         // Enter search with the pointer so row tooltips do not own Escape.
         await search.click();
-        await polledCount(page.locator("openclaw-tooltip[open]")).toBe(0);
+        await expect.poll(() => page.locator("openclaw-tooltip[open]").count()).toBe(0);
         await search.fill("anthropic");
-        await polledCount(picker.locator("[data-chat-model-option]:visible")).toBe(1);
+        await expect.poll(() => picker.locator("[data-chat-model-option]:visible").count()).toBe(1);
+        if (artifactDir) {
+          await page.screenshot({
+            animations: "disabled",
+            path: `${artifactDir}/01-filtered.png`,
+          });
+        }
         await search.press("Escape");
-        await polledAttribute(picker, "open").toBe("");
+        if (artifactDir) {
+          await page.screenshot({
+            animations: "disabled",
+            path: `${artifactDir}/02-first-escape.png`,
+          });
+        }
+        await expect.poll(() => picker.getAttribute("open")).toBe("");
         expect(await search.inputValue()).toBe("");
-        expect(await focused(search)).toBe(true);
-        await polledCount(picker.locator("[data-chat-model-option]:visible")).toBe(2);
+        expect(await search.evaluate((input) => input === document.activeElement)).toBe(true);
+        await expect.poll(() => picker.locator("[data-chat-model-option]:visible").count()).toBe(2);
         expect(await gateway.getRequests("sessions.patch")).toEqual([]);
 
         await search.press("Escape");
-        await polledAttribute(picker, "open").toBe(null);
-        expect(await focused(trigger)).toBe(true);
+        await expect.poll(() => picker.getAttribute("open")).toBe(null);
+        expect(await trigger.evaluate((summary) => summary === document.activeElement)).toBe(true);
+        if (artifactDir) {
+          await page.screenshot({
+            animations: "disabled",
+            path: `${artifactDir}/03-second-escape.png`,
+          });
+        }
       });
     },
   );

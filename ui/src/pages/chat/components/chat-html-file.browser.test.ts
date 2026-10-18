@@ -2,7 +2,11 @@ import { LanguageDescription } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../../test/helpers/promise.js";
-import { createApplicationGateway } from "../../../test-helpers/application-context.ts";
+import {
+  applicationContext,
+  type ApplicationContext,
+  type ApplicationContextRequest,
+} from "../../../app/context.ts";
 import { readFileDraft, setFileDraft } from "./chat-file-drafts.ts";
 import type { SidebarContent } from "./chat-sidebar-content-types.ts";
 import { createChatSidebarContainer } from "./chat-sidebar.test-support.ts";
@@ -20,23 +24,23 @@ beforeAll(async () => {
 });
 
 type FileContent = Extract<SidebarContent, { kind: "file" }>;
-type Panel = HTMLElementTagNameMap["openclaw-chat-detail-panel"];
+type Panel = HTMLElement & {
+  content: FileContent;
+  fileNavigation: { line: number } | null;
+  updateComplete: Promise<unknown>;
+};
 const source = "<!doctype html>\n<h1>Original HTML</h1>\n<input aria-label=note>";
 const opened: FileContent[] = [];
-const conflicting = "<h1>Conflicting draft</h1>";
-
-function conflict(file: FileContent) {
-  return vi
-    .mocked(file.edit!.save)
-    .mockResolvedValueOnce({ ok: false, code: "conflict" })
-    .mockResolvedValue({ ok: true, hash: "saved" });
-}
 
 function button(panel: Panel, name: string) {
-  return [...panel.querySelectorAll("button")].find(
+  const found = [...panel.querySelectorAll("button")].find(
     (element) =>
       element.getAttribute("aria-label") === name || element.textContent?.trim() === name,
   );
+  if (!found) {
+    throw new Error("Missing button: " + name);
+  }
+  return found;
 }
 
 async function mount(
@@ -58,19 +62,34 @@ async function mount(
   if (retained) {
     setFileDraft(file, { content: retained, expectedHash: retainedHash });
   }
-  const panel = document.createElement("openclaw-chat-detail-panel");
+  const panel = document.createElement("openclaw-chat-detail-panel") as Panel;
   const request = vi.fn(async (_method: string, params: { html: string }) => ({
     html: params.html,
     sandboxUrl: "/mcp-app-sandbox",
     sandboxPort: 8444,
   }));
-  const { gateway } = createApplicationGateway();
-  // No advertised methods or session: the sibling app catalog remains unavailable.
-  Object.assign(gateway.snapshot, { client: { request }, phase: "connected" });
-  gateway.connection.gatewayUrl = "ws://gateway.example:8443";
+  const previewContext = {
+    gateway: {
+      snapshot: { client: { request }, phase: "connected" },
+      connection: { gatewayUrl: "ws://gateway.example:8443" },
+      subscribe: () => () => {},
+    },
+  } as unknown as ApplicationContext;
+  // Only the preview consumes this Gateway-only fixture; sibling catalogs need a full app.
+  panel.addEventListener("context-request", (event) => {
+    // SAFETY: This listener handles the native application context protocol.
+    const contextRequest = event as ApplicationContextRequest;
+    if (
+      contextRequest.context === applicationContext &&
+      contextRequest.contextTarget.localName === "openclaw-chat-html-preview"
+    ) {
+      event.stopPropagation();
+      contextRequest.callback(previewContext);
+    }
+  });
   panel.style.cssText = "width:100%;height:600px";
   panel.content = file;
-  const container = createChatSidebarContainer(gateway);
+  const container = createChatSidebarContainer();
   container.append(panel);
   document.body.append(container);
   await panel.updateComplete;
@@ -79,22 +98,7 @@ async function mount(
   const preview = panel.querySelector("openclaw-chat-html-preview")!;
   preview.embedSandboxMode = "strict";
   await expect.poll(() => panel.querySelector("iframe")).not.toBeNull();
-  expect(request.mock.lastCall?.[1]?.html).toBe(retained ?? source);
-  expect(panel.querySelector(".cm-editor")).toBeNull();
-  const query = (selector: string) => panel.querySelector<HTMLElement>(selector);
-  return {
-    panel,
-    file,
-    request,
-    button: (label: string) => button(panel, label)!,
-    click: (label: string) => userEvent.click(button(panel, label)!),
-    input: () => query(".cm-content")!,
-    editor: () => query(".cm-editor"),
-    text: () => expect.poll(() => query(".cm-content")?.textContent),
-    preview: () => expect.poll(() => request.mock.lastCall?.[1]?.html),
-    draft: () => expect.poll(() => readFileDraft(file)),
-    notice: () => expect.poll(() => query(".file-view__save-notice")?.textContent),
-  };
+  return { panel, file, request };
 }
 
 afterEach(() => {
@@ -107,36 +111,44 @@ afterEach(() => {
 
 describe.runIf(browserMode)("HTML file presentation", () => {
   it("renders normalized HTML MIME without a filename extension", async () => {
-    await mount("report", undefined, "Text/HTML; charset=utf-8");
+    const { panel, request } = await mount("report", undefined, "Text/HTML; charset=utf-8");
+    expect(request.mock.lastCall?.[1]?.html).toBe(source);
+    expect(panel.querySelector(".cm-editor")).toBeNull();
   });
 
   it("opens rendered HTML before loading CodeMirror, then retains editor and undo through draft preview", async () => {
-    const f = await mount();
-    expect(f.panel.querySelector(".cm-editor, h1, .sidebar-file-view__wrap")).toBeNull();
-    await f.click("Edit file");
-    await page.getByRole("textbox", { name: f.file.name, exact: true }).click();
-    await expect.poll(() => f.input()?.contentEditable).toBe("true");
-    const initialEditor = f.editor();
-    const editable = f.input();
-    await f.click("Enable word wrap");
-    expect(f.button("Disable word wrap").getAttribute("aria-pressed")).toBe("true");
-    await userEvent.fill(editable, "<h1>Unsaved draft</h1>");
-    expect(readFileDraft(f.file)?.content).toBe("<h1>Unsaved draft</h1>");
-    await f.click("Preview");
-    await f.preview().toBe("<h1>Unsaved draft</h1>");
-    expect(f.editor()).toBe(initialEditor);
-    expect(editable.checkVisibility()).toBe(false);
-    expect(f.panel.querySelector(".sidebar-file-view__wrap")).toBeNull();
-    await f.click("Source");
-    expect(f.editor()).toBe(initialEditor);
-    expect(f.button("Disable word wrap").getAttribute("aria-pressed")).toBe("true");
-    expect(f.button("Save").disabled).toBe(false);
-    expect(editable.textContent).toContain("Unsaved draft");
-    await userEvent.click(editable);
+    localStorage.removeItem("openclaw.control.fileView.wrap.v1");
+    const { panel, file, request } = await mount();
+    expect(request.mock.lastCall?.[1]?.html).toBe(source);
+    expect(panel.querySelector(".cm-editor")).toBeNull();
+    expect(panel.querySelector("h1")).toBeNull();
+    expect(panel.querySelector(".sidebar-file-view__wrap")).toBeNull();
+    await userEvent.click(button(panel, "Edit file"));
+    await page.getByRole("textbox", { name: file.name, exact: true }).click();
+    await expect
+      .poll(() => panel.querySelector('.cm-content[contenteditable="true"]'))
+      .not.toBeNull();
+    const editor = panel.querySelector(".cm-editor");
+    const input = panel.querySelector<HTMLElement>(".cm-content")!;
+    await userEvent.click(button(panel, "Enable word wrap"));
+    expect(button(panel, "Disable word wrap").getAttribute("aria-pressed")).toBe("true");
+    await userEvent.fill(input, "<h1>Unsaved draft</h1>");
+    expect(readFileDraft(file)?.content).toBe("<h1>Unsaved draft</h1>");
+    await userEvent.click(button(panel, "Preview"));
+    await expect.poll(() => request.mock.lastCall?.[1]?.html).toBe("<h1>Unsaved draft</h1>");
+    expect(panel.querySelector(".cm-editor")).toBe(editor);
+    expect(input.checkVisibility()).toBe(false);
+    expect(panel.querySelector(".sidebar-file-view__wrap")).toBeNull();
+    await userEvent.click(button(panel, "Source"));
+    expect(button(panel, "Disable word wrap").getAttribute("aria-pressed")).toBe("true");
+    expect(panel.querySelector(".cm-editor")).toBe(editor);
+    expect(input.textContent).toContain("Unsaved draft");
+    expect(button(panel, "Save").disabled).toBe(false);
+    await userEvent.click(input);
     await userEvent.keyboard(
       navigator.platform === "MacIntel" ? "{Meta>}z{/Meta}" : "{Control>}z{/Control}",
     );
-    await expect.poll(() => editable.textContent).not.toContain("Unsaved draft");
+    await expect.poll(() => input.textContent).not.toContain("Unsaved draft");
   });
 
   it("keeps independent iframe instances and modes while two file panels are hidden and revealed", async () => {
@@ -145,115 +157,139 @@ describe.runIf(browserMode)("HTML file presentation", () => {
     first.panel.hidden = true;
     const second = await mount("second.htm");
     const otherFrame = second.panel.querySelector("iframe");
-    await second.click("Source");
+    await userEvent.click(button(second.panel, "Source"));
     second.panel.hidden = true;
     first.panel.hidden = false;
     await first.panel.updateComplete;
     expect(first.panel.querySelector("iframe")).toBe(frame);
     expect(second.panel.querySelector("iframe")).toBe(otherFrame);
-    expect(first.button("Source")).toBeDefined();
-    expect(second.button("Preview")).toBeDefined();
+    expect(button(first.panel, "Source")).toBeDefined();
+    expect(button(second.panel, "Preview")).toBeDefined();
     expect(first.request).toHaveBeenCalledOnce();
     expect(second.request).toHaveBeenCalledOnce();
     first.panel.fileNavigation = { line: 2 };
     await expect
       .poll(() => first.panel.querySelector(".file-view__line--target")?.getAttribute("data-line"))
       .toBe("2");
-    expect(first.button("Preview")).toBeDefined();
+    expect(button(first.panel, "Preview")).toBeDefined();
   });
 
-  it.each(["Save", "Reload", "Overwrite", "Discard"])(
-    "settles a restored draft with %s from Preview and keeps the correct conflict hash",
+  it("saves a restored HTML draft from Preview with its retained conflict hash", async () => {
+    const draft = "<h1>Restored HTML</h1>";
+    const { panel, file } = await mount("save-draft.html", draft, undefined, "retained-hash");
+    const save = vi.mocked(file.edit!.save);
+    save.mockResolvedValue({ ok: true, hash: "saved" });
+    expect(panel.querySelector(".cm-editor")).toBeNull();
+    expect(button(panel, "Save").disabled).toBe(false);
+    await userEvent.click(button(panel, "Save"));
+    await expect
+      .poll(() => save.mock.calls)
+      .toEqual([[{ content: draft, expectedHash: "retained-hash" }]]);
+    await expect.poll(() => button(panel, "Save").disabled).toBe(true);
+    expect(readFileDraft(file)).toBeUndefined();
+    expect(panel.querySelector(".cm-editor")).toBeNull();
+    await userEvent.click(button(panel, "Source"));
+    await expect.poll(() => panel.querySelector(".cm-content")?.textContent).toBe(draft);
+  });
+
+  it.each(["Reload", "Overwrite"])(
+    "resolves a retained draft conflict with %s from Preview",
     async (action) => {
-      const retained = { content: conflicting, expectedHash: "retained-hash" };
-      const draft = retained.content;
+      const draft = "<h1>Conflicting draft</h1>";
       const latest = "<h1>Latest on disk</h1>";
-      const f = await mount("conflict.html", draft, undefined, "retained-hash");
-      const save = vi.mocked(f.file.edit!.save);
-      save.mockResolvedValue({ ok: true, hash: "saved" });
-      if (action === "Reload" || action === "Overwrite") {
-        conflict(f.file);
-        vi.mocked(f.file.edit!.fetchLatest).mockResolvedValue({
-          content: latest,
-          hash: "latest-hash",
-          editable: true,
-        });
-      }
-      expect(f.button("Save").disabled).toBe(false);
-      if (action === "Discard") {
-        await f.click("Source");
-        await f.text().toBe(draft);
-        expect(readFileDraft(f.file)?.content).toBe(draft);
-        await f.click("Discard");
-        await f.click("Preview");
-        await f.preview().toBe(source);
-      } else {
-        await f.click("Save");
-        if (action === "Save") {
-          await expect.poll(() => save.mock.calls).toEqual([[retained]]);
-        } else {
-          await f.notice().toContain("Overwrite");
-          expect(readFileDraft(f.file)).toEqual(retained);
-          await f.click(action);
-        }
-        await f.draft().toBeUndefined();
-        await expect.poll(() => f.button("Save").disabled).toBe(true);
-        expect(f.editor()).toBeNull();
-      }
-      await f.draft().toBeUndefined();
+      const { panel, file, request } = await mount(
+        "conflict.html",
+        draft,
+        undefined,
+        "retained-hash",
+      );
+      const save = vi.mocked(file.edit!.save);
+      save
+        .mockResolvedValueOnce({ ok: false, code: "conflict" })
+        .mockResolvedValue({ ok: true, hash: "saved" });
+      vi.mocked(file.edit!.fetchLatest).mockResolvedValue({
+        content: latest,
+        hash: "latest-hash",
+        editable: true,
+      });
+      await userEvent.click(button(panel, "Save"));
+      await expect
+        .poll(() => panel.querySelector(".file-view__save-notice")?.textContent)
+        .toContain("Overwrite");
+      expect(readFileDraft(file)).toEqual({ content: draft, expectedHash: "retained-hash" });
+      await userEvent.click(button(panel, action));
+      await expect.poll(() => readFileDraft(file)).toBeUndefined();
+      expect(panel.querySelector(".cm-editor")).toBeNull();
       if (action === "Overwrite") {
         expect(save).toHaveBeenLastCalledWith({ content: draft, expectedHash: "latest-hash" });
-      } else if (action !== "Discard") {
+      } else {
         expect(save).toHaveBeenCalledOnce();
-        if (action === "Reload") {
-          await f.preview().toBe(latest);
-        }
+        await expect.poll(() => request.mock.lastCall?.[1]?.html).toBe(latest);
       }
-      await f.click("Source");
-      await f.text().toBe(action === "Discard" ? source : action === "Reload" ? latest : draft);
+      expect(button(panel, "Save").disabled).toBe(true);
+      await userEvent.click(button(panel, "Source"));
+      await expect
+        .poll(() => panel.querySelector(".cm-content")?.textContent)
+        .toBe(action === "Reload" ? latest : draft);
     },
   );
 
   it.each([true, false])(
     "keeps Reload authoritative while Source language loading is pending (editable=%s)",
     async (editable) => {
+      const draft = "<h1>Conflicting draft</h1>";
       const latest = { content: "<h1>Reloaded from disk</h1>", hash: "reloaded-hash", editable };
       const reload = createDeferred<typeof latest>();
       const languageReady = createDeferred();
-      const f = await mount("reload-race.html", conflicting, undefined, "draft-hash");
-      const save = conflict(f.file);
-      vi.mocked(f.file.edit!.fetchLatest).mockReturnValueOnce(reload.promise);
-      await f.click("Save");
-      await f.notice().toContain("Reload");
-      await f.click("Reload");
-      await expect.poll(() => vi.mocked(f.file.edit!.fetchLatest).mock.calls.length).toBe(1);
-      const description = LanguageDescription.matchFilename(languages, f.file.name)!;
+      const { panel, file } = await mount("reload-race.html", draft, undefined, "draft-hash");
+      const save = vi.mocked(file.edit!.save);
+      save
+        .mockResolvedValueOnce({ ok: false, code: "conflict" })
+        .mockResolvedValue({ ok: true, hash: "saved" });
+      vi.mocked(file.edit!.fetchLatest).mockReturnValueOnce(reload.promise);
+      await userEvent.click(button(panel, "Save"));
+      await expect
+        .poll(() => panel.querySelector(".file-view__save-notice")?.textContent)
+        .toContain("Reload");
+      await userEvent.click(button(panel, "Reload"));
+      await expect.poll(() => vi.mocked(file.edit!.fetchLatest).mock.calls.length).toBe(1);
+      const description = LanguageDescription.matchFilename(languages, file.name);
+      if (!description) {
+        throw new Error("Missing HTML language loader");
+      }
       const load = description.load.bind(description);
       const pendingLanguage = vi.spyOn(description, "load").mockImplementationOnce(async () => {
         await languageReady.promise;
         return load();
       });
       try {
-        await f.click("Source");
+        await userEvent.click(button(panel, "Source"));
         await expect.poll(() => pendingLanguage.mock.calls.length).toBe(1);
-        expect(f.editor()).toBeNull();
+        expect(panel.querySelector(".cm-editor")).toBeNull();
         reload.resolve(latest);
-        await f.draft().toBeUndefined();
-        expect(f.editor()).toBeNull();
+        await expect.poll(() => readFileDraft(file)).toBeUndefined();
+        expect(panel.querySelector(".cm-editor")).toBeNull();
         languageReady.resolve();
-        await f.text().toBe(latest.content);
-        expect(f.input().getAttribute("contenteditable")).toBe(String(editable));
+        await expect
+          .poll(() => panel.querySelector(".cm-content")?.textContent)
+          .toBe(latest.content);
+        const input = panel.querySelector<HTMLElement>(".cm-content")!;
+        expect(input.getAttribute("contenteditable")).toBe(String(editable));
         if (editable) {
-          expect(f.button("Save").disabled).toBe(true);
+          expect(button(panel, "Save").disabled).toBe(true);
           const edited = latest.content + "<p>New edit</p>";
-          await userEvent.fill(f.input(), edited);
-          await f.click("Save");
+          await userEvent.fill(input, edited);
+          await userEvent.click(button(panel, "Save"));
           await expect
             .poll(() => save.mock.lastCall)
             .toEqual([{ content: edited, expectedHash: latest.hash }]);
-          await f.draft().toBeUndefined();
+          await expect.poll(() => readFileDraft(file)).toBeUndefined();
         } else {
-          expect(f.button("Save")).toBeUndefined();
+          expect(
+            [...panel.querySelectorAll("button")].some(
+              (element) => element.textContent?.trim() === "Save",
+            ),
+          ).toBe(false);
         }
       } finally {
         languageReady.resolve();
@@ -261,4 +297,19 @@ describe.runIf(browserMode)("HTML file presentation", () => {
       }
     },
   );
+
+  it("previews a retained unsaved draft without initializing or discarding its editor", async () => {
+    const { panel, file, request } = await mount("draft.html", "<h1>Retained draft</h1>");
+    expect(request.mock.lastCall?.[1]?.html).toBe("<h1>Retained draft</h1>");
+    expect(panel.querySelector(".cm-editor")).toBeNull();
+    await userEvent.click(button(panel, "Source"));
+    await expect
+      .poll(() => panel.querySelector(".cm-content")?.textContent)
+      .toBe("<h1>Retained draft</h1>");
+    expect(readFileDraft(file)?.content).toBe("<h1>Retained draft</h1>");
+    await userEvent.click(button(panel, "Discard"));
+    await userEvent.click(button(panel, "Preview"));
+    await expect.poll(() => request.mock.lastCall?.[1]?.html).toBe(source);
+    expect(readFileDraft(file)).toBeUndefined();
+  });
 });

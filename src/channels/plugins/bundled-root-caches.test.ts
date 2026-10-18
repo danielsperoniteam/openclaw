@@ -48,6 +48,7 @@ it("reads bundled channel ids from the active bundled root without re-importing"
   const rootA = makeBundledRoot("openclaw-bundled-ids-a-");
   const rootB = makeBundledRoot("openclaw-bundled-ids-b-");
 
+  // mock-isolation: Synthetic catalog rows isolate root-cache invalidation from plugin discovery.
   vi.doMock("../../plugins/channel-catalog-registry.js", () => ({
     listChannelCatalogEntries: (params?: { env?: NodeJS.ProcessEnv }) => {
       const activeRoot = params?.env?.OPENCLAW_BUNDLED_PLUGINS_DIR;
@@ -81,6 +82,7 @@ it("reads bootstrap plugins from the active bundled root without re-importing", 
     return activeRoot === rootA ? "A" : activeRoot === rootB ? "B" : "unknown";
   };
 
+  // mock-isolation: Synthetic bundled plugins isolate cache invalidation from runtime loading.
   vi.doMock("./bundled.js", () => ({
     getBundledChannelPlugin: (id: string) => plugin(id, `runtime-${id}`),
     getBundledChannelSetupPlugin: (id: string) => plugin(id, `setup-${suffix()}`),
@@ -123,6 +125,7 @@ it.each(["plugin", "secrets"] as const)(
           : "Cannot find module '@larksuiteoapi/node-sdk'",
       );
     });
+    // mock-isolation: Synthetic bundled plugins isolate cache invalidation from runtime loading.
     vi.doMock("./bundled.js", () => ({
       getBundledChannelPlugin: getPlugin,
       getBundledChannelSetupPlugin: vi.fn(() => undefined),

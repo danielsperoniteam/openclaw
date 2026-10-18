@@ -229,7 +229,10 @@ it(
       ...approvalDefaults,
       approvalRunningNoticeMs: 0,
       approvalFollowupMode: "direct",
-      approvalFollowup: ({ outcome: routedOutcome }) => routedCompletion.resolve(routedOutcome),
+      approvalFollowup: ({ outcome: routedOutcome }) => {
+        routedCompletion.resolve(routedOutcome);
+        return undefined;
+      },
       agentId: "main",
     });
     const routedPending = await routedTool.execute("exec-approval-device-custody", {

@@ -104,6 +104,7 @@ function resolveAlphaDistExtensionEntry(
 }
 
 function mockAlphaDistExtensionRuntime() {
+  // mock-isolation: Synthetic runtime metadata isolates bundled-root selection from installed plugins.
   vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
     listBundledChannelPluginMetadata: () => [alphaChannelMetadata({ includeSetup: true })],
     resolveBundledChannelGeneratedPath: resolveAlphaDistExtensionEntry,
@@ -205,6 +206,7 @@ describe("bundled channel entry shape guards", () => {
   };
 
   beforeAll(async () => {
+    // mock-isolation: Synthetic runtime metadata isolates bundled-root selection from installed plugins.
     vi.doMock("../../plugins/bundled-channel-runtime.js", async (importOriginal) => {
       const actual =
         await importOriginal<typeof import("../../plugins/bundled-channel-runtime.js")>();
@@ -227,6 +229,7 @@ describe("bundled channel entry shape guards", () => {
   });
 
   it("treats missing bundled discovery results as empty", async () => {
+    // mock-isolation: Synthetic runtime metadata isolates bundled-root selection from installed plugins.
     vi.doMock("../../plugins/bundled-channel-runtime.js", async (importOriginal) => {
       const actual =
         await importOriginal<typeof import("../../plugins/bundled-channel-runtime.js")>();
@@ -264,6 +267,7 @@ describe("bundled channel entry shape guards", () => {
       "",
     ]);
 
+    // mock-isolation: Synthetic runtime metadata isolates bundled-root selection from installed plugins.
     vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
       listBundledChannelPluginMetadata: () => [
         {
@@ -315,6 +319,7 @@ describe("bundled channel entry shape guards", () => {
         metadata?: { rootDir?: string; scanDir?: string };
         generated?: { rootDir: string; scanDir?: string };
       } = {};
+      // mock-isolation: Synthetic runtime metadata isolates bundled-root selection from installed plugins.
       vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
         listBundledChannelPluginMetadata: (params?: { rootDir?: string; scanDir?: string }) => {
           observed.metadata = params;
@@ -359,6 +364,7 @@ describe("bundled channel entry shape guards", () => {
       const label = layout === "direct" ? "Direct dist Alpha" : "Package dist Alpha";
       writeAlphaSdkAliasDistFixture(pluginDir, label);
       if (layout === "package-local") {
+        // mock-isolation: The fixture owns the package root instead of probing the host installation.
         vi.doMock("./bundled-root.js", () => ({
           resolveBundledChannelRootScope: () => ({
             packageRoot: root,
@@ -368,6 +374,7 @@ describe("bundled channel entry shape guards", () => {
       } else {
         vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", pluginsRoot);
       }
+      // mock-isolation: Synthetic runtime metadata isolates bundled-root selection from installed plugins.
       vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
         listBundledChannelPluginMetadata: () => [
           layout === "direct"
@@ -448,7 +455,7 @@ describe("bundled channel entry shape guards", () => {
     for (const [root, label, marker] of [
       [rootA, "A", "first"],
       [rootB, "B", "second"],
-    ]) {
+    ] as const) {
       vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", path.join(root, "dist", "extensions"));
       expect(bundled.getBundledChannelPlugin("alpha")?.meta.label).toBe(`Alpha ${label}`);
       expect(bundled.getBundledChannelSetupPlugin("alpha")?.meta.label).toBe(`Setup ${label}`);
@@ -483,12 +490,14 @@ describe("bundled channel entry shape guards", () => {
       "",
     ]);
 
+    // mock-isolation: The fixture owns the package root instead of probing the host installation.
     vi.doMock("./bundled-root.js", () => ({
       resolveBundledChannelRootScope: () => ({
         packageRoot: root,
         cacheKey: `${root}:dist-runtime`,
       }),
     }));
+    // mock-isolation: Synthetic runtime metadata isolates bundled-root selection from installed plugins.
     vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
       listBundledChannelPluginMetadata: () => [
         alphaChannelMetadata({ includeSetup: true, rootDir: pluginDir }),
@@ -612,6 +621,7 @@ describe("bundled channel entry shape guards", () => {
       "utf8",
     );
 
+    // mock-isolation: Synthetic runtime metadata isolates bundled-root selection from installed plugins.
     vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
       listBundledChannelPluginMetadata: () => [
         {
@@ -662,6 +672,7 @@ describe("bundled channel entry shape guards", () => {
       "utf8",
     );
 
+    // mock-isolation: Synthetic runtime metadata isolates bundled-root selection from installed plugins.
     vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
       listBundledChannelPluginMetadata: () => [
         {

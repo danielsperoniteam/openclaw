@@ -131,6 +131,7 @@ vi.mock("../infra/executable-path.js", () => ({
   resolveExecutableFromPathEnv: vi.fn((bin: string) => mocks.resolvedExecutables.get(bin) ?? null),
 }));
 
+// mock-isolation: Keep host PATH mutation outside the isolated runner fixture.
 vi.mock("../infra/path-env.js", () => ({
   ensureOpenClawCliOnPath: vi.fn(),
 }));
@@ -140,6 +141,7 @@ vi.mock("./config.js", () => ({
   loadNodeHostConfig: mocks.loadNodeHostConfig,
 }));
 
+// mock-isolation: Synthetic node-host capabilities avoid real plugin discovery and lifecycle effects.
 vi.mock("./plugin-node-host.js", () => ({
   ensureNodeHostPluginRegistry: vi.fn(async () => undefined),
   notifyRegisteredNodeHostCommandDisconnect: vi.fn(async () => {}),

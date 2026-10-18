@@ -1181,37 +1181,6 @@ it.each([
   ).toBe(!denied);
 });
 
-it("keeps sandbox exec-server native surfaces behind sandbox tool policy", async () => {
-  const sandbox = {
-    enabled: true,
-    backendId: "docker",
-    backend: {},
-    tools: { allow: ["exec", "process", "read", "write", "edit", "apply_patch"], deny: [] },
-  };
-
-  const remote = {
-    backendId: "node",
-    backend: undefined,
-    placementExecutionMode: "remote-exec",
-    placementNodeId: "device-1",
-  };
-  const cases: Array<[Partial<typeof sandbox>, string[] | undefined, boolean]> = [
-    [{}, undefined, true],
-    [remote, undefined, true],
-    [{ tools: { allow: ["exec"], deny: [] } }, undefined, false],
-    [{ tools: { allow: [], deny: ["write"] } }, undefined, false],
-    [{}, ["message"], false],
-  ];
-  for (const [overrides, toolsAllow, enabled] of cases) {
-    params.toolsAllow = toolsAllow;
-    expect(
-      await nativeSurface(params, { ...sandbox, ...overrides } as never, {
-        sandboxExecServerEnabled: true,
-      }),
-    ).toBe(enabled);
-  }
-});
-
 it.each(["text", "initial audio", "accepted audio steering"])(
   "applies inbound TTS to a final dynamic message for %s",
   async (input) => {

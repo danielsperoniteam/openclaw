@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { WorkerAdmissionHandshake } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
 import {
   claimAgentRunDelegatedAuthority,
@@ -75,7 +76,7 @@ export function claimTarget(sessionId: string, file = "sessions.json") {
 export function claimAdmission(
   claim: WorkerSessionTurnClaim,
   credential: string,
-  handshake = support.BOOTSTRAP_RECEIPT,
+  handshake: WorkerAdmissionHandshake = support.BOOTSTRAP_RECEIPT,
 ) {
   if (claim.owner.kind !== "worker") {
     throw new Error("Expected a worker-owned fixture claim");

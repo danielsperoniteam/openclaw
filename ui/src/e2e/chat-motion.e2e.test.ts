@@ -98,7 +98,13 @@ declare global {
 }
 
 suite.define(() => {
-  it.each([
+  it.each<{
+    name: string;
+    lines?: number;
+    width?: number;
+    height?: number;
+    reducedMotion?: "reduce" | "no-preference";
+  }>([
     { name: "desktop", lines: 1 },
     { name: "multiline" },
     { name: "mobile", width: 390, height: 844 },

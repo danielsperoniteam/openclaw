@@ -82,12 +82,10 @@ function toolEvent(
 ): WorkerLiveEventParams["event"] {
   return {
     kind: "tool",
-    payload: {
-      phase,
-      name,
-      toolCallId,
-      ...(phase === "start" ? { args: {} } : { partialResult: {} }),
-    },
+    payload:
+      phase === "start"
+        ? { phase, name, toolCallId, args: {} }
+        : { phase, name, toolCallId, partialResult: {} },
   };
 }
 

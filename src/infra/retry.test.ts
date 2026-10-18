@@ -5,6 +5,7 @@ import { getRetryAttemptErrors } from "./retry-attempt-errors.js";
 import { resolveRetryConfig, retryAsync, type RetryOptions } from "./retry.js";
 
 const generateSecureFraction = vi.hoisted(() => vi.fn());
+// mock-isolation: Fixed entropy makes retry jitter assertions deterministic.
 vi.mock("./secure-random.js", () => ({ generateSecureFraction }));
 
 type NumberRetryCase = {

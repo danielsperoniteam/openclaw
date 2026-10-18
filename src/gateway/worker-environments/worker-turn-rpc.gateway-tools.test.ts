@@ -65,7 +65,7 @@ async function toolHarness(name: string, codeMode = false) {
   });
   fixture.bindToolSurface(runtime);
   const surface = await fixture.workerService.getToolSurface(fixture.identity);
-  assert(surface.ok === true, "Expected an admitted tool surface");
+  assert(surface.ok, "Expected an admitted tool surface");
   const request = {
     generation: surface.result.generation,
     toolId: surface.result.tools[0]!.id,
@@ -140,7 +140,7 @@ it("admits the worker's code-mode schemas while rejecting raw or altered schemas
       "projected-tools",
       vi.fn(() => finished.resolve()),
     );
-    assert(started.ok === true, "Projected worker tools were not admitted");
+    assert(started.ok, "Projected worker tools were not admitted");
     await h.workerService.cancelInference(h.identity, request);
     started.launch();
     await finished.promise;
@@ -228,7 +228,7 @@ it("revalidates a prepared heartbeat at delivery and stops renewing after termin
   const refresh = vi.fn(async () => ({ generation: 1, token: "synthetic-replacement" }));
   bindHeartbeat(h, refresh);
   const prepared = await h.workerService.refreshGitHubBinding(h.identity, 0);
-  assert(prepared.ok === true, "Expected admitted heartbeat");
+  assert(prepared.ok, "Expected admitted heartbeat");
   expect(prepared.result?.token).toBe("synthetic-replacement");
   await h.workerService.pushLiveEvent(h.identity, support.terminalEvent(h.identity));
   expect(prepared.result).toBeUndefined();

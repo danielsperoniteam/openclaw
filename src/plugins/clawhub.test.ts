@@ -42,6 +42,7 @@ const mocks = vi.hoisted(() => ({
   installExtracted: vi.fn(),
 }));
 
+// mock-isolation: Fixture package parsing isolates installer behavior from spec parsing.
 vi.mock("../infra/clawhub-spec.js", () => ({
   parseClawHubPluginSpec: mocks.parseSpec,
 }));
@@ -65,6 +66,7 @@ vi.mock("../version.js", async (importOriginal) => ({
   resolveCompatibilityHostVersion: mocks.hostVersion,
 }));
 
+// mock-isolation: Fixture installation results avoid writing host plugin state.
 vi.mock("./install.js", () => ({
   PLUGIN_INSTALL_ERROR_CODE: {
     PLUGIN_ID_MISMATCH: "plugin_id_mismatch",

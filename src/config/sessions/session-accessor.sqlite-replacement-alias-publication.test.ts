@@ -29,8 +29,6 @@ import { getReplacementPublicationDelivery } from "./session-accessor.sqlite-rep
 import { listSessionMembersInDatabase } from "./session-sharing-store.kernel.js";
 import { addSessionMember } from "./session-sharing-store.native.js";
 
-const delivery = getReplacementPublicationDelivery();
-
 function observePublication(sessionKey: string) {
   let published: ReturnType<typeof readPreparedSessionEntryChange>;
   const stop = sessionChanges.subscribeFacts((change) => {
@@ -167,7 +165,7 @@ it.for([false, true])(
     using _ = { [Symbol.dispose]: sharing.release };
     expect(sharing.readCurrent()?.membership).toEqual(new Set(["target"]));
     using publication = observePublication(sessionKey);
-    delivery.afterResult = () => {
+    getReplacementPublicationDelivery().afterResult = () => {
       if (newerNative) {
         put(sessionKey, { ...entry, updatedAt: 3, visibility: "draft" });
         expect(sharing.readCurrent()).toBeUndefined();
@@ -210,7 +208,7 @@ it.for([false, true])(
     expect(projection.capture(query)).toBeDefined();
     const seen: Array<[boolean, string | undefined, string | undefined]> = [];
     let nativeRecreation = false;
-    delivery.afterResult = () => {
+    getReplacementPublicationDelivery().afterResult = () => {
       if (recreated) {
         nativeRecreation = true;
         try {

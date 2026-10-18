@@ -282,8 +282,7 @@ async function settleText(container: HTMLElement) {
         container.querySelectorAll<HTMLElement & { updateComplete?: Promise<unknown> }>(
           "openclaw-chat-pasted-text",
         ),
-        (element) => element.updateComplete,
-      ),
+      ).flatMap((element) => (element.updateComplete ? [element.updateComplete] : [])),
     );
     flush();
   }

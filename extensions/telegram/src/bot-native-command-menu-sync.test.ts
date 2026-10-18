@@ -207,27 +207,14 @@ describe("bot-native-command-menu sync lifecycle", () => {
   });
 
   it("resyncs when command order changes (#32017)", async () => {
-    const deleteMyCommands = vi.fn(async () => undefined);
-    const setMyCommands = vi.fn(async () => undefined);
+    const { deleteMyCommands, setMyCommands, sync } = createMenu();
     const commands = [
       { command: "bravo", description: "B" },
       { command: "alpha", description: "A" },
     ];
-    const accountId = `test-order-stable-${Date.now()}`;
-
-    await syncMenuCommandsWithMocks({
-      deleteMyCommands,
-      setMyCommands,
-      commandsToRegister: commands,
-      accountId,
-    });
+    await sync(commands);
     await waitForTelegramMenu(() => expect(setMyCommands).toHaveBeenCalledTimes(2));
-    await syncMenuCommandsWithMocks({
-      deleteMyCommands,
-      setMyCommands,
-      commandsToRegister: commands.toReversed(),
-      accountId,
-    });
+    await sync(commands.toReversed());
     await waitForTelegramMenu(() => expect(setMyCommands).toHaveBeenCalledTimes(4));
 
     expect(deleteMyCommands).toHaveBeenCalledTimes(4);

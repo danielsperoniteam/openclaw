@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   readConfigFileSnapshot: vi.fn(),
 }));
 
+// mock-isolation: Synthetic registries avoid loading installed plugin code.
 vi.mock("./loader.js", () => ({
   loadOpenClawPluginCliRegistry: mocks.loadOpenClawPluginCliRegistry,
   loadOpenClawPlugins: mocks.loadOpenClawPlugins,
@@ -23,14 +24,17 @@ vi.mock("./loader.js", () => ({
     mocks.loadOpenClawPlugins({ ...options, activate: false }),
 }));
 
+// mock-isolation: Fixture activation plans isolate CLI registration from plugin discovery.
 vi.mock("./activation-planner.js", () => ({
   resolveManifestActivationPluginIds: mocks.resolveManifestActivationPluginIds,
 }));
 
+// mock-isolation: Fixture auto-enable results avoid changing operator configuration.
 vi.mock("../config/plugin-auto-enable.js", () => ({
   applyPluginAutoEnable: mocks.applyPluginAutoEnable,
 }));
 
+// mock-isolation: Fixture metadata avoids reading operator configuration.
 vi.mock("../config/io.plugin-metadata.js", () => ({
   resolveConfigWidePluginMetadataSnapshot: mocks.resolvePluginMetadataSnapshot,
 }));
@@ -42,6 +46,7 @@ vi.mock("./plugin-metadata-snapshot.js", async (importOriginal) => ({
   resolvePluginMetadataSnapshot: mocks.resolvePluginMetadataSnapshot,
 }));
 
+// mock-isolation: Fixture config readers avoid accessing operator configuration.
 vi.mock("../config/config.js", () => ({
   getRuntimeConfig: mocks.loadConfig,
   getRuntimeConfigSnapshot: mocks.getRuntimeConfigSnapshot,

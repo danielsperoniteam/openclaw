@@ -188,46 +188,47 @@ it.each([
   ["global fallback", createBinding({ targetSessionKey: "global" }), "agent", "main"],
   ["plugin owner", createBinding({ metadata: pluginOwner }), "plugin"],
   ["isolated cron", createBinding({ targetSessionKey: cronSessionKey }), "none"],
-] as const)("routes %s within its owner scope", (_name, binding, kind, agentId, touchBinding) => {
-  const { resolveByConversation, touch } = registerAdapter(binding);
-  const siblingTouches = [{ channel: "other" }, { accountId: "other" }].map(
-    (scope) =>
-      registerAdapter(createBinding({ conversation: { ...conversation, ...scope } })).touch,
-  );
-  const result = resolveRuntimeConversationBindingRoute({
-    route,
-    conversation: binding.conversation,
-    touchBinding,
-  });
-  expect(resolveByConversation).toHaveBeenCalledWith(binding.conversation);
-  expect(touch.mock.calls).toEqual(
-    kind !== "none" && touchBinding !== false ? [["binding-1", undefined]] : [],
-  );
-  for (const siblingTouch of siblingTouches) {
-    expect(siblingTouch).not.toHaveBeenCalled();
-  }
-  expect(result).toMatchObject({
-    bindingOwnerAvailable: true,
-    boundSessionKey: kind === "agent" ? binding.targetSessionKey : undefined,
-    boundAgentId: agentId,
-  });
-  expect(result.bindingRecord).toBe(kind === "none" ? null : binding);
-  expect(Object.fromEntries(Object.entries(result.route))).toEqual(
-    kind === "agent"
-      ? {
-          ...route,
-          agentId,
-          sessionKey: binding.targetSessionKey,
-          mainSessionKey: `agent:${agentId}:main`,
-          lastRoutePolicy: "session",
-          matchedBy: "binding.channel",
-        }
-      : route,
-  );
-  expect(readConversationBindingRouteFacts(route)).toBeUndefined();
-  expect(Object.isFrozen(readConversationBindingRouteFacts(result.route))).toBe(true);
-  expect(readConversationBindingRouteFacts(result.route)?.kind).toBe(kind);
-});
+] as const)(
+  "routes %s within its owner scope",
+  (_name, binding, kind, agentId?: string, touchBinding?: boolean) => {
+    const { resolveByConversation, touch } = registerAdapter(binding);
+    const siblingTouches = [{ channel: "other" }, { accountId: "other" }].map(
+      (scope) =>
+        registerAdapter(createBinding({ conversation: { ...conversation, ...scope } })).touch,
+    );
+    const result = resolveRuntimeConversationBindingRoute({
+      route,
+      conversation: binding.conversation,
+      touchBinding,
+    });
+    expect(resolveByConversation).toHaveBeenCalledWith(binding.conversation);
+    expect(touch.mock.calls).toEqual(
+      kind !== "none" && touchBinding !== false ? [["binding-1", undefined]] : [],
+    );
+    for (const siblingTouch of siblingTouches) {
+      expect(siblingTouch).not.toHaveBeenCalled();
+    }
+    expect(result.bindingOwnerAvailable).toBe(true);
+    expect(result.boundSessionKey).toBe(kind === "agent" ? binding.targetSessionKey : undefined);
+    expect(result.boundAgentId).toBe(agentId);
+    expect(result.bindingRecord).toBe(kind === "none" ? null : binding);
+    expect(Object.fromEntries(Object.entries(result.route))).toEqual(
+      kind === "agent"
+        ? {
+            ...route,
+            agentId,
+            sessionKey: binding.targetSessionKey,
+            mainSessionKey: `agent:${agentId}:main`,
+            lastRoutePolicy: "session",
+            matchedBy: "binding.channel",
+          }
+        : route,
+    );
+    expect(readConversationBindingRouteFacts(route)).toBeUndefined();
+    expect(Object.isFrozen(readConversationBindingRouteFacts(result.route))).toBe(true);
+    expect(readConversationBindingRouteFacts(result.route)?.kind).toBe(kind);
+  },
+);
 
 it("rejects opaque targets missing plugin ownership", () => {
   const binding = createBinding({

@@ -10,6 +10,7 @@ import {
 
 const scheduleGatewayRestart = vi.hoisted(() => vi.fn());
 
+// mock-isolation: Observe restart scheduling without signaling the test process.
 vi.mock("./restart.js", () => ({ scheduleGatewayRestart }));
 
 const restart = {

@@ -167,7 +167,7 @@ it.each(["replaced", "preparation"] as const)(
       const admitted = await workerService.admitWorker(
         claimAdmission(replacement, credential.credential),
       );
-      assert(admitted.ok === true, "replacement worker was not admitted");
+      assert(admitted.ok, "replacement worker was not admitted");
       const seq = (store.get(claim.sessionId)?.lastTranscriptAckCursor ?? 0) + 1;
       expect(seq).toBe(request.seq);
       await expect(

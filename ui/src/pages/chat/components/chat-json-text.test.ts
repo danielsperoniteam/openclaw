@@ -126,7 +126,7 @@ function jsonMessageGroup(message: unknown, role: string) {
   const view = createMessageGroupHarness(container);
   return {
     container,
-    render(options: Partial<NativeMessageGroupOptions>) {
+    render: (options: Partial<NativeMessageGroupOptions>) => {
       view.render(
         createMessageGroup(message, role, {
           key: role + "-group",

@@ -58,7 +58,7 @@ function resetGatewayLifecycleState(): void {
   setPreRestartDeferralCheck(() => 0);
 }
 
-function schedulePreparingRestart(afterEmitRejected?: () => void, reason?: string) {
+function schedulePreparingRestart(afterEmitRejected?: () => Promise<void>, reason?: string) {
   const preparation = createDeferred();
   const beforeEmit = vi.fn(async () => preparation.promise);
   scheduleGatewayRestart({ delayMs: 0, reason, emitHooks: { beforeEmit, afterEmitRejected } });
@@ -199,7 +199,7 @@ describe("scheduled restart during gateway suspension", () => {
   });
 
   it("rejects prepared hooks that finish after a transient reset", async () => {
-    const afterEmitRejected = vi.fn();
+    const afterEmitRejected = vi.fn(async () => {});
     const preparation = schedulePreparingRestart(afterEmitRejected);
     await vi.advanceTimersByTimeAsync(0);
     expect(preparation.beforeEmit).toHaveBeenCalledOnce();

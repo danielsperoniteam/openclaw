@@ -67,6 +67,31 @@ async function nativeSurface(
   });
 }
 
+it("keeps sandbox exec-server native surfaces behind sandbox tool policy", async () => {
+  const tools: { allow: string[]; deny: string[] } = {
+    allow: ["exec", "process", "read", "write", "edit", "apply_patch"],
+    deny: [],
+  };
+  const sandbox = { enabled: true, backendId: "docker", backend: {}, tools };
+  const remote = {
+    backendId: "node",
+    backend: undefined,
+    placementExecutionMode: "remote-exec",
+    placementNodeId: "device-1",
+  };
+  const cases: Array<[Partial<typeof sandbox>, string[] | undefined, boolean]> = [
+    [{}, undefined, true],
+    [remote, undefined, true],
+    [{ tools: { allow: ["exec"], deny: [] } }, undefined, false],
+    [{ tools: { allow: [], deny: ["write"] } }, undefined, false],
+    [{}, ["message"], false],
+  ];
+  for (const [overrides, toolsAllow, enabled] of cases) {
+    params.toolsAllow = toolsAllow;
+    expect(await nativeSurface({ ...sandbox, ...overrides } as never, true)).toBe(enabled);
+  }
+});
+
 it("keeps required-root Codex file tools confined without native or shell tools", async () => {
   const outside = path.join(tempDir, "outside.txt");
   await fs.writeFile(outside, "outside");

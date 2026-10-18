@@ -195,7 +195,7 @@ describe("channel plugin catalog", () => {
     ["different plugin owner", "global", true, "@example/fixture", "other-owner"],
   ] as const)(
     "binds docs to official metadata for %s",
-    (_name, origin, trusted, packageName, pluginId, expected) => {
+    (_name, origin, trusted, packageName, pluginId, expected?: string) => {
       const root = makeRoot();
       const officialPath = path.join(root, "official.json");
       writeChannelCatalog(officialPath, "fixture", "Fixture");

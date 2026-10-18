@@ -55,9 +55,10 @@ const inferenceFrame = (event: string, payload: unknown) => ({
 });
 const done: WorkerInferenceTerminalOutcome = {
   type: "done",
-  message: makeAgentAssistantMessage({
-    content: [{ type: "text", text: delta.delta }],
-  }),
+  message: {
+    ...makeAgentAssistantMessage({ content: [{ type: "text", text: delta.delta }] }),
+    stopReason: "stop",
+  },
 };
 
 support.setupWorkerEnvironmentServiceSuite();
@@ -124,7 +125,7 @@ it.each(["diagnostic", "credential revocation"] as const)(
       const admission = await workerService.admitWorker(
         claimAdmission(claim, grant.credential, receipt),
       );
-      assert(admission.ok === true, "Worker inference admission failed");
+      assert(admission.ok, "Worker inference admission failed");
       const identity = admission.identity;
       const request = support.inferenceRequest(identity);
       const respond = vi.fn();

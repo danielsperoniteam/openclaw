@@ -93,7 +93,7 @@ describe("worker environment service", () => {
     const warmEnvironmentId = "worker-placement-warm";
     await support.seedReady(warmEnvironmentId);
     const warmAdmission = await workerService.admitWorker(support.admissionFor(warmEnvironmentId));
-    assert(warmAdmission.ok === true, "warm worker admission failed");
+    assert(warmAdmission.ok, "warm worker admission failed");
     expect(workerService.validateWorkerConnection(warmAdmission.identity)).toBeNull();
 
     placementStore.validateWorkerTurn.mockReturnValue(false);
@@ -317,7 +317,7 @@ describe("worker environment service", () => {
 
     expect(await workerService.acknowledgeCredentialDelivery(firstCredential)).toBe(false);
     await expect(workerService.admitWorker(admission)).resolves.toEqual(invalidCredential);
-    assert(firstAdmission.ok === true, "first exact worker admission failed");
+    assert(firstAdmission.ok, "first exact worker admission failed");
     expect(workerService.validateWorkerConnection(firstAdmission.identity)).toBe(
       "placement-mismatch",
     );
@@ -360,7 +360,7 @@ describe("worker environment service", () => {
       const admitted = await workerService.admitWorker(
         claimAdmission(claim, credential.credential),
       );
-      assert(admitted.ok === true, "worker admission failed");
+      assert(admitted.ok, "worker admission failed");
       expect(await workerService.acknowledgeCredentialDelivery(credential)).toBe(true);
       return admitted.identity;
     };
@@ -370,7 +370,7 @@ describe("worker environment service", () => {
       support.inferenceRequest(firstIdentity),
       inferenceSink("claim-inference-a"),
     );
-    assert(started.ok === true, "first inference failed to start");
+    assert(started.ok, "first inference failed to start");
     started.launch();
     await support.waitForFast(() => expect(signals).toHaveLength(1));
     support.testState.nowMs = firstIdentity.credentialExpiresAtMs + 1;
@@ -392,7 +392,7 @@ describe("worker environment service", () => {
       { ...support.inferenceRequest(secondIdentity), turnId: "turn-replacement" },
       inferenceSink("claim-inference-b"),
     );
-    assert(replacement.ok === true, "replacement inference failed to start");
+    assert(replacement.ok, "replacement inference failed to start");
     replacement.launch();
     await support.waitForFast(() => expect(signals).toHaveLength(2));
     expect(await originalCancellation?.cancel()).toEqual([]);
@@ -517,7 +517,7 @@ describe("worker environment service", () => {
       connectionId: "connection-c",
       send,
     });
-    assert(started.ok === true, "inference fixture failed to start");
+    assert(started.ok, "inference fixture failed to start");
     await renewCredential(
       identity,
       hashWorkerCredential(["replacement", identity.environmentId].join("-")),
@@ -557,7 +557,7 @@ describe("worker environment service", () => {
       support.inferenceRequest(identity),
       inferenceSink("connection-rotation"),
     );
-    assert(started.ok === true, "inference fixture failed to start");
+    assert(started.ok, "inference fixture failed to start");
     started.launch();
     await support.waitForFast(() => expect(executeInference).toHaveBeenCalledOnce());
     runOpenClawStateWriteTransaction(
