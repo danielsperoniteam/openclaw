@@ -100,7 +100,10 @@ export function ActivitySessionMedia(props: ActivitySessionMediaProps) {
   );
 }
 
-function SessionMedia(gateway: ApplicationContext["gateway"], props: ActivitySessionMediaProps) {
+function SessionMedia(
+  sourceGateway: ApplicationContext["gateway"],
+  props: ActivitySessionMediaProps,
+) {
   let host!: HTMLElement;
   const mediaOwner = {};
   const [revision, setRevision] = createSignal(0);
@@ -336,7 +339,7 @@ function SessionMedia(gateway: ApplicationContext["gateway"], props: ActivitySes
         ),
     };
   }
-  const gatewayProjection = projectGateway(gateway);
+  const gatewayProjection = projectGateway(sourceGateway);
   // Synchronize the viewport-gated artifact requests with their Gateway/session scope.
   createEffect(
     () => [

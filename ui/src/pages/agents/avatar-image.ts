@@ -1,5 +1,6 @@
 import { AVATAR_MAX_BYTES } from "../../../../src/shared/avatar-limits.js";
 import type { ApplicationConfigCapability } from "../../app/config.ts";
+import { listen } from "../../lib/reactive/listener.ts";
 import { assertUploadsEnabled } from "../../lib/uploads.ts";
 
 /** Uploaded avatars also mirror into prompt-injected IDENTITY.md. Keep their
@@ -33,9 +34,24 @@ function readFileAsDataUrl(
   assertUploadsEnabled(config);
   return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = () =>
-      resolve(boundAvatarDataUrl(typeof reader.result === "string" ? reader.result : null));
-    reader.onerror = () => resolve(UNUSABLE);
+    const stopLoad = listen(
+      reader,
+      "load",
+      () => {
+        stopError();
+        resolve(boundAvatarDataUrl(typeof reader.result === "string" ? reader.result : null));
+      },
+      { once: true },
+    );
+    const stopError = listen(
+      reader,
+      "error",
+      () => {
+        stopLoad();
+        resolve(UNUSABLE);
+      },
+      { once: true },
+    );
     reader.readAsDataURL(file);
   });
 }
