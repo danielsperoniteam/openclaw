@@ -85,7 +85,7 @@ export function createControlUiSessionPrPreparedRead<State extends PreparedSessi
     assertCurrent: () => void,
     projection?: ControlUiSessionPrReadContext["projection"],
   ): Promise<ControlUiSessionPullRequestSnapshot> => {
-    const state = keyStates.get(target.params.sessionKey);
+    const state = keyStates.get(target.identity);
     const previous = state?.snapshot;
     const assertActive = () => {
       if (scope.isClosing) {
@@ -99,7 +99,7 @@ export function createControlUiSessionPrPreparedRead<State extends PreparedSessi
       if (
         projection !== "publication" &&
         state?.prepared &&
-        keyStates.get(target.params.sessionKey) === state &&
+        keyStates.get(target.identity) === state &&
         state.snapshot === previous &&
         state.target.identity === target.identity
       ) {
@@ -158,7 +158,7 @@ export function createControlUiSessionPrPreparedRead<State extends PreparedSessi
         runWithSpawnBroker(spawnBroker, () =>
           scope.track(async () => {
             const current = await limit(async () => {
-              if (scope.isClosing || keyStates.get(preparedTarget.params.sessionKey) !== state) {
+              if (scope.isClosing || keyStates.get(preparedTarget.identity) !== state) {
                 return undefined;
               }
               return await prepareControlUiSessionPrServiceTarget(
@@ -172,7 +172,7 @@ export function createControlUiSessionPrPreparedRead<State extends PreparedSessi
             const assertCurrent = () => {
               if (
                 scope.isClosing ||
-                keyStates.get(preparedTarget.params.sessionKey) !== state ||
+                keyStates.get(preparedTarget.identity) !== state ||
                 current.identity !== preparedTarget.identity
               ) {
                 throw new Error("Prepared session pull-request target changed");
@@ -201,7 +201,7 @@ export function createControlUiSessionPrPreparedRead<State extends PreparedSessi
     }
     const affected =
       "sessionKey" in change
-        ? ([[change.sessionKey, keyStates.get(change.sessionKey)]] as const)
+        ? [...keyStates].filter(([, state]) => state.target.params.sessionKey === change.sessionKey)
         : keyStates;
     const invalidated: Array<ControlUiSessionPrTarget["params"]> = [];
     for (const [key, state] of affected) {

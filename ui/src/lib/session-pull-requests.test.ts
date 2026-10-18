@@ -28,10 +28,15 @@ function expectSubscription(
   harness: ReturnType<typeof createGatewayHarness>,
   sessionKeys: string[],
   refreshSessionKeys?: string[],
+  passiveSessionKeys?: string[],
 ) {
   expect(harness.request).toHaveBeenLastCalledWith(
     SESSION_PULL_REQUESTS_SUBSCRIBE_METHOD,
-    { sessionKeys, ...(refreshSessionKeys ? { refreshSessionKeys } : {}) },
+    {
+      sessionKeys,
+      ...(refreshSessionKeys ? { refreshSessionKeys } : {}),
+      ...(passiveSessionKeys ? { passiveSessionKeys } : {}),
+    },
     { timeoutMs: 30_000, signal: expect.any(AbortSignal) },
   );
 }
@@ -75,21 +80,21 @@ describe("session pull request snapshot store", () => {
     },
   );
 
-  it("waits for an active viewer before subscribing passive sidebar rows", async () => {
+  it("hydrates passive receipts and promotes only the active viewer to GitHub reads", async () => {
     const { harness, store, owner } = createStoreHarness();
     const passiveOwner = {};
     const key = "agent:main:demo";
     store.watch(passiveOwner, [key], { passive: true });
     await flushSync();
-    expect(harness.request).not.toHaveBeenCalled();
+    expectSubscription(harness, [], undefined, [key]);
     store.watch(owner, [key], { foreground: true });
     await flushSync();
-    expect(harness.request).toHaveBeenCalledTimes(1);
+    expect(harness.request).toHaveBeenCalledTimes(2);
     expectSubscription(harness, [key]);
     store.unwatch(owner);
     await flushSync();
-    expect(harness.request).toHaveBeenCalledTimes(2);
-    expectSubscription(harness, []);
+    expect(harness.request).toHaveBeenCalledTimes(3);
+    expectSubscription(harness, [], undefined, [key]);
     store.unwatch(passiveOwner);
   });
 
@@ -565,7 +570,7 @@ describe("session pull request snapshot store", () => {
     }
     await vi.advanceTimersByTimeAsync(5_000);
     expect(harness.request).toHaveBeenCalledOnce();
-    expectSubscription(harness, [viewed], [viewed]);
+    expectSubscription(harness, [viewed], [viewed], [passive]);
 
     harness.emit({ sessionKey: viewed, stream: "tool", data: { phase: "result" } }, "agent");
     store.unwatch(owner);
@@ -791,7 +796,7 @@ describe("session pull request snapshot store", () => {
       pullRequests: [{ number: 1, state: "merged" }],
     });
     await flushSync();
-    expectSubscription(harness, []);
+    expectSubscription(harness, [], undefined, [key]);
     expect(store.get(key)?.pullRequests).toEqual([{ number: 1, state: "merged" }]);
     store.unwatch(sidebar);
     await flushSync();

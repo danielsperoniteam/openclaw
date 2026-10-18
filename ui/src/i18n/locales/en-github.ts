@@ -45,6 +45,9 @@ const enGitHub = {
     changedFile: en.sessionHovercard.changedFile,
     changedFiles: en.sessionHovercard.changedFiles,
     pullRequests: "Pull requests",
+    taskBranch: "Task branch: {branch}",
+    stateUnavailable: "Status unavailable",
+    morePullRequests: "{count} more pull requests",
     pullRequestLabel: "Pull request #{number}, {state}",
     pullRequestAuthorLabel: "Opened by {login}",
     states: {

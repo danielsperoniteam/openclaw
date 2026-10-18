@@ -238,7 +238,11 @@ describe("Passive sidebar PR indicators", () => {
       const host = mountLifecycleHost(harness.gateway, getRows);
       await host.updateComplete;
       await vi.advanceTimersByTimeAsync(0);
-      expect(harness.request).not.toHaveBeenCalled();
+      expect(harness.request).toHaveBeenLastCalledWith(
+        SESSION_PULL_REQUESTS_SUBSCRIBE_METHOD,
+        { sessionKeys: [], passiveSessionKeys: [row.key] },
+        { timeoutMs: 30_000, signal: expect.any(AbortSignal) },
+      );
 
       harness.emit({
         sessions: {
@@ -293,6 +297,51 @@ describe("Passive sidebar PR indicators", () => {
       host.remove();
     },
   );
+
+  it("counts cold task receipts without a worktree or an invented state", async () => {
+    vi.useFakeTimers();
+    const harness = createGatewayHarness();
+    const row = { key: "agent:main:task", isChild: false } as SidebarRecentSession;
+    const host = mountLifecycleHost(harness.gateway, () => [row]);
+    await host.updateComplete;
+    await vi.advanceTimersByTimeAsync(0);
+    const tasks = [41, 42, 43].map((number) => ({
+      owner: "example",
+      repo: "project",
+      number,
+      url: "https://github.com/example/project/pull/" + number,
+      branch: "fix/child",
+      sourceSessionKey: "agent:main:child",
+      sourceAgentId: "main",
+    }));
+    harness.emit({
+      sessions: {
+        [row.key]: {
+          pullRequests: [],
+          taskPullRequests: tasks,
+          taskPullRequestCount: 3,
+          status: "ready",
+          rateLimited: false,
+        },
+      },
+    });
+    await host.updateComplete;
+    expect(host.indicators.count(row.key)).toBe(3);
+    expect(host.indicators.summary(row.key, "")).toBeUndefined();
+    harness.emit({
+      sessions: {
+        [row.key]: {
+          pullRequests: [],
+          taskPullRequests: [],
+          taskPullRequestCount: 0,
+          status: "ready",
+          rateLimited: false,
+        },
+      },
+    });
+    await host.updateComplete;
+    expect(host.indicators.count(row.key)).toBe(0);
+  });
 
   it("clears alias indicators when the selected agent changes", async () => {
     vi.useFakeTimers();
@@ -438,7 +487,9 @@ describe("Passive sidebar PR indicator lifecycle", () => {
       await host.updateComplete;
       expect(clearSummary).not.toHaveBeenCalled();
       expect(host.textContent).toBe("7");
-      expect(harness.request).not.toHaveBeenCalled();
+      expect(
+        harness.request.mock.calls.every(([, params]) => params.sessionKeys.length === 0),
+      ).toBe(true);
 
       host.presented = true;
       await host.updateComplete;
@@ -487,9 +538,13 @@ describe("Passive sidebar PR indicator lifecycle", () => {
     const host = mountLifecycleHost(harness.gateway, () => rows);
 
     await host.updateComplete;
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
 
-    expect(harness.request).not.toHaveBeenCalled();
+    expect(harness.request).toHaveBeenLastCalledWith(
+      SESSION_PULL_REQUESTS_SUBSCRIBE_METHOD,
+      { sessionKeys: [], passiveSessionKeys: rows.map((row) => row.key).toSorted() },
+      { timeoutMs: 30_000, signal: expect.any(AbortSignal) },
+    );
 
     const viewer = {};
     const store = sessionPullRequestsForGateway(harness.gateway);
@@ -498,7 +553,13 @@ describe("Passive sidebar PR indicator lifecycle", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(harness.request).toHaveBeenLastCalledWith(
       SESSION_PULL_REQUESTS_SUBSCRIBE_METHOD,
-      { sessionKeys: [key] },
+      {
+        sessionKeys: [key],
+        passiveSessionKeys: rows
+          .slice(1)
+          .map((row) => row.key)
+          .toSorted(),
+      },
       { timeoutMs: 30_000, signal: expect.any(AbortSignal) },
     );
     harness.emit({
@@ -515,7 +576,7 @@ describe("Passive sidebar PR indicator lifecycle", () => {
     await host.updateComplete;
     expect(harness.request).toHaveBeenLastCalledWith(
       SESSION_PULL_REQUESTS_SUBSCRIBE_METHOD,
-      { sessionKeys: [] },
+      { sessionKeys: [], passiveSessionKeys: rows.map((row) => row.key).toSorted() },
       { timeoutMs: 30_000, signal: expect.any(AbortSignal) },
     );
     expect(host.textContent?.trim()).toBe("7");
@@ -603,18 +664,24 @@ describe("Passive sidebar PR indicator lifecycle", () => {
     const host = mountLifecycleHost(harness.gateway, () => [row]);
     await host.updateComplete;
     await vi.advanceTimersByTimeAsync(0);
-    expect(harness.request).not.toHaveBeenCalled();
+    expect(harness.request.mock.lastCall?.[1]).toEqual(
+      host.isConnected ? { sessionKeys: [], passiveSessionKeys: [row.key] } : { sessionKeys: [] },
+    );
 
     host.remove();
     await host.updateComplete;
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(harness.request).not.toHaveBeenCalled();
+    expect(harness.request.mock.lastCall?.[1]).toEqual(
+      host.isConnected ? { sessionKeys: [], passiveSessionKeys: [row.key] } : { sessionKeys: [] },
+    );
 
     document.body.append(host);
     await host.updateComplete;
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(harness.request).not.toHaveBeenCalled();
+    expect(harness.request.mock.lastCall?.[1]).toEqual(
+      host.isConnected ? { sessionKeys: [], passiveSessionKeys: [row.key] } : { sessionKeys: [] },
+    );
   });
 });

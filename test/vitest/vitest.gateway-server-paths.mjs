@@ -35,6 +35,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/control-ui-public-session-token.test.ts",
   "src/gateway/control-ui-public-session.concurrent.test.ts",
   "src/gateway/control-ui-session-pr-access.test.ts",
+  "src/gateway/control-ui-session-task-prs.test.ts",
   "src/gateway/control-ui-session-prs-branch.test.ts",
   "src/gateway/control-ui-session-prs-host.test.ts",
   "src/gateway/control-ui-session-prs-publication.test.ts",

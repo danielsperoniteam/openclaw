@@ -4,6 +4,7 @@ import type { ApplicationGateway } from "../app/gateway.ts";
 import { canCallGatewayMethod } from "../lib/gateway-methods.ts";
 import { createParkedProjection } from "../lib/reactive/parked-projection.ts";
 import { projectSource } from "../lib/reactive/projection.ts";
+import { displaySessionPullRequests } from "../lib/session-pull-request-presentation.ts";
 import {
   summarizeSessionPullRequests,
   SESSION_PULL_REQUESTS_SUBSCRIBE_METHOD,
@@ -16,6 +17,7 @@ import type { SidebarRecentSession } from "./app-sidebar-session-types.ts";
 type IndicatorEntry = {
   summary: SessionCatalogPullRequestSummary | undefined;
   worktreeId: string;
+  count: number;
 };
 
 type SessionPullRequestIndicatorsOptions = {
@@ -40,7 +42,7 @@ export function createSessionPullRequestIndicators(options: SessionPullRequestIn
       ? gateway
       : null;
   };
-  const rows = createMemo(() => options.getRows().filter((row) => !row.isChild && row.worktreeId));
+  const rows = createMemo(() => options.getRows().filter((row) => !row.isChild));
   const scope = createMemo(
     () => {
       const gateway = readable();
@@ -83,7 +85,12 @@ export function createSessionPullRequestIndicators(options: SessionPullRequestIn
             undefined,
             sessions.capturePullRequestEpoch(row.key),
           );
-        } else if (snapshot && (snapshot.status === "ready" || snapshot.pullRequests.length)) {
+        } else if (
+          snapshot &&
+          (snapshot.status === "ready" ||
+            snapshot.pullRequests.length ||
+            snapshot.taskPullRequests?.length)
+        ) {
           seen.add(row.key);
         }
       }
@@ -145,15 +152,33 @@ export function createSessionPullRequestIndicators(options: SessionPullRequestIn
         if (!snapshot) {
           continue;
         }
-        if (snapshot.status !== "ready" && snapshot.pullRequests.length === 0) {
+        if (
+          snapshot.status !== "ready" &&
+          snapshot.pullRequests.length === 0 &&
+          !snapshot.taskPullRequests?.length
+        ) {
           if (prior) {
             entries.set(row.key, prior);
           }
           continue;
         }
         entries.set(row.key, {
-          summary: summarizeSessionPullRequests(snapshot.pullRequests, prior?.summary),
-          worktreeId: row.worktreeId!,
+          summary: summarizeSessionPullRequests(
+            [
+              ...snapshot.pullRequests,
+              ...(snapshot.taskPullRequests ?? []).flatMap((task) =>
+                task.pullRequest ? [task.pullRequest] : [],
+              ),
+            ],
+            prior?.summary,
+          ),
+          worktreeId: row.worktreeId ?? "",
+          count:
+            snapshot.pullRequestCount ??
+            Math.max(
+              displaySessionPullRequests(snapshot).length,
+              snapshot.taskPullRequestCount ?? 0,
+            ),
         });
       }
     }
@@ -164,6 +189,10 @@ export function createSessionPullRequestIndicators(options: SessionPullRequestIn
     options.getPresented,
   );
   return {
+    count(sessionKey: string) {
+      const current = presentation();
+      return current.readable ? current.entries.get(sessionKey)?.count : undefined;
+    },
     summary(sessionKey: string, worktreeId: string, initial?: SessionCatalogPullRequestSummary) {
       const current = presentation();
       if (!current.readable) {

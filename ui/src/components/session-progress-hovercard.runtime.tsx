@@ -297,6 +297,9 @@ function createSessionProgressHovercard(props: SessionProgressHovercardProps, ho
         ? {
             branch: pullRequests.branch,
             pullRequests: pullRequests.pullRequests,
+            taskPullRequests: pullRequests.taskPullRequests,
+            taskPullRequestCount: pullRequests.taskPullRequestCount,
+            pullRequestCount: pullRequests.pullRequestCount,
             status: pullRequests.status,
           }
         : null,
