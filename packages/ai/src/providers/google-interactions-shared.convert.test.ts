@@ -175,6 +175,7 @@ describe("buildGoogleInteractionsParams", () => {
   it("resolves the documented Gemini API partner client header x-goog-api-client", () => {
     const headers = resolveGoogleApiClientHeaders({
       baseUrl: "https://generativelanguage.googleapis.com",
+      model,
     });
     expect(headers["x-goog-api-client"]).toMatch(/^openclaw\//u);
   });
