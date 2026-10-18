@@ -22,7 +22,7 @@ import { cleanupSessionStateForTest } from "../../test-utils/session-state-clean
 import { clearAuthProfileMigrationDiagnostics } from "./legacy-source-diagnostic.js";
 import { withOAuthProfileLock } from "./oauth-profile-lock.js";
 import { createOAuthRefreshFence } from "./oauth-refresh-marker.js";
-import { loadPersistedAuthProfileStore } from "./persisted.js";
+import { loadPersistedAuthProfileStore as readPersistedStore } from "./persisted.js";
 import {
   closeAuthProfileReadPool,
   inspectPersistedAuthProfileStateRaw,
@@ -35,7 +35,7 @@ import {
   captureAuthProfileStorePersistenceSnapshot,
   withAuthProfileStoreAgentDir,
 } from "./store.js";
-import type { ApiKeyCredential, OAuthCredential } from "./types.js";
+import type { ApiKeyCredential, AuthProfileStore, OAuthCredential } from "./types.js";
 import {
   persistAuthProfileBatch,
   upsertAuthProfileWithLock,
@@ -78,7 +78,7 @@ function retainPersistedCredential(agentDir: string, selectedProfileId: string) 
     { databasePath, identity: `${source.key}:${source.birthtime ?? ""}` },
     selectedProfileId,
   );
-  authority.observe(loadPersistedAuthProfileStore(agentDir)?.profiles[selectedProfileId]);
+  authority.observe(readPersistedStore(agentDir)?.profiles[selectedProfileId]);
   return authority;
 }
 
@@ -88,6 +88,46 @@ function apiKey(key: string): ApiKeyCredential {
 
 function profile(profileId: string, key: string) {
   return { profileId, credential: apiKey(key) };
+}
+function keyStore(
+  keys: Record<string, string>,
+  state: Partial<Omit<AuthProfileStore, "version" | "profiles">> = {},
+): AuthProfileStore {
+  return {
+    version: 1,
+    profiles: Object.fromEntries(Object.entries(keys).map(([id, key]) => [id, apiKey(key)])),
+    ...state,
+  };
+}
+
+function oauth(access: string, refresh: string, expires = Date.now() + 60_000): OAuthCredential {
+  return { type: "oauth", provider: "openai", access, refresh, expires };
+}
+function save(profiles: AuthProfileStore["profiles"], agentDir?: string) {
+  saveAuthProfileStore({ version: 1, profiles }, agentDir, {
+    filterExternalAuthProfiles: false,
+    syncExternalCli: false,
+  });
+}
+function rotate(agentDir: string, profileId: string, credential: OAuthCredential) {
+  return updateAuthProfileStoreWithLock({
+    agentDir,
+    updater: (store) => {
+      store.profiles[profileId] = credential;
+      return true;
+    },
+  });
+}
+async function withPeers(run: (root: string, main: string, peer: string) => Promise<void>) {
+  const root = tempDirs.make("openclaw-auth-peers-");
+  const main = path.join(root, "agents", "main", "agent");
+  const peer = path.join(root, "agents", "peer", "agent");
+  for (const dir of [main, peer]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  await withEnvAsync({ OPENCLAW_STATE_DIR: root, OPENCLAW_AGENT_DIR: main }, () =>
+    run(root, main, peer),
+  );
 }
 
 async function withAgentDir(run: (agentDir: string) => Promise<void>): Promise<void> {
@@ -100,10 +140,7 @@ async function withAgentDir(run: (agentDir: string) => Promise<void>): Promise<v
 describe("auth profile batch persistence", () => {
   it("persists OAuth login credentials without querying SQLite on the host", async () => {
     await withAgentDir(async (agentDir) => {
-      saveAuthProfileStore({ version: 1, profiles: {} }, agentDir, {
-        filterExternalAuthProfiles: false,
-        syncExternalCli: false,
-      });
+      save({}, agentDir);
       const stacks = new Set<string>();
       const sql = observeHostDataSql(() => {
         stacks.add(new Error().stack ?? "");
@@ -129,7 +166,7 @@ describe("auth profile batch persistence", () => {
       } finally {
         sql.restore();
       }
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles["fixture:login"]).toMatchObject({
+      expect(readPersistedStore(agentDir)?.profiles["fixture:login"]).toMatchObject({
         type: "oauth",
         provider: "fixture",
         access: "fixture",
@@ -149,14 +186,8 @@ describe("auth profile batch persistence", () => {
     async ({ owner, initial, root }) => {
       await withAgentDir(async (agentDir) => {
         const profileId = "openai:admission";
-        const incoming: OAuthCredential = {
-          type: "oauth",
-          provider: "openai",
-          access: "synthetic-old-access",
-          refresh: "synthetic-old-refresh",
-          expires: Date.now() + 60_000,
-        };
-        const authoritative: OAuthCredential = {
+        const incoming = oauth("synthetic-old-access", "synthetic-old-refresh");
+        const authoritative = {
           ...incoming,
           access: "synthetic-new-access",
           refresh: "synthetic-new-refresh",
@@ -165,14 +196,9 @@ describe("auth profile batch persistence", () => {
         const selectedStateDir = path.resolve(agentDir, "../../..");
         const otherStateDir =
           root === "changed" ? tempDirs.make("auth-upsert-other-root-") : undefined;
-        const saveOptions = { filterExternalAuthProfiles: false, syncExternalCli: false };
-        saveAuthProfileStore(
-          { version: 1, profiles: initial === "existing" ? { [profileId]: incoming } : {} },
-          ownerDir,
-          saveOptions,
-        );
+        save(initial === "existing" ? { [profileId]: incoming } : {}, ownerDir);
         if (owner === "shared") {
-          saveAuthProfileStore({ version: 1, profiles: {} }, agentDir, saveOptions);
+          save({}, agentDir);
         }
         const release = createDeferredCore();
         const entered = createDeferredCore();
@@ -180,11 +206,7 @@ describe("auth profile batch persistence", () => {
           { agentId: "work", path: resolveAuthProfileDatabasePath(agentDir) },
           async () => {
             await release.promise;
-            saveAuthProfileStore(
-              { version: 1, profiles: { [profileId]: authoritative } },
-              ownerDir,
-              saveOptions,
-            );
+            save({ [profileId]: authoritative }, ownerDir);
             if (otherStateDir) {
               process.env.OPENCLAW_STATE_DIR = otherStateDir;
             }
@@ -207,9 +229,9 @@ describe("auth profile batch persistence", () => {
         }
         await predecessor;
         await expect(upsert).resolves.toBeNull();
-        expect(loadPersistedAuthProfileStore(ownerDir)?.profiles[profileId]).toEqual(authoritative);
+        expect(readPersistedStore(ownerDir)?.profiles[profileId]).toEqual(authoritative);
         if (owner === "shared") {
-          expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toBeUndefined();
+          expect(readPersistedStore(agentDir)?.profiles[profileId]).toBeUndefined();
         }
       });
     },
@@ -218,21 +240,14 @@ describe("auth profile batch persistence", () => {
   it("refuses inherited OAuth authority that changes during the worker callback handoff", async () => {
     await withAgentDir(async (agentDir) => {
       const profileId = "openai:handoff";
-      const incoming: OAuthCredential = {
-        type: "oauth",
-        provider: "openai",
-        access: "synthetic-old-access",
-        refresh: "synthetic-old-refresh",
-        expires: Date.now() + 60_000,
-      };
-      const authoritative: OAuthCredential = {
+      const incoming = oauth("synthetic-old-access", "synthetic-old-refresh");
+      const authoritative = {
         ...incoming,
         access: "synthetic-new-access",
         refresh: "synthetic-new-refresh",
       };
-      const saveOptions = { filterExternalAuthProfiles: false, syncExternalCli: false };
-      saveAuthProfileStore({ version: 1, profiles: {} }, undefined, saveOptions);
-      saveAuthProfileStore({ version: 1, profiles: {} }, agentDir, saveOptions);
+      save({});
+      save({}, agentDir);
       let callbacks = 0;
       const realUpdate = storeRuntime.updateAuthProfileStoreWithLock;
       vi.spyOn(storeRuntime, "updateAuthProfileStoreWithLock").mockImplementation((params) =>
@@ -240,11 +255,7 @@ describe("auth profile batch persistence", () => {
           ...params,
           updater(store, owner, sharedStore) {
             callbacks += 1;
-            saveAuthProfileStore(
-              { version: 1, profiles: { [profileId]: authoritative } },
-              undefined,
-              saveOptions,
-            );
+            save({ [profileId]: authoritative });
             return params.updater(store, owner, sharedStore);
           },
         }),
@@ -254,27 +265,16 @@ describe("auth profile batch persistence", () => {
         upsertAuthProfileWithLock({ agentDir, profileId, credential: incoming }),
       ).resolves.toBeNull();
       expect(callbacks).toBe(1);
-      expect(loadPersistedAuthProfileStore()?.profiles[profileId]).toEqual(authoritative);
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toBeUndefined();
+      expect(readPersistedStore()?.profiles[profileId]).toEqual(authoritative);
+      expect(readPersistedStore(agentDir)?.profiles[profileId]).toBeUndefined();
     });
   });
 
   it("rejects pre-claim stale writes after the refresh fence settles", async () => {
     await withAgentDir(async (agentDir) => {
       const profileId = "openai:default";
-      const credential = {
-        type: "oauth",
-        provider: "openai",
-        access: "expired-access",
-        refresh: "single-use-refresh",
-        expires: Date.now() - 60_000,
-      } satisfies OAuthCredential;
-      const rotated = {
-        ...credential,
-        access: "rotated-access",
-        refresh: "rotated-refresh",
-        expires: Date.now() + 60_000,
-      };
+      const credential = oauth("expired-access", "single-use-refresh", Date.now() - 60_000);
+      const rotated = oauth("rotated-access", "rotated-refresh");
       const fence = createOAuthRefreshFence({ profileId, credential });
       const siblingId = "openai:sibling";
       const sibling = { ...credential, refresh: "sibling-refresh" };
@@ -294,47 +294,24 @@ describe("auth profile batch persistence", () => {
           resetFailureState: true,
           allowOAuthGenerationReplacement: true,
         }).then(() => undefined);
-        await updateAuthProfileStoreWithLock({
-          agentDir,
-          updater: (store) => {
-            store.profiles[profileId] = fence;
-            return true;
-          },
-        });
-        await updateAuthProfileStoreWithLock({
-          agentDir,
-          updater: (store) => {
-            store.profiles[profileId] = rotated;
-            return true;
-          },
-        });
+        await rotate(agentDir, profileId, fence);
+        await rotate(agentDir, profileId, rotated);
       });
 
       expect(queuedWrite).toBeDefined();
       await expect(queuedWrite!).rejects.toThrow(
         "Refused to restore fenced OAuth refresh generation",
       );
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toEqual(rotated);
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[siblingId]).toEqual(sibling);
+      expect(readPersistedStore(agentDir)?.profiles[profileId]).toEqual(rotated);
+      expect(readPersistedStore(agentDir)?.profiles[siblingId]).toEqual(sibling);
     });
   });
 
   it("rejects stale nonportable OAuth batches admitted after a newer generation settles", async () => {
     await withAgentDir(async (agentDir) => {
       const profileId = "openai:default";
-      const consumed = {
-        type: "oauth",
-        provider: "openai",
-        access: "consumed-access",
-        refresh: "consumed-refresh",
-        expires: Date.now() - 60_000,
-      } satisfies OAuthCredential;
-      const rotated = {
-        ...consumed,
-        access: "rotated-access",
-        refresh: "rotated-refresh",
-        expires: Date.now() + 60_000,
-      };
+      const consumed = oauth("consumed-access", "consumed-refresh", Date.now() - 60_000);
+      const rotated = oauth("rotated-access", "rotated-refresh");
       saveAuthProfileStore({ version: 1, profiles: { [profileId]: rotated } }, agentDir);
 
       await expect(
@@ -343,125 +320,71 @@ describe("auth profile batch persistence", () => {
           profiles: [{ profileId, credential: consumed }],
         }),
       ).rejects.toThrow("Refused to restore fenced OAuth refresh generation");
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toEqual(rotated);
+      expect(readPersistedStore(agentDir)?.profiles[profileId]).toEqual(rotated);
     });
   });
 
   it("rejects stale copied generations queued for an empty agent store", async () => {
-    const root = tempDirs.make("openclaw-auth-empty-stale-");
-    const mainAgentDir = path.join(root, "agents", "main", "agent");
-    fs.mkdirSync(mainAgentDir, { recursive: true });
-    await withEnvAsync(
-      {
-        OPENCLAW_STATE_DIR: root,
-        OPENCLAW_AGENT_DIR: mainAgentDir,
-      },
-      async () => {
-        const profileId = "openai:default";
-        const credential = {
-          type: "oauth",
-          provider: "openai",
-          access: "expired-access",
-          refresh: "single-use-refresh",
-          expires: Date.now() - 60_000,
-        } satisfies OAuthCredential;
-        const fence = createOAuthRefreshFence({ profileId, credential });
-        const rotated = {
-          ...credential,
-          access: "rotated-access",
-          refresh: "rotated-refresh",
-          expires: Date.now() + 60_000,
-        };
+    await withPeers(async (_root, mainAgentDir, peerAgentDir) => {
+      const profileId = "openai:default";
+      const credential = oauth("expired-access", "single-use-refresh", Date.now() - 60_000);
+      const fence = createOAuthRefreshFence({ profileId, credential });
+      const rotated = oauth("rotated-access", "rotated-refresh");
+      saveAuthProfileStore({ version: 1, profiles: { [profileId]: credential } }, mainAgentDir);
+      let queuedWrite: Promise<void> | undefined;
+      await withOAuthProfileLock({ profileId, provider: credential.provider }, async () => {
+        queuedWrite = persistAuthProfileBatch({
+          agentDir: peerAgentDir,
+          profiles: [{ profileId, credential }],
+          resetFailureState: true,
+          allowOAuthGenerationReplacement: true,
+        }).then(() => undefined);
+        await rotate(mainAgentDir, profileId, fence);
+        await rotate(mainAgentDir, profileId, rotated);
+      });
 
-        const peerAgentDir = path.join(root, "agents", "peer", "agent");
-        fs.mkdirSync(peerAgentDir, { recursive: true });
-        saveAuthProfileStore({ version: 1, profiles: { [profileId]: credential } }, mainAgentDir);
-        let queuedWrite: Promise<void> | undefined;
-        await withOAuthProfileLock({ profileId, provider: credential.provider }, async () => {
-          queuedWrite = persistAuthProfileBatch({
-            agentDir: peerAgentDir,
-            profiles: [{ profileId, credential }],
-            resetFailureState: true,
-            allowOAuthGenerationReplacement: true,
-          }).then(() => undefined);
-          await updateAuthProfileStoreWithLock({
-            agentDir: mainAgentDir,
-            updater: (store) => {
-              store.profiles[profileId] = fence;
-              return true;
-            },
-          });
-          await updateAuthProfileStoreWithLock({
-            agentDir: mainAgentDir,
-            updater: (store) => {
-              store.profiles[profileId] = rotated;
-              return true;
-            },
-          });
-        });
-
-        expect(queuedWrite).toBeDefined();
-        await expect(queuedWrite!).rejects.toThrow(
-          "Refused to restore fenced OAuth refresh generation",
-        );
-        expect(loadPersistedAuthProfileStore(peerAgentDir)?.profiles[profileId]).toBeUndefined();
-        expect(loadPersistedAuthProfileStore(mainAgentDir)?.profiles[profileId]).toEqual(rotated);
-      },
-    );
+      expect(queuedWrite).toBeDefined();
+      await expect(queuedWrite!).rejects.toThrow(
+        "Refused to restore fenced OAuth refresh generation",
+      );
+      expect(readPersistedStore(peerAgentDir)?.profiles[profileId]).toBeUndefined();
+      expect(readPersistedStore(mainAgentDir)?.profiles[profileId]).toEqual(rotated);
+    });
   });
 
   it("rejects OAuth writes when authority appears after empty-store admission", async () => {
-    const root = tempDirs.make("openclaw-auth-new-authority-");
-    const mainAgentDir = path.join(root, "agents", "main", "agent");
-    fs.mkdirSync(mainAgentDir, { recursive: true });
-    await withEnvAsync(
-      {
-        OPENCLAW_STATE_DIR: root,
-        OPENCLAW_AGENT_DIR: mainAgentDir,
-      },
-      async () => {
-        const profileId = "openai:default";
-        const incoming = {
-          type: "oauth",
-          provider: "openai",
-          access: "delayed-access",
-          refresh: "delayed-refresh",
-          expires: Date.now() + 60_000,
-        } satisfies OAuthCredential;
-        const authoritative = {
-          ...incoming,
-          access: "fresh-login-access",
-          refresh: "fresh-login-refresh",
-        };
+    await withPeers(async (root, mainAgentDir, peerAgentDir) => {
+      const profileId = "openai:default";
+      const incoming = oauth("delayed-access", "delayed-refresh");
+      const authoritative = {
+        ...incoming,
+        access: "fresh-login-access",
+        refresh: "fresh-login-refresh",
+      };
 
-        const peerAgentDir = path.join(root, "agents", "new-peer", "agent");
-        fs.mkdirSync(peerAgentDir, { recursive: true });
-        saveAuthProfileStore({ version: 1, profiles: {} }, mainAgentDir);
-        let queuedWrite: Promise<void> | undefined;
-        await withOAuthProfileLock({ profileId, provider: incoming.provider }, async () => {
-          queuedWrite = persistAuthProfileBatch({
-            agentDir: peerAgentDir,
-            stateDir: root,
-            profiles: [{ profileId, credential: incoming }],
-            resetFailureState: true,
-            allowOAuthGenerationReplacement: true,
-          }).then(() => undefined);
-          saveAuthProfileStore(
-            { version: 1, profiles: { [profileId]: authoritative } },
-            mainAgentDir,
-          );
-        });
+      saveAuthProfileStore({ version: 1, profiles: {} }, mainAgentDir);
+      let queuedWrite: Promise<void> | undefined;
+      await withOAuthProfileLock({ profileId, provider: incoming.provider }, async () => {
+        queuedWrite = persistAuthProfileBatch({
+          agentDir: peerAgentDir,
+          stateDir: root,
+          profiles: [{ profileId, credential: incoming }],
+          resetFailureState: true,
+          allowOAuthGenerationReplacement: true,
+        }).then(() => undefined);
+        saveAuthProfileStore(
+          { version: 1, profiles: { [profileId]: authoritative } },
+          mainAgentDir,
+        );
+      });
 
-        expect(queuedWrite).toBeDefined();
-        await expect(queuedWrite!).rejects.toThrow(
-          "Refused to restore fenced OAuth refresh generation",
-        );
-        expect(loadPersistedAuthProfileStore(peerAgentDir)?.profiles[profileId]).toBeUndefined();
-        expect(loadPersistedAuthProfileStore(mainAgentDir)?.profiles[profileId]).toEqual(
-          authoritative,
-        );
-      },
-    );
+      expect(queuedWrite).toBeDefined();
+      await expect(queuedWrite!).rejects.toThrow(
+        "Refused to restore fenced OAuth refresh generation",
+      );
+      expect(readPersistedStore(peerAgentDir)?.profiles[profileId]).toBeUndefined();
+      expect(readPersistedStore(mainAgentDir)?.profiles[profileId]).toEqual(authoritative);
+    });
   });
 
   it.each(["upsert", "batch"] as const)(
@@ -472,13 +395,7 @@ describe("auth profile batch persistence", () => {
       const agentDir = path.join(scopedRoot, "agents", "work", "agent");
       fs.mkdirSync(agentDir, { recursive: true });
       const profileId = "openai:default";
-      const current = {
-        type: "oauth",
-        provider: "openai",
-        access: "current-access",
-        refresh: "stable-refresh",
-        expires: Date.now() + 60_000,
-      } satisfies OAuthCredential;
+      const current = oauth("current-access", "stable-refresh");
       const refreshed = { ...current, access: "refreshed-access", expires: Date.now() + 120_000 };
       const store = { version: 1, profiles: { [profileId]: current } };
       // Upserts follow the scoped agent; batches without agentDir follow the scoped shared store.
@@ -498,7 +415,7 @@ describe("auth profile batch persistence", () => {
         });
       });
       await withEnvAsync({ OPENCLAW_STATE_DIR: scopedRoot }, async () => {
-        expect(loadPersistedAuthProfileStore(targetDir)?.profiles[profileId]).toEqual(refreshed);
+        expect(readPersistedStore(targetDir)?.profiles[profileId]).toEqual(refreshed);
       });
     },
   );
@@ -506,13 +423,7 @@ describe("auth profile batch persistence", () => {
   it("does not restore a nonportable OAuth generation during batch rollback", async () => {
     await withAgentDir(async (agentDir) => {
       const profileId = "openai:default";
-      const previous = {
-        type: "oauth",
-        provider: "openai",
-        access: "previous-access",
-        refresh: "previous-refresh",
-        expires: Date.now() + 60_000,
-      } satisfies OAuthCredential;
+      const previous = oauth("previous-access", "previous-refresh");
       const replacement = {
         ...previous,
         access: "replacement-access",
@@ -528,20 +439,14 @@ describe("auth profile batch persistence", () => {
       expect((await receipt.rollback()).unrevertedProfileIds).toEqual(new Set([profileId]));
       expect((await receipt.rollback()).unrevertedProfileIds).toEqual(new Set([profileId]));
 
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toEqual(replacement);
+      expect(readPersistedStore(agentDir)?.profiles[profileId]).toEqual(replacement);
     });
   });
 
   it("allows portable copies and distinct generations to replace an OAuth fence", async () => {
     await withAgentDir(async (agentDir) => {
       const profileId = "openai:default";
-      const credential = {
-        type: "oauth",
-        provider: "openai",
-        access: "expired-access",
-        refresh: "single-use-refresh",
-        expires: Date.now() - 60_000,
-      } satisfies OAuthCredential;
+      const credential = oauth("expired-access", "single-use-refresh", Date.now() - 60_000);
       const fence = createOAuthRefreshFence({ profileId, credential });
       saveAuthProfileStore({ version: 1, profiles: { [profileId]: fence } }, agentDir);
 
@@ -550,7 +455,7 @@ describe("auth profile batch persistence", () => {
         agentDir,
         profiles: [{ profileId, credential: portable }],
       });
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toEqual(portable);
+      expect(readPersistedStore(agentDir)?.profiles[profileId]).toEqual(portable);
 
       saveAuthProfileStore({ version: 1, profiles: { [profileId]: fence } }, agentDir);
       const distinct = { ...credential, refresh: "distinct-refresh" } satisfies OAuthCredential;
@@ -558,7 +463,7 @@ describe("auth profile batch persistence", () => {
         agentDir,
         profiles: [{ profileId, credential: distinct }],
       });
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toEqual(distinct);
+      expect(readPersistedStore(agentDir)?.profiles[profileId]).toEqual(distinct);
     });
   });
 
@@ -580,7 +485,7 @@ describe("auth profile batch persistence", () => {
         order: { openai: ["openai:primary", "openai:backup"] },
       });
 
-      expect(loadPersistedAuthProfileStore(agentDir)).toMatchObject({
+      expect(readPersistedStore(agentDir)).toMatchObject({
         profiles: {
           "openai:primary": { key: "sk-primary" },
           "openai:backup": { token: "backup-token" },
@@ -591,7 +496,7 @@ describe("auth profile batch persistence", () => {
       await receipt.rollback();
       await receipt.rollback();
 
-      expect(loadPersistedAuthProfileStore(agentDir)).toBeNull();
+      expect(readPersistedStore(agentDir)).toBeNull();
       expect(inspectPersistedAuthProfileStoreRaw(agentDir).status).toBe("missing");
       expect(inspectPersistedAuthProfileStateRaw(agentDir).status).toBe("missing");
     });
@@ -600,13 +505,12 @@ describe("auth profile batch persistence", () => {
   it("removes only owned profiles and introduced order ids", async () => {
     await withAgentDir(async (agentDir) => {
       saveAuthProfileStore(
-        {
-          version: 1,
-          profiles: {
-            "openai:existing": apiKey("sk-existing"),
+        keyStore(
+          { "openai:existing": "sk-existing" },
+          {
+            order: { openai: ["openai:existing"] },
           },
-          order: { openai: ["openai:existing"] },
-        },
+        ),
         agentDir,
       );
       const observation = observeHostDataSql();
@@ -634,7 +538,7 @@ describe("auth profile batch persistence", () => {
         observation.queries.filter((sql) => /\bauth_profile_(?:store|state)\b/iu.test(sql)),
       ).toEqual([]);
 
-      expect(loadPersistedAuthProfileStore(agentDir)).toMatchObject({
+      expect(readPersistedStore(agentDir)).toMatchObject({
         profiles: {
           "openai:primary": { key: "sk-newer" },
           "openai:existing": { key: "sk-existing" },
@@ -644,23 +548,19 @@ describe("auth profile batch persistence", () => {
           openai: ["openai:primary", "openai:concurrent", "openai:existing"],
         },
       });
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles["openai:backup"]).toBeUndefined();
+      expect(readPersistedStore(agentDir)?.profiles["openai:backup"]).toBeUndefined();
     });
   });
 
   it("does not claim skipped non-replacing profiles or their order entries", async () => {
     await withAgentDir(async (agentDir) => {
-      saveAuthProfileStore(
+      const original = keyStore(
+        { "openai:existing": "sk-existing", "openai:conflict": "sk-concurrent" },
         {
-          version: 1,
-          profiles: {
-            "openai:existing": apiKey("sk-existing"),
-            "openai:conflict": apiKey("sk-concurrent"),
-          },
           order: { openai: ["openai:existing"] },
         },
-        agentDir,
       );
+      saveAuthProfileStore(original, agentDir);
       const receipt = await persistAuthProfileBatch({
         agentDir,
         profiles: [
@@ -670,7 +570,7 @@ describe("auth profile batch persistence", () => {
         order: { openai: ["openai:conflict", "openai:portable"] },
       });
 
-      expect(loadPersistedAuthProfileStore(agentDir)).toMatchObject({
+      expect(readPersistedStore(agentDir)).toMatchObject({
         profiles: {
           "openai:conflict": { key: "sk-concurrent" },
           "openai:portable": { key: "sk-portable" },
@@ -680,14 +580,8 @@ describe("auth profile batch persistence", () => {
 
       await receipt.rollback();
 
-      expect(loadPersistedAuthProfileStore(agentDir)).toMatchObject({
-        profiles: {
-          "openai:existing": { key: "sk-existing" },
-          "openai:conflict": { key: "sk-concurrent" },
-        },
-        order: { openai: ["openai:existing"] },
-      });
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles["openai:portable"]).toBeUndefined();
+      expect(readPersistedStore(agentDir)).toMatchObject(original);
+      expect(readPersistedStore(agentDir)?.profiles["openai:portable"]).toBeUndefined();
     });
   });
 
@@ -695,19 +589,26 @@ describe("auth profile batch persistence", () => {
     await withAgentDir(async (agentDir) => {
       const targetId = "openai:target";
       const siblingId = "openai:sibling";
-      const targetLastUsed = Date.now() - 10_000;
-      const targetLastFailureAt = Date.now() - 5_000;
-      const targetLastProbeAt = Date.now() - 2_000;
-      const siblingBlockedUntil = Date.now() + 120_000;
-      saveAuthProfileStore(
+      const history = {
+        lastUsed: Date.now() - 10_000,
+        lastFailureAt: Date.now() - 5_000,
+        lastProbeAt: Date.now() - 2_000,
+      };
+      const sibling = {
+        errorCount: 2,
+        blockedUntil: Date.now() + 120_000,
+        blockedReason: "subscription_limit" as const,
+      };
+      const initial = keyStore(
+        { [targetId]: "sk-stale", [siblingId]: "sk-sibling" },
         {
-          version: 1,
-          profiles: {
-            [targetId]: apiKey("sk-stale"),
-            [siblingId]: apiKey("sk-sibling"),
-          },
           order: { openai: [siblingId, targetId] },
           lastGood: { openai: siblingId },
+        },
+      );
+      saveAuthProfileStore(
+        {
+          ...initial,
           usageStats: {
             [targetId]: {
               errorCount: 4,
@@ -722,15 +623,9 @@ describe("auth profile batch persistence", () => {
               cooldownModel: "gpt-5.6",
               disabledUntil: Date.now() + 60_000,
               disabledReason: "auth_permanent",
-              lastUsed: targetLastUsed,
-              lastFailureAt: targetLastFailureAt,
-              lastProbeAt: targetLastProbeAt,
+              ...history,
             },
-            [siblingId]: {
-              errorCount: 2,
-              blockedUntil: siblingBlockedUntil,
-              blockedReason: "subscription_limit",
-            },
+            [siblingId]: sibling,
           },
         },
         agentDir,
@@ -745,26 +640,12 @@ describe("auth profile batch persistence", () => {
       });
 
       expect(authority.readCurrentCredential()).toEqual(apiKey("sk-fresh"));
-      expect(loadPersistedAuthProfileStore(agentDir)).toEqual({
-        version: 1,
-        profiles: {
-          [targetId]: apiKey("sk-fresh"),
-          [siblingId]: apiKey("sk-sibling"),
-        },
-        order: { openai: [siblingId, targetId] },
-        lastGood: { openai: siblingId },
+      expect(readPersistedStore(agentDir)).toEqual({
+        ...initial,
+        profiles: { ...initial.profiles, [targetId]: apiKey("sk-fresh") },
         usageStats: {
-          [targetId]: {
-            errorCount: 0,
-            lastUsed: targetLastUsed,
-            lastFailureAt: targetLastFailureAt,
-            lastProbeAt: targetLastProbeAt,
-          },
-          [siblingId]: {
-            errorCount: 2,
-            blockedUntil: siblingBlockedUntil,
-            blockedReason: "subscription_limit",
-          },
+          [targetId]: { errorCount: 0, ...history },
+          [siblingId]: sibling,
         },
       });
     });
@@ -774,20 +655,15 @@ describe("auth profile batch persistence", () => {
     await withAgentDir(async (agentDir) => {
       const profileId = "openai:existing";
       const disabledUntil = Date.now() + 60_000;
-      saveAuthProfileStore(
+      const original = keyStore(
+        { [profileId]: "sk-stale" },
         {
-          version: 1,
-          profiles: { [profileId]: apiKey("sk-stale") },
           usageStats: {
-            [profileId]: {
-              errorCount: 3,
-              disabledUntil,
-              disabledReason: "auth_permanent",
-            },
+            [profileId]: { errorCount: 3, disabledUntil, disabledReason: "auth_permanent" },
           },
         },
-        agentDir,
       );
+      saveAuthProfileStore(original, agentDir);
       authStateFault.enable(0);
       try {
         await expect(
@@ -802,17 +678,7 @@ describe("auth profile batch persistence", () => {
         authStateFault.disable();
       }
 
-      expect(loadPersistedAuthProfileStore(agentDir)).toEqual({
-        version: 1,
-        profiles: { [profileId]: apiKey("sk-stale") },
-        usageStats: {
-          [profileId]: {
-            errorCount: 3,
-            disabledUntil,
-            disabledReason: "auth_permanent",
-          },
-        },
-      });
+      expect(readPersistedStore(agentDir)).toEqual(original);
     });
   });
 
@@ -880,7 +746,7 @@ describe("auth profile batch persistence", () => {
         authStateFault.disable();
       }
 
-      expect(loadPersistedAuthProfileStore(agentDir)).toBeNull();
+      expect(readPersistedStore(agentDir)).toBeNull();
     });
   });
 });
