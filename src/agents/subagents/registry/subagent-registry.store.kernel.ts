@@ -20,6 +20,37 @@ export function hasParentStoreColumns(db: EngineConnection): boolean {
   return columns.has("requester_store_path") && columns.has("controller_store_path");
 }
 
+function subagentRunUpsert(db: EngineConnection, values: readonly SubagentRunSqliteRow[]) {
+  return getNodeSqliteKysely<SubagentRegistryDatabase>(db)
+    .insertInto("subagent_runs")
+    .values(values)
+    .onConflict((conflict) =>
+      conflict.column("run_id").doUpdateSet((eb) => ({
+        child_session_key: eb.ref("excluded.child_session_key"),
+        controller_session_key: eb.ref("excluded.controller_session_key"),
+        requester_session_key: eb.ref("excluded.requester_session_key"),
+        requester_store_path: eb.ref("excluded.requester_store_path"),
+        controller_store_path: eb.ref("excluded.controller_store_path"),
+        created_at: eb.ref("excluded.created_at"),
+        payload_json: eb.ref("excluded.payload_json"),
+      })),
+    );
+}
+
+/** A complete UPSERT can autocommit only when it needs no chunking or schema repair. */
+export function prepareSingleSubagentRunUpsert(
+  db: EngineConnection,
+  values: readonly SubagentRunSqliteRow[],
+): (() => void) | undefined {
+  if (!values.length || values.length > MAX_SUBAGENT_UPSERT_ROWS || !hasParentStoreColumns(db)) {
+    return undefined;
+  }
+  const query = subagentRunUpsert(db, values);
+  return () => {
+    executeSqliteQuerySync(db, query);
+  };
+}
+
 /** Applies selected row changes inside the caller's transaction. */
 export function writeSubagentRunValuesInDatabase(
   database: OpenClawStateDatabase,
@@ -35,20 +66,7 @@ export function writeSubagentRunValuesInDatabase(
   for (let offset = 0; offset < values.length; offset += MAX_SUBAGENT_UPSERT_ROWS) {
     executeSqliteQuerySync(
       db,
-      stateDb
-        .insertInto("subagent_runs")
-        .values(values.slice(offset, offset + MAX_SUBAGENT_UPSERT_ROWS))
-        .onConflict((conflict) =>
-          conflict.column("run_id").doUpdateSet((eb) => ({
-            child_session_key: eb.ref("excluded.child_session_key"),
-            controller_session_key: eb.ref("excluded.controller_session_key"),
-            requester_session_key: eb.ref("excluded.requester_session_key"),
-            requester_store_path: eb.ref("excluded.requester_store_path"),
-            controller_store_path: eb.ref("excluded.controller_store_path"),
-            created_at: eb.ref("excluded.created_at"),
-            payload_json: eb.ref("excluded.payload_json"),
-          })),
-        ),
+      subagentRunUpsert(db, values.slice(offset, offset + MAX_SUBAGENT_UPSERT_ROWS)),
     );
   }
   if (deleteRunIds.length > 0) {
