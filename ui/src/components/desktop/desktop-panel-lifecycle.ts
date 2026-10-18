@@ -112,7 +112,7 @@ export function createDesktopPanelLifecycle(
 
   return {
     notify,
-    subscribe(listener: () => void) {
+    subscribe(this: void, listener: () => void) {
       listeners.add(listener);
       return () => {
         listeners.delete(listener);
