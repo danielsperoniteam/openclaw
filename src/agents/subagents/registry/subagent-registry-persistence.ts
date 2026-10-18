@@ -346,6 +346,7 @@ async function commitRows<T>(
     terminalEvents: planned.terminalEvents?.map(({ input }) => structuredClone(input)),
   };
   if (!values.length && !write.deleteRunIds.length && !write.terminalEvents?.length) {
+    authority.assertCurrent();
     return { value: planned.value, postimages };
   }
   return runSubagentRegistryWorkerWrite(context, () => {

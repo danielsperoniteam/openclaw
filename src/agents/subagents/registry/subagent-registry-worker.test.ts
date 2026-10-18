@@ -391,6 +391,44 @@ it("publishes overlapping durable and runtime-only mutations in FIFO order", asy
   }
 });
 
+it("rejects a runtime-only mutation when its Gateway recovery owner changes", async () => {
+  await register({
+    ...entry("recovery-noop"),
+    cleanupHandled: false,
+    execution: { status: "terminal", endedAt: 2 },
+    requesterSettleWake: { status: "pending", attemptCount: 0 },
+  });
+  const expected = subagentRuns.get("recovery-noop")!;
+  const previousResolver = () => undefined;
+  bindGatewayContextResolver(expected, previousResolver);
+  const gateway = createGatewayContext();
+  let gatewayCurrent = true;
+  const resolver = () => (gatewayCurrent ? gateway : undefined);
+  const onPublished = vi.fn();
+
+  await expect(
+    mutateSubagentRuns(
+      [expected.runId],
+      (rows) => {
+        gatewayCurrent = false;
+        return {
+          value: undefined,
+          postimages: new Map([
+            [expected.runId, { ...rows.get(expected.runId)!, cleanupHandled: true }],
+          ]),
+        };
+      },
+      {
+        gatewayRecovery: { expected, previousResolver, resolver, gateway },
+        onPublished,
+      },
+    ),
+  ).rejects.toThrow("Subagent Gateway recovery owner changed");
+  expect(subagentRuns.get(expected.runId)).toBe(expected);
+  expect(expected.cleanupHandled).toBe(false);
+  expect(onPublished).not.toHaveBeenCalled();
+});
+
 it("persists an unchanged prepared-only registration", async () => {
   await register(entry("warm-registration"));
   const prepared = entry("prepared-registration");
