@@ -106,7 +106,6 @@ export async function startTranscriptReloadFixtureSidecars(
     unlockStartupMethods: () => {},
     waitForPostReadyWork,
     isClosing: () => startupWork.isClosing,
-    pluginRuntimeClaim: fixture.owner.currentClaim(),
     getCurrentPluginRegistry: () => fixture.registryOwner.registry,
     getCurrentPluginServices: () => fixture.owner.currentServices() ?? null,
     onPostReadySidecars: runtime.runtimeState.postReadySidecars.publish,
