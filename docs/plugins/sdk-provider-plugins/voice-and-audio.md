@@ -370,6 +370,23 @@ Register each capability inside `register(api)` alongside your existing
     permissions. Closure or connection replacement retires that callback's
     authority rather than transferring it to the next speaker or connection.
 
+    A provider can supply `onResultChunk(text)` on a consult request to speak
+    complete user-facing result blocks before the final result. The host must
+    validate current authority and pending confirmation state before invoking
+    it; never forward reasoning, token deltas, raw tool output, or speculative
+    progress. Returning `true` means the block was submitted, not that it was
+    heard. Returning `false` retains final-result fallback. The final result
+    remains the full answer; the provider suppresses already-delivered exact
+    leading blocks. Fence retained callbacks after cancellation, closure,
+    replacement, or settlement, and keep each block bound to its delegation.
+
+    The built-in Talk host currently returns final results only and does not
+    invoke `onResultChunk`. The provider contract is ready for hosts with a
+    source-completed result observer; it does not enable end-to-end streaming
+    in the built-in host. Do not adapt `onBlockReply` by silently dropping
+    excluded blocks: that callback also acknowledges delivery and carries
+    confirmation prompts.
+
     The host binds steering authority to the actual admitted backend attempt
     after harness policy preparation. Backing agent harnesses forward the
     existing attempt fingerprint when registering their handle. Realtime voice

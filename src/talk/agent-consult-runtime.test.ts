@@ -177,6 +177,54 @@ describe("realtime voice agent consult runtime", () => {
     await state.cleanup();
   });
 
+  it("uses an opt-in fast voice profile without replacing identity or bootstrap", async () => {
+    const { runtime, runEmbeddedAgent } = createAgentRuntime();
+    await runConsult(runtime, {
+      consultProfile: { provider: "openai", model: "fast-model", directTools: true },
+    });
+    const call = requireEmbeddedAgentCall(runEmbeddedAgent);
+    expect(call).toMatchObject({
+      provider: "openai",
+      model: "fast-model",
+      thinkLevel: "low",
+      codeModeOverride: false,
+    });
+    expect(call.bootstrapContextMode).toBeUndefined();
+    expect(call.promptMode).toBeUndefined();
+    expect(call.agentId).toBe("main");
+    // Block callbacks acknowledge delivery even for confirmation prompts; voice
+    // must retain final-only output until a source-completed observer exists.
+    expect(call.onBlockReply).toBeUndefined();
+    expect(call.onPartialReply).toBeUndefined();
+  });
+
+  it("does not mix an explicit provider with the profile model", async () => {
+    const { runtime, runEmbeddedAgent } = createAgentRuntime();
+    await runConsult(runtime, {
+      consultProfile: { provider: "profile-provider", model: "profile-model" },
+      provider: "explicit-provider",
+    });
+    const call = requireEmbeddedAgentCall(runEmbeddedAgent);
+    expect(call.provider).toBe("explicit-provider");
+    expect(call.model).toBeUndefined();
+  });
+
+  it("retains explicit consult model and reasoning overrides with a voice profile", async () => {
+    const { runtime, runEmbeddedAgent } = createAgentRuntime();
+    await runConsult(runtime, {
+      consultProfile: { provider: "openai", model: "fast-model" },
+      provider: "another-provider",
+      model: "explicit-model",
+      thinkLevel: "high",
+    });
+    expect(requireEmbeddedAgentCall(runEmbeddedAgent)).toMatchObject({
+      provider: "another-provider",
+      model: "explicit-model",
+      thinkLevel: "high",
+    });
+    expect(requireEmbeddedAgentCall(runEmbeddedAgent).codeModeOverride).toBeUndefined();
+  });
+
   it("does not start a consult after its caller has closed", async () => {
     const { runtime, runEmbeddedAgent } = createAgentRuntime();
     const controller = new AbortController();

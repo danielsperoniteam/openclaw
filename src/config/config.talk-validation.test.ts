@@ -25,7 +25,33 @@ describe("talk config validation fail-closed behavior", () => {
     });
   });
 
+  it("loads an opt-in consult profile with the selected model and direct tools", async () => {
+    const consultProfile = { provider: "test-provider", model: "fast-model", directTools: true };
+    await withTempHomeConfig({ talk: { consultProfile } }, async () => {
+      expect(loadConfig({ skipPluginValidation: true }).talk?.consultProfile).toEqual(
+        consultProfile,
+      );
+    });
+  });
+
   it.each([
+    {
+      name: "blank consult model",
+      talk: { consultProfile: { provider: "test-provider", model: "  " } },
+      message: /talk\.consultProfile\.model/i,
+    },
+    {
+      name: "missing consult provider",
+      talk: { consultProfile: { model: "fast-model" } },
+      message: /talk\.consultProfile\.provider/i,
+    },
+    {
+      name: "non-boolean consult directTools",
+      talk: {
+        consultProfile: { provider: "test-provider", model: "fast-model", directTools: "yes" },
+      },
+      message: /talk\.consultProfile\.directTools/i,
+    },
     {
       name: "provider absent from providers",
       talk: { provider: "acme", providers: { elevenlabs: { voiceId: "voice-123" } } },

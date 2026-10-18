@@ -9,6 +9,23 @@ describe("talk normalization", () => {
     expect(buildTalkConfigResponse({ agentId: "ops" })).toEqual({ agentId: "ops" });
   });
 
+  it("preserves the opt-in consult profile without changing explicit thinking or fast mode", () => {
+    const normalized = normalizeTalkSection({
+      consultProfile: { provider: " test-provider ", model: " fast-model ", directTools: false },
+      consultThinkingLevel: "high",
+      consultFastMode: false,
+    });
+    expect(normalized).toEqual({
+      consultProfile: { provider: "test-provider", model: "fast-model", directTools: false },
+      consultThinkingLevel: "high",
+      consultFastMode: false,
+    });
+    expect(buildTalkConfigResponse(normalized)).toEqual(normalized);
+    expect(
+      normalizeTalkSection({ consultProfile: { provider: "test-provider", model: "  " } }),
+    ).toBeUndefined();
+  });
+
   it("uses new provider/providers shape directly when present", () => {
     const normalized = normalizeTalkSection({
       provider: "acme",

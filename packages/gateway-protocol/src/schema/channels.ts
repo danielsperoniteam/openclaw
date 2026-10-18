@@ -456,6 +456,13 @@ const TalkConfigSchema = closedObject({
   providers: Type.Optional(Type.Record(Type.String(), TalkProviderConfigSchema)),
   realtime: Type.Optional(TalkRealtimeConfigSchema),
   resolved: Type.Optional(ResolvedTalkConfigSchema),
+  consultProfile: Type.Optional(
+    closedObject({
+      provider: Type.String({ minLength: 1 }),
+      model: Type.String({ minLength: 1 }),
+      directTools: Type.Optional(Type.Boolean()),
+    }),
+  ),
   consultThinkingLevel: Type.Optional(Type.String()),
   consultFastMode: Type.Optional(Type.Boolean()),
   speechLocale: Type.Optional(Type.String()),

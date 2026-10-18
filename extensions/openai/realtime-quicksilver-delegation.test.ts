@@ -220,6 +220,7 @@ it("forwards only classified sideband event types", () => {
   frame(controller, { type: "output_audio_buffer.cleared" });
 
   expect(onWireEventType.mock.calls).toEqual([
+    ["realtime.provider.event-unknown"],
     ["session.updated"],
     ["output_audio_buffer.cleared"],
   ]);
@@ -305,10 +306,8 @@ it("does not start a late control after the active consultation settles", async 
   await waitForAppend(socket, "finished-task", "Done");
   delegate(controller, "late-cancel", "cancel");
   expect(runAgentConsult).toHaveBeenCalledOnce();
-  expect(socket.sent).toHaveLength(2);
-  expect(parseSent(socket)[0]).toMatchObject(
-    contextAppend(expect.stringContaining('Status: "I’ll check that request."')),
-  );
+  expect(socket.sent).toHaveLength(1);
+  expect(parseSent(socket)[0]).toEqual(delegationAppend("finished-task", "Done"));
 });
 
 it("consumes bounded transcript context once and in event order", async () => {
@@ -489,14 +488,14 @@ it("drops pending receipts and late results when detached before settlement", as
   });
   delegate(controller, "active", "first task");
   delegate(controller, "pending", "next task");
-  expect(socket.sent).toHaveLength(1);
+  expect(socket.sent).toHaveLength(0);
   controller.detach();
   delegate(controller, "late", "late task");
   result.resolve({ text: "Late result" });
   await result.promise;
   await nextEventLoopTurn();
   expect(runAgentConsult).toHaveBeenCalledOnce();
-  expect(socket.sent).toHaveLength(1);
+  expect(socket.sent).toHaveLength(0);
 });
 
 it("returns a speakable failure for a delegated Unicode failure", async () => {
@@ -595,4 +594,104 @@ it("suppresses host cancellation and stops accepting work after teardown", async
   controller.stop(new Error("session closed"));
   delegate(controller, "delegation-late", "late task");
   expect(runAgentConsult).toHaveBeenCalledOnce();
+});
+
+it("speaks complete result blocks before completion without filler or duplicate final speech", async () => {
+  const { controller, socket, runAgentConsult, result } = pendingHarness({
+    handleDelegationInput: () => "consult",
+  });
+  delegate(controller, "streamed", "Read the schedule");
+  const append = runAgentConsult.mock.calls[0]?.[0].onResultChunk;
+  expect(socket.sent).toEqual([]);
+  expect(append?.("The first appointment is at nine.")).toBe(true);
+  expect(append?.("The first appointment is at nine.")).toBe(true);
+  expect(append?.("The second is at noon.")).toBe(true);
+  expect(parseSent(socket)).toEqual([
+    delegationAppend("streamed", "The first appointment is at nine."),
+    delegationAppend("streamed", "The second is at noon."),
+  ]);
+  result.resolve({
+    text: "The first appointment is at nine.\n\nThe second is at noon.\nNothing else today.",
+  });
+  await nextEventLoopTurn();
+  expect(parseSent(socket)).toEqual([
+    delegationAppend("streamed", "The first appointment is at nine."),
+    delegationAppend("streamed", "The second is at noon."),
+    delegationAppend("streamed", "Nothing else today."),
+  ]);
+  expect(append?.("Late block")).toBe(false);
+});
+
+it.each(["stop", "detach", "drain", "abort"] as const)(
+  "fences streamed results after %s",
+  (ending) => {
+    const { controller, socket, runAgentConsult, sessionController } = pendingHarness();
+    delegate(controller, "streamed", "Read the schedule");
+    const append = runAgentConsult.mock.calls[0]?.[0].onResultChunk;
+    if (ending === "stop") controller.stop(new Error("closed"));
+    else if (ending === "detach") controller.detach();
+    else if (ending === "drain") controller.beginTranscriptDrain("detach");
+    else sessionController.abort();
+    expect(append?.("Stale result")).toBe(false);
+    expect(socket.sent).toEqual([]);
+  },
+);
+
+it("does not re-speak a fully streamed final or send empty completion", async () => {
+  const { controller, socket, runAgentConsult, result } = pendingHarness();
+  delegate(controller, "streamed", "Read the schedule");
+  expect(runAgentConsult.mock.calls[0]?.[0].onResultChunk?.("No appointments.")).toBe(true);
+  result.resolve({ text: "No appointments." });
+  await nextEventLoopTurn();
+  expect(parseSent(socket)).toEqual([delegationAppend("streamed", "No appointments.")]);
+});
+
+it("keeps rejected blocks for final fallback and fences blocks across steering", async () => {
+  const steering = deferred<{ text: string }>();
+  const steerAgentConsult = vi.fn(async () => await steering.promise);
+  const { controller, socket, runAgentConsult, result } = pendingHarness({ steerAgentConsult });
+  delegate(controller, "first", "Read the schedule");
+  const append = runAgentConsult.mock.calls[0]?.[0].onResultChunk;
+  expect(append?.("x".repeat(10_000))).toBe(false);
+  expect(append?.(" ")).toBe(false);
+  delegate(controller, "second", "Only tomorrow");
+  expect(append?.("Old result")).toBe(false);
+  await Promise.resolve();
+  expect(append?.("Old result")).toBe(false);
+  steering.resolve({ text: "Accepted" });
+  await nextEventLoopTurn();
+  expect(append?.("Old result")).toBe(false);
+  result.resolve({ text: "Tomorrow is free." });
+  await nextEventLoopTurn();
+  expect(parseSent(socket)).toEqual([delegationAppend("second", "Tomorrow is free.")]);
+});
+
+it("streams public GPT-Live results on the speakable channel with the exact delegation ID", async () => {
+  const { controller, socket, runAgentConsult, result } = pendingHarness({ model: "gpt-live-1" });
+  controller.handleEvent({ kind: "transcript-done", role: "user", text: "Read the schedule" });
+  delegate(controller, "public-result", "");
+  expect(runAgentConsult.mock.calls[0]?.[0].onResultChunk?.("No appointments.")).toBe(true);
+  expect(parseSent(socket)).toEqual([
+    {
+      type: "session.commentary.append",
+      delegation_id: "public-result",
+      content: "No appointments.",
+    },
+  ]);
+  result.resolve({ text: "No appointments." });
+  await nextEventLoopTurn();
+  expect(socket.sent).toHaveLength(1);
+});
+
+it("does not transfer a retained chunk callback to a replacement socket", () => {
+  const original = new FakeSocket("manual");
+  original.readyState = 1;
+  let socket = original;
+  const { controller, runAgentConsult } = pendingHarness({ getSocket: () => socket });
+  delegate(controller, "streamed", "Read the schedule");
+  socket = new FakeSocket("manual");
+  socket.readyState = 1;
+  expect(runAgentConsult.mock.calls[0]?.[0].onResultChunk?.("Old connection result")).toBe(false);
+  expect(original.sent).toEqual([]);
+  expect(socket.sent).toEqual([]);
 });

@@ -63,6 +63,7 @@ See [Configuration - agents](/gateway/config-agents) for:
 - `session.*` (session lifecycle, compaction, pruning)
 - `messages.*` (message delivery, TTS, markdown rendering)
 - `talk.*` (Talk mode)
+  - `talk.consultProfile`: opt-in backing-agent model/provider and direct-tool profile for realtime voice; preserves agent identity, memory, bootstrap instructions, and permissions
   - `talk.consultThinkingLevel`: thinking level override for the full OpenClaw agent run behind Control UI Talk realtime consults
   - `talk.consultFastMode`: one-shot fast-mode override for Control UI Talk realtime consults
   - `talk.speechLocale`: optional BCP 47 locale id for Talk speech recognition on Android, iOS, and macOS, and for iOS system-voice fallback

@@ -415,6 +415,7 @@ export async function consultRealtimeVoiceAgent(params: {
   /** Trusted owner bit established by the caller's ingress authorization boundary. */
   senderIsOwner?: boolean;
   contextMode?: RealtimeVoiceAgentConsultContextMode;
+  consultProfile?: NonNullable<OpenClawConfig["talk"]>["consultProfile"];
   provider?: RunEmbeddedAgentParams["provider"];
   model?: RunEmbeddedAgentParams["model"];
   thinkLevel?: RunEmbeddedAgentParams["thinkLevel"];
@@ -608,9 +609,12 @@ export async function consultRealtimeVoiceAgent(params: {
           assistantLabel: params.assistantLabel,
           questionSourceLabel: params.questionSourceLabel,
         }),
-        provider: params.provider,
-        model: params.model,
-        thinkLevel: params.thinkLevel ?? "high",
+        provider: params.provider ?? (params.model ? undefined : params.consultProfile?.provider),
+        model: params.model ?? (params.provider ? undefined : params.consultProfile?.model),
+        thinkLevel: params.thinkLevel ?? (params.consultProfile ? "low" : "high"),
+        // Preserve normal bootstrap, identity, memory and tool authority. Only the
+        // tool presentation changes; this never grants additional tools.
+        codeModeOverride: params.consultProfile?.directTools === true ? false : undefined,
         fastMode: params.fastMode,
         verboseLevel: "off",
         reasoningLevel: "off",
