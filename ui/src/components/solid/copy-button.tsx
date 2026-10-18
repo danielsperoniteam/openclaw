@@ -11,6 +11,7 @@ export type CopyButtonProps = {
   text: string;
   idleLabel?: string;
   bare?: boolean;
+  buttonRef?: (element: HTMLButtonElement) => void;
   buttonAttributes?: SolidJSX.ButtonHTMLAttributes<HTMLButtonElement> & {
     [name: `data-${string}`]: string | number | boolean | undefined;
   };
@@ -27,7 +28,10 @@ export function CopyButton(props: CopyButtonProps): SolidJSX.Element {
             class={props.bare ? "chat-copy-btn" : "btn btn--xs chat-copy-btn"}
             type="button"
             aria-label={label()}
-            ref={nativeListener("click", (event) => void handleCopyButton(event, text, label()))}
+            ref={[
+              (element) => props.buttonRef?.(element),
+              nativeListener("click", (event) => void handleCopyButton(event, text, label())),
+            ]}
           >
             <span class="chat-copy-btn__icon" aria-hidden="true">
               <span class="chat-copy-btn__icon-copy">

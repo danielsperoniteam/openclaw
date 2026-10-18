@@ -99,11 +99,19 @@ describe("conversation position rail scroll rendering", () => {
     const transcript = (host.transcript = createChatTranscript(() => "rail-notification", {
       canFollowEnd: () => false,
     }));
+    const messageElements = transcript.renderSession(
+      "agent:main:rail-notification",
+      (session) => session.messageElements,
+    );
     const rows: TestContentRow[] = Array.from({ length: 40 }, (_, index) => ({
       kind: "content",
       key: `row-${index}`,
       content: (
-        <div class="chat-bubble" data-entry-id={`row-${index}`}>
+        <div
+          ref={messageElements.forKey(`row-${index}`)}
+          class="chat-bubble"
+          data-entry-id={`row-${index}`}
+        >
           {index}
         </div>
       ),
@@ -210,7 +218,7 @@ describe("conversation position rail scroll rendering", () => {
       };
       // A stream commit can dirty the transcript without changing any markers.
       rows[0]!.content = (
-        <div class="chat-bubble" data-entry-id="row-0">
+        <div ref={messageElements.forKey("row-0")} class="chat-bubble" data-entry-id="row-0">
           Updated content
         </div>
       );
