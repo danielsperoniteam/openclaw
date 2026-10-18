@@ -22,7 +22,7 @@ import {
   LightboxImageQualityStatus,
   lightboxImageStyle,
 } from "./image-lightbox-view.tsx";
-import type { ImageLightboxProps } from "./image-lightbox.tsx";
+import type { ImageLightboxProps } from "./image-lightbox.types.ts";
 import { Icon } from "./solid/icon.tsx";
 import imageLightboxStyles from "./image-lightbox.css?inline";
 import "./modal-dialog.ts";
