@@ -86,6 +86,39 @@ export function registerGatewayCronContextTests({
     const context = { terminalSessions: {}, resolveGatewayContext: () => context } as never;
     return context;
   };
+  function ownedService(...args: Parameters<typeof createCronService>) {
+    const state = createCronService(...args);
+    return Object.assign(state, {
+      [Symbol.dispose]() {
+        state.cron.stop();
+        vi.useRealTimers();
+      },
+    });
+  }
+  function callerFixture(
+    name: string,
+    scope: Parameters<typeof withPluginRuntimeGatewayRequestScope>[0],
+  ) {
+    const caller = {
+      active: true,
+      assertCurrent: captureGatewayToolCallerAssertion(),
+      run<T>(run: () => T) {
+        return withGatewayToolCallerIdentity(
+          {
+            agentId: "main",
+            sessionKey: `agent:main:${name}`,
+            operationalRunInstance: { runId: name, instanceId: `${name}-instance` },
+            receiptAuthority: () => caller.active,
+          },
+          () => {
+            caller.assertCurrent = captureGatewayToolCallerAssertion();
+            return withPluginRuntimeGatewayRequestScope(scope, run);
+          },
+        );
+      },
+    };
+    return caller;
+  }
   it.each(["main", "agent:ops:cron:job-1:run:one"])(
     "keeps a targeted global wake on its selected agent's stored route (%s)",
     async (sessionKey) => {
@@ -144,12 +177,16 @@ export function registerGatewayCronContextTests({
     const context = gatewayContext();
     const creatorContext = new AsyncLocalStorage<string>();
     const creatorWork = new AsyncWorkScope();
-    let requestContextActive = true;
     const retiredRequestContext = {
       terminalSessions: { retired: true },
-      resolveGatewayContext: () => (requestContextActive ? retiredRequestContext : undefined),
+      resolveGatewayContext: () => (caller.active ? retiredRequestContext : undefined),
     } as never;
     const retiredRequestClient = { id: "retired-request" } as never;
+    const caller = callerFixture("schedule-creator", {
+      context: retiredRequestContext,
+      client: retiredRequestClient,
+      isWebchatConnect: () => false,
+    } as never);
     let observed: unknown = "never-ran";
     let observedClient: unknown = "never-ran";
     let observedCreator: unknown = "never-ran";
@@ -170,211 +207,135 @@ export function registerGatewayCronContextTests({
       return { status: "ok", text: "done" } as never;
     });
 
-    const state = runWithSpawnBroker(broker, () =>
-      createCronService(cfg, {
+    using state = runWithSpawnBroker(broker, () =>
+      ownedService(cfg, {
         scheduler: createTestGatewayScheduler(clock.clock),
         resolveGatewayContext: () => context,
       }),
     );
-    try {
-      await state.cron.start();
-      await addAgentTurnJob(state, "scheduled-isolated", "run it", scheduledJob());
-      const cronState = getCronState(state);
-      const onEvent = cronState.deps.onEvent;
-      cronState.deps.onEvent = (event, eventContext) => {
-        onEvent?.(event, eventContext);
-        if (event.action === "finished") {
-          settlementContext = getInProcessGatewayToolContext();
-          settled.resolve();
-        }
+    await state.cron.start();
+    await addAgentTurnJob(state, "scheduled-isolated", "run it", scheduledJob());
+    const cronState = getCronState(state);
+    const onEvent = cronState.deps.onEvent;
+    cronState.deps.onEvent = (event, eventContext) => {
+      onEvent?.(event, eventContext);
+      if (event.action === "finished") {
+        settlementContext = getInProcessGatewayToolContext();
+        settled.resolve();
+      }
+    };
+    const creatorScope = await creatorWork.run(() =>
+      creatorContext.run("expired creator", () =>
+        caller.run(() => {
+          refreshCronScheduler(cronState);
+          return AsyncLocalStorage.snapshot();
+        }),
+      ),
+    );
+    caller.active = false;
+    await creatorWork.drain();
+    await creatorScope(() => clock.advanceBy(60_000));
+    await ran.promise;
+    await settled.promise;
+    expect({ observedCreator, observedWork, observedClient }).toEqual({
+      observedCreator: undefined,
+      observedWork: "completed",
+      observedClient: undefined,
+    });
+    expect(settlementContext).toBe(context);
+    expect(observed).toBe(context);
+    expect(observedBroker).toBe(broker);
+    expect(() => assertScheduledCaller?.("chat.history")).not.toThrow();
+    expect(() => caller.assertCurrent?.("chat.history")).toThrow(
+      "agent tool caller authority is no longer active",
+    );
+  });
+
+  it.each(["absent", "retired", "heartbeat"] as const)(
+    "exposes only a live scheduler-owned context (%s)",
+    async (mode) => {
+      const name = `server-cron-gateway-context-${mode}`;
+      const { cfg, clock } =
+        mode === "absent" ? { cfg: config(name), clock: undefined } : timedConfig(name, "02");
+      const context =
+        mode === "retired"
+          ? ({ terminalSessions: {}, resolveGatewayContext: () => undefined } as never)
+          : gatewayContext();
+      const ran = createDeferred();
+      let observed: unknown = "never-ran";
+      const observe = () => {
+        observed = getInProcessGatewayToolContext();
+        ran.resolve();
       };
-      const creatorScope = await creatorWork.run(() =>
-        creatorContext.run("expired creator", () =>
-          withGatewayToolCallerIdentity(
-            {
-              agentId: "main",
-              sessionKey: "agent:main:schedule-creator",
-              operationalRunInstance: { runId: "creator-run", instanceId: "creator-instance" },
-              receiptAuthority: () => requestContextActive,
-            },
-            () =>
-              withPluginRuntimeGatewayRequestScope(
-                {
-                  context: retiredRequestContext,
-                  client: retiredRequestClient,
-                  isWebchatConnect: () => false,
-                } as never,
-                () => {
-                  refreshCronScheduler(cronState);
-                  return {
-                    run: AsyncLocalStorage.snapshot(),
-                    assertCurrent: captureGatewayToolCallerAssertion(),
-                  };
-                },
-              ),
-          ),
-        ),
+      if (mode === "heartbeat") {
+        requestHeartbeatAndWaitMock.mockImplementationOnce(async () => {
+          observe();
+          return { status: "ran", durationMs: 1 };
+        });
+      } else {
+        runCronIsolatedAgentTurnMock.mockImplementationOnce(async () => {
+          observe();
+          return { status: "ok", text: "done" } as never;
+        });
+      }
+      using state = ownedService(
+        cfg,
+        clock
+          ? {
+              scheduler: createTestGatewayScheduler(clock.clock),
+              resolveGatewayContext: () => context,
+            }
+          : undefined,
       );
-      requestContextActive = false;
-      await creatorWork.drain();
-
-      await creatorScope.run(() => clock.advanceBy(60_000));
-      await ran.promise;
-      await settled.promise;
-
-      expect(observedCreator).toBeUndefined();
-      expect(observedWork).toBe("completed");
-      expect(settlementContext).toBe(context);
-      expect(observed).toBe(context);
-      expect(observedClient).toBeUndefined();
-      expect(observedBroker).toBe(broker);
-      expect(() => assertScheduledCaller?.("chat.history")).not.toThrow();
-      expect(() => creatorScope.assertCurrent?.("chat.history")).toThrow(
-        "agent tool caller authority is no longer active",
-      );
-    } finally {
-      state.cron.stop();
-      vi.useRealTimers();
-    }
-  });
-
-  it("leaves a scheduler-triggered isolated run without context when no resolver is wired", async () => {
-    const cfg = config("server-cron-scheduled-gateway-context-absent");
-    let observed: unknown = "never-ran";
-    runCronIsolatedAgentTurnMock.mockImplementationOnce(async () => {
-      observed = getInProcessGatewayToolContext();
-      return { status: "ok", text: "done" } as never;
-    });
-
-    const state = createCronService(cfg);
-    try {
-      const job = await addAgentTurnJob(state, "scheduled-isolated-no-resolver", "run it", {
-        deleteAfterRun: false,
+      if (clock) {
+        await state.cron.start();
+      }
+      const addJob = mode === "heartbeat" ? addSystemEventJob : addAgentTurnJob;
+      const job = await addJob(state, name, "run it", {
+        ...(clock ? scheduledJob() : { deleteAfterRun: false }),
+        ...(mode === "heartbeat" ? { sessionTarget: "main", wakeMode: "now" } : {}),
       });
-
-      await state.cron.run(job.id, "force");
-
-      expect(observed).toBeUndefined();
-    } finally {
-      state.cron.stop();
-    }
-  });
-
-  it("withholds a retired gateway context from a scheduled run", async () => {
-    const { cfg, clock } = timedConfig("server-cron-retired-gateway-context", "02");
-    // A process-wide holder must not lend a retired Gateway generation to queued work.
-    const retiredContext = {
-      terminalSessions: {},
-      resolveGatewayContext: () => undefined,
-    } as never;
-    let observed: unknown = "never-ran";
-    const ran = createDeferred();
-    runCronIsolatedAgentTurnMock.mockImplementationOnce(async () => {
-      observed = getInProcessGatewayToolContext();
-      ran.resolve();
-      return { status: "ok", text: "done" } as never;
-    });
-
-    const state = createCronService(cfg, {
-      scheduler: createTestGatewayScheduler(clock.clock),
-      resolveGatewayContext: () => retiredContext,
-    });
-    try {
-      await state.cron.start();
-      await addAgentTurnJob(state, "retired-context", "run it", scheduledJob());
-
-      await clock.advanceBy(60_000);
+      if (clock) {
+        await clock.advanceBy(60_000);
+      } else {
+        await state.cron.run(job.id, "force");
+      }
       await ran.promise;
-
-      expect(observed).toBeUndefined();
-    } finally {
-      state.cron.stop();
-      vi.useRealTimers();
-    }
-  });
-
-  it("gives a scheduled heartbeat wake a resolvable gateway context", async () => {
-    const { cfg, clock } = timedConfig("server-cron-heartbeat-gateway-context", "03");
-    const context = gatewayContext();
-    let observed: unknown = "never-ran";
-    const ran = createDeferred();
-    requestHeartbeatAndWaitMock.mockImplementationOnce(async () => {
-      observed = getInProcessGatewayToolContext();
-      ran.resolve();
-      return { status: "ran", durationMs: 1 };
-    });
-
-    const state = createCronService(cfg, {
-      scheduler: createTestGatewayScheduler(clock.clock),
-      resolveGatewayContext: () => context,
-    });
-    try {
-      await state.cron.start();
-      await addSystemEventJob(state, "scheduled-heartbeat", "run it", {
-        ...scheduledJob(),
-        sessionTarget: "main",
-        wakeMode: "now",
-      });
-      await clock.advanceBy(60_000);
-      await ran.promise;
-
-      expect(observed).toBe(context);
-    } finally {
-      state.cron.stop();
-      vi.useRealTimers();
-    }
-  });
+      expect(observed).toBe(mode === "heartbeat" ? context : undefined);
+    },
+  );
 
   it("replaces an RPC-inherited gateway context with the scheduler owner after activation", async () => {
     const cfg = config("server-cron-rpc-gateway-context");
     const rpcContext = { terminalSessions: { rpc: true } } as never;
-    const schedulerContext = {
-      terminalSessions: { scheduler: true },
-      resolveGatewayContext: () => schedulerContext,
-    } as never;
+    const schedulerContext = gatewayContext();
     const resolveGatewayContext = vi.fn(() => schedulerContext);
     let observed: unknown = "never-ran";
-    let callerActive = true;
     let assertCaller: ReturnType<typeof captureGatewayToolCallerAssertion>;
-    let assertInitiatingCaller: ((method?: string) => void) | undefined;
+    const caller = callerFixture("manual-run", {
+      context: rpcContext,
+      isWebchatConnect: () => false,
+    } as never);
     runCronIsolatedAgentTurnMock.mockImplementationOnce(async () => {
       observed = getInProcessGatewayToolContext();
       assertCaller = captureGatewayToolCallerAssertion();
       return { status: "ok", text: "done" } as never;
     });
 
-    const state = createCronService(cfg, { resolveGatewayContext });
-    try {
-      const job = await addAgentTurnJob(state, "rpc-isolated", "run it", {
-        deleteAfterRun: false,
-      });
+    using state = ownedService(cfg, { resolveGatewayContext });
+    const job = await addAgentTurnJob(state, "rpc-isolated", "run it", {
+      deleteAfterRun: false,
+    });
 
-      await withGatewayToolCallerIdentity(
-        {
-          agentId: "main",
-          sessionKey: "agent:main:manual-run",
-          operationalRunInstance: { runId: "manual-run", instanceId: "manual-instance" },
-          receiptAuthority: () => callerActive,
-        },
-        () => {
-          assertInitiatingCaller = captureGatewayToolCallerAssertion();
-          return withPluginRuntimeGatewayRequestScope(
-            { context: rpcContext, isWebchatConnect: () => false } as never,
-            () => state.cron.run(job.id, "force"),
-          );
-        },
-      );
+    await caller.run(() => state.cron.run(job.id, "force"));
 
-      expect(observed).toBe(schedulerContext);
-      expect(assertCaller).toBeUndefined();
-      expect(assertInitiatingCaller).toBeTypeOf("function");
-      expect(() => assertInitiatingCaller?.("chat.history")).not.toThrow();
-      callerActive = false;
-      expect(() => assertInitiatingCaller?.("chat.history")).toThrow(
-        "agent tool caller authority is no longer active",
-      );
-    } finally {
-      state.cron.stop();
-    }
+    expect(observed).toBe(schedulerContext);
+    expect(assertCaller).toBeUndefined();
+    expect(caller.assertCurrent).toBeTypeOf("function");
+    expect(() => caller.assertCurrent?.("chat.history")).not.toThrow();
+    caller.active = false;
+    expect(() => caller.assertCurrent?.("chat.history")).toThrow(
+      "agent tool caller authority is no longer active",
+    );
   });
 }

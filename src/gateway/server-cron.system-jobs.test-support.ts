@@ -50,6 +50,7 @@ export function registerGatewayCronSystemJobTests({
     overrides?: Partial<Omit<CronJobCreate, "name" | "payload">>,
   ) => ReturnType<CronFixture["cron"]["add"]>;
 }) {
+  const heartbeatDefaults = (every: string) => ({ defaults: { heartbeat: { every } } });
   it("finishes an accepted config replacement without a second reconciliation request", async () => {
     const cfg = {
       ...createCronConfig("server-cron-accepted-replacement"),
@@ -83,12 +84,9 @@ export function registerGatewayCronSystemJobTests({
   it("supersedes an in-flight heartbeat monitor reconciliation before mutation", async () => {
     const autoConfig = {
       ...createCronConfig("server-cron-monitor-reconcile-auto"),
-      agents: { defaults: { heartbeat: { every: "1h" } } },
-    } satisfies OpenClawConfig;
-    const offConfig = {
-      ...autoConfig,
-      agents: { defaults: { heartbeat: { every: "0m" } } },
-    } satisfies OpenClawConfig;
+      agents: heartbeatDefaults("1h"),
+    };
+    const offConfig = { ...autoConfig, agents: heartbeatDefaults("0m") };
     await withCronService(autoConfig, async (state) => {
       await expect(state.reconcileSystemJobs()).resolves.toBe("converged");
       const held = holdInventory(state);
@@ -119,15 +117,11 @@ export function registerGatewayCronSystemJobTests({
       const cfg = {
         ...baseConfig,
         cron: { ...baseConfig.cron, enabled: false },
-        agents: {
-          ownership: "explicit",
-          defaults: { heartbeat: { every: "1h" } },
-          entries: { a: {}, b: {} },
-        },
+        agents: { ownership: "explicit", ...heartbeatDefaults("1h"), entries: { a: {}, b: {} } },
       } satisfies OpenClawConfig;
       const replacement = {
         ...cfg,
-        agents: { ...cfg.agents, defaults: { heartbeat: { every: "2h" } } },
+        agents: { ...cfg.agents, ...heartbeatDefaults("2h") },
       } satisfies OpenClawConfig;
       const state = loadCronService(cfg);
       const addJob = state.cron.add.bind(state.cron);
@@ -173,11 +167,11 @@ export function registerGatewayCronSystemJobTests({
             job.declarationKey?.startsWith("heartbeat:"),
           );
           expect(
-            jobs.map((job) => job.agentId).toSorted((a, b) => String(a).localeCompare(String(b))),
-          ).toEqual(["a", "b"]);
-          for (const job of jobs) {
-            expect(job).toMatchObject({ schedule: { everyMs: 7_200_000 } });
-          }
+            jobs.toSorted((a, b) => String(a.agentId).localeCompare(String(b.agentId))),
+          ).toMatchObject([
+            { agentId: "a", schedule: { everyMs: 7_200_000 } },
+            { agentId: "b", schedule: { everyMs: 7_200_000 } },
+          ]);
         }
       } finally {
         try {
@@ -194,11 +188,10 @@ export function registerGatewayCronSystemJobTests({
     const clock = createGatewaySchedulerClock(Date.now());
     const cfg = createCronConfig("server-cron-monitor-partial-failure");
     const state = loadCronService(cfg, { scheduler: createTestGatewayScheduler(clock.clock) });
-    const inventory = vi
-      .spyOn(state.cron, "list")
-      .mockRejectedValueOnce(new Error("inventory failed"));
-
     try {
+      const inventory = vi
+        .spyOn(state.cron, "list")
+        .mockRejectedValueOnce(new Error("inventory failed"));
       await expect(state.reconcileSystemJobs()).resolves.toBe("retry-scheduled");
       state.cron.stop();
       const callsBeforeStop = inventory.mock.calls.length;
@@ -216,7 +209,7 @@ export function registerGatewayCronSystemJobTests({
         cron: { enabled: false },
         agents: {
           ownership: "explicit",
-          defaults: { heartbeat: { every: "1h" } },
+          ...heartbeatDefaults("1h"),
           entries: { main: {}, retiring: {} },
         },
       } satisfies OpenClawConfig;

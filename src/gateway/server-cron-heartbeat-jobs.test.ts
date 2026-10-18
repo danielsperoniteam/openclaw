@@ -7,6 +7,21 @@ import type { CronJob, CronJobCreate } from "../cron/types.js";
 const logger = { warn: vi.fn() };
 
 type AddOptions = { matchesExisting?: (job: CronJob) => boolean };
+type Add = (
+  input: CronJobCreate,
+  options?: AddOptions & { commitGuard?: () => void },
+) => Promise<unknown>;
+
+function reconcile(cfg: OpenClawConfig, add: Add, jobs: CronJob[] = [], commitGuard?: () => void) {
+  const remove = vi.fn(async (_id: string) => ({ ok: true }));
+  const result = reconcileHeartbeatMonitorJobs({
+    cron: { add, remove, list: vi.fn(async () => jobs) } as never,
+    cfg,
+    logger,
+    commitGuard,
+  });
+  return { result, remove };
+}
 
 function heartbeatConfig(
   every: string,
@@ -63,10 +78,6 @@ describe("reconcileHeartbeatMonitorJobs", () => {
         }
         return { ok: true, removed: true };
       });
-      const cfg = heartbeatConfig(
-        "30m",
-        mutation === "add" ? { a: {}, b: {}, c: {} } : { main: {} },
-      );
       try {
         const result = await reconcileHeartbeatMonitorJobs({
           cron: {
@@ -76,7 +87,7 @@ describe("reconcileHeartbeatMonitorJobs", () => {
               mutation === "remove" ? [monitorJob("a"), monitorJob("b"), monitorJob("c")] : [],
             ),
           } as never,
-          cfg,
+          cfg: heartbeatConfig("30m", mutation === "add" ? { a: {}, b: {}, c: {} } : { main: {} }),
           logger,
         });
         expect(result).toEqual({ ok: false });
@@ -101,26 +112,19 @@ describe("reconcileHeartbeatMonitorJobs", () => {
         throw revoked;
       }
     };
-    const add = vi.fn(
-      async (input: { agentId: string }, options?: { commitGuard?: () => void }) => {
-        options?.commitGuard?.();
-        checkpoint ??= new Promise((resolve) => {
-          setImmediate(() => {
-            current = false;
-            resolve();
-          });
+    const add = vi.fn(async (input: CronJobCreate, options?: { commitGuard?: () => void }) => {
+      options?.commitGuard?.();
+      checkpoint ??= new Promise((resolve) => {
+        setImmediate(() => {
+          current = false;
+          resolve();
         });
-        return monitorJob(input.agentId);
-      },
-    );
+      });
+      return monitorJob(expectDefined(input.agentId, "heartbeat agent"));
+    });
     try {
       await expect(
-        reconcileHeartbeatMonitorJobs({
-          cron: { add, remove: vi.fn(), list: vi.fn(async () => []) } as never,
-          cfg: heartbeatConfig("30m", { a: {}, b: {} }),
-          logger,
-          commitGuard,
-        }),
+        reconcile(heartbeatConfig("30m", { a: {}, b: {} }), add, [], commitGuard).result,
       ).rejects.toBe(revoked);
       expect(add).toHaveBeenCalledTimes(1);
     } finally {
@@ -132,8 +136,7 @@ describe("reconcileHeartbeatMonitorJobs", () => {
     const add = vi.fn(async (input: CronJobCreate, _options?: AddOptions) => ({
       job: input,
     }));
-    const remove = vi.fn(async () => ({ ok: true }));
-    const list = vi.fn(async () => [
+    const jobs = [
       monitorJob("stale-agent"),
       {
         ...monitorJob("main"),
@@ -147,19 +150,18 @@ describe("reconcileHeartbeatMonitorJobs", () => {
         id: "prefix-collider",
         payload: { kind: "systemEvent", text: "not a monitor" },
       } as CronJob,
-    ]);
-    const cfg = {
-      agents: {
-        defaults: { heartbeat: { every: "15m" } },
-        entries: { main: {}, ops: {} },
+    ];
+    const { result, remove } = reconcile(
+      {
+        agents: {
+          defaults: { heartbeat: { every: "15m" } },
+          entries: { main: {}, ops: {} },
+        },
       },
-    } as OpenClawConfig;
-
-    await reconcileHeartbeatMonitorJobs({
-      cron: { add, list, remove } as never,
-      cfg,
-      logger,
-    });
+      add,
+      jobs,
+    );
+    await result;
 
     const declarationKeys = add.mock.calls.map(([input]) => input.declarationKey);
     expect(declarationKeys.toSorted((a, b) => (a ?? "").localeCompare(b ?? ""))).toEqual([
@@ -179,35 +181,30 @@ describe("reconcileHeartbeatMonitorJobs", () => {
       // Deterministic phase anchor spreads multi-agent beats inside the interval.
       expect(input.schedule.anchorMs).toBeGreaterThanOrEqual(0);
       expect(input.schedule.anchorMs).toBeLessThan(15 * 60_000);
-      if (!opts) {
-        throw new Error("expected system-owned add options");
-      }
+      const matches = expectDefined(opts, "system-owned add options").matchesExisting;
       const agentId = expectDefined(input.agentId, "heartbeat agent");
-      expect(opts.matchesExisting?.(monitorJob(agentId))).toBe(true);
-      expect(opts.matchesExisting?.(monitorJob("another-agent"))).toBe(false);
       expect(
-        opts.matchesExisting?.({
-          ...monitorJob(agentId),
-          payload: { kind: "systemEvent", text: "user" },
-        } as CronJob),
-      ).toBe(false);
+        [
+          monitorJob(agentId),
+          monitorJob("another-agent"),
+          {
+            ...monitorJob(agentId),
+            payload: { kind: "systemEvent", text: "user" },
+          } as CronJob,
+        ].map((job) => matches?.(job)),
+      ).toEqual([true, false, false]);
     }
     expect(remove).toHaveBeenCalledExactlyOnceWith("job-stale-agent", { systemOwned: true });
   });
 
   it("keeps a stable disabled monitor when heartbeat cadence is disabled", async () => {
     const add = vi.fn(async (_input: { declarationKey?: string }, _options?: AddOptions) => ({}));
-    const remove = vi.fn(async () => ({ ok: true }));
-    const list = vi.fn(async () => [monitorJob("main")]);
-    const cfg = {
-      agents: { defaults: { heartbeat: { every: "0m" } } },
-    } as OpenClawConfig;
-
-    await reconcileHeartbeatMonitorJobs({
-      cron: { add, list, remove } as never,
-      cfg,
-      logger,
-    });
+    const { result, remove } = reconcile(
+      { agents: { defaults: { heartbeat: { every: "0m" } } } },
+      add,
+      [monitorJob("main")],
+    );
+    await result;
 
     expect(add).toHaveBeenCalledTimes(1);
     expect(add.mock.calls[0]?.[0]).toEqual(

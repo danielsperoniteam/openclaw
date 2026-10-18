@@ -4,6 +4,7 @@ import type { IncomingMessage } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 
 const fixture = vi.hoisted(() => ({
   root: "",
@@ -32,14 +33,7 @@ import {
 } from "./server-control-ui-root.js";
 import { makeMockHttpResponse } from "./test-http-response.js";
 
-const buildResult = {
-  stdout: "",
-  stderr: "",
-  code: 0,
-  signal: null,
-  killed: false,
-  termination: "exit",
-};
+const buildResult = { code: 0, termination: "exit" };
 const assetId = (buildId: string) => `${buildId}-${"a".repeat(64)}`;
 const macRoot = () =>
   path.join(fixture.root, "OpenClaw.app", "Contents", "Resources", "control-ui");
@@ -96,21 +90,12 @@ describe("source-selected Control UI identity preparation", () => {
   });
 
   test("prepares a complete stale source UI before publishing its shared root", async () => {
-    const selectedRoot = fixture.selectedRoot;
-    const buildId = fixture.buildId;
+    const { selectedRoot, buildId } = fixture;
     const provenancePath = path.join(fixture.root, "dist", "build-info.json");
     const provenance = JSON.stringify({ buildId });
     await fs.writeFile(provenancePath, provenance);
-    let finishBuild!: () => Promise<void>;
-    fixture.build.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finishBuild = async () => {
-            await writeUi(selectedRoot, buildId);
-            resolve(buildResult);
-          };
-        }),
-    );
+    const build = createDeferred<typeof buildResult>();
+    fixture.build.mockReturnValueOnce(build.promise);
     const { lifecycle, warn } = createLifecycle();
     const rootReference = lifecycle.state;
     expect(rootReference).toEqual({ kind: "preparing" });
@@ -125,7 +110,8 @@ describe("source-selected Control UI identity preparation", () => {
     fixture.selectedRoot = path.join(fixture.root, "other", "control-ui");
     fixture.buildId = "2026.9.1-runtime-c";
     await writeUi(fixture.selectedRoot, fixture.buildId);
-    await finishBuild();
+    await writeUi(selectedRoot, buildId);
+    build.resolve(buildResult);
     await preparing;
 
     expect(lifecycle.state).toBe(rootReference);
@@ -144,57 +130,56 @@ describe("source-selected Control UI identity preparation", () => {
     expect(await fs.readFile(provenancePath, "utf8")).toBe(provenance);
   });
 
-  test.each(["matching", "dev", "configured", "macOS"])(
-    "preserves the %s root without rebuilding",
-    async (kind) => {
-      if (kind === "macOS") {
+  test.each([
+    ["matching", undefined, "source", "bundled"],
+    ["dev", "dev", "source", "bundled"],
+    ["configured", "custom-build", "configured", "resolved"],
+    ["macOS", undefined, "mac", "resolved"],
+    ["unchanged", "2026.9.1-runtime-a", "source", "failed"],
+    ["stale", "2026.9.1-runtime-a", "mac", "failed"],
+    ["incomplete", "2026.9.1-runtime-a", "mac", "failed"],
+  ] as const)(
+    "prepares the %s root without substituting another identity",
+    async (kind, buildId, location, expected) => {
+      const failed = expected === "failed";
+      const brokenMac = failed && location === "mac";
+      if (brokenMac) {
+        await writeUi(fixture.selectedRoot, fixture.buildId);
+      }
+      if (location === "mac") {
         fixture.selectedRoot = macRoot();
       }
-      await writeUi(
-        fixture.selectedRoot,
-        kind === "dev" ? "dev" : kind === "configured" ? "custom-build" : fixture.buildId,
-      );
-      const { lifecycle, warn } = createLifecycle(
-        kind === "configured" ? fixture.selectedRoot : undefined,
-      );
-      expect(lifecycle.state).toMatchObject({
-        kind: kind === "configured" || kind === "macOS" ? "resolved" : "bundled",
-        path: fixture.selectedRoot,
-      });
-      await lifecycle.start();
-      await lifecycle.stop();
-      expect(fixture.build).not.toHaveBeenCalled();
-      expect(warn).not.toHaveBeenCalled();
-    },
-  );
-
-  test("reports an unchanged UI after a successful builder instead of publishing it", async () => {
-    fixture.build.mockResolvedValueOnce(buildResult);
-    const { lifecycle, warn } = createLifecycle();
-    await lifecycle.start();
-    await lifecycle.stop();
-    expect(lifecycle.state).toEqual({ kind: "failed" });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("expected 2026.9.1-runtime-b"));
-    expect(fixture.build).toHaveBeenCalledOnce();
-  });
-
-  test.each(["stale", "incomplete"])(
-    "does not mask %s macOS Resources with a healthy source dist",
-    async (kind) => {
-      await writeUi(fixture.selectedRoot, fixture.buildId);
-      fixture.selectedRoot = macRoot();
-      await writeUi(fixture.selectedRoot, "2026.9.1-runtime-a");
+      await writeUi(fixture.selectedRoot, buildId ?? fixture.buildId);
       if (kind === "incomplete") {
         await fs.unlink(path.join(fixture.selectedRoot, "assets", "startup.js"));
       }
-      const { lifecycle, warn } = createLifecycle();
-      expect(lifecycle.state).toEqual({ kind: "preparing" });
+      if (kind === "unchanged") {
+        fixture.build.mockResolvedValueOnce(buildResult);
+      }
+      const { lifecycle, warn } = createLifecycle(
+        location === "configured" ? fixture.selectedRoot : undefined,
+      );
+      expect(lifecycle.state).toMatchObject(
+        failed
+          ? { kind: "preparing" }
+          : {
+              kind: expected,
+              path: fixture.selectedRoot,
+            },
+      );
       await lifecycle.start();
       await lifecycle.stop();
-      expect(lifecycle.state).toEqual({ kind: "failed" });
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining(fixture.selectedRoot));
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("Reinstall OpenClaw"));
-      expect(fixture.build).not.toHaveBeenCalled();
+      expect(fixture.build).toHaveBeenCalledTimes(kind === "unchanged" ? 1 : 0);
+      if (failed) {
+        expect(lifecycle.state).toEqual({ kind: "failed" });
+        for (const message of brokenMac
+          ? [fixture.selectedRoot, "Reinstall OpenClaw"]
+          : ["expected 2026.9.1-runtime-b"]) {
+          expect(warn).toHaveBeenCalledWith(expect.stringContaining(message));
+        }
+      } else {
+        expect(warn).not.toHaveBeenCalled();
+      }
     },
   );
 });
