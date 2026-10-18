@@ -104,6 +104,24 @@ const originalConsole = loggingState.rawConsole;
 const stdout: string[] = [];
 const stderr: string[] = [];
 const result = { status: "ok", mode: "npm", steps: [], durationMs: 0 };
+const finalizationOptions = {
+  candidateRuntime: true,
+  adoptedFinalization: true,
+  onGatewayStartAttempted: expect.any(Function),
+};
+function finalizationParams(runId = "synthetic-run", root = "/synthetic") {
+  return {
+    root,
+    opts: { json: true, run: { runId, env: {}, activationTimeoutMs: 1_000 } },
+    rollbackBlockedReason: "state-migrated-no-rollback",
+    preUpdatePluginInstallRecords: {},
+    updateStepTimeoutMs: 1_000,
+    result: { ...result, steps: [], runId },
+  };
+}
+function workerInput<T>(params: T) {
+  return { executor: {}, bufferedSteps: [], resultPath: "/synthetic/result.json", params };
+}
 
 beforeEach(() => {
   vi.resetModules();
@@ -179,18 +197,12 @@ it.each(["json", "human", "check"] as const)(
       return { runId: "synthetic-run", status: "ok" };
     });
     await runWorker(
-      {
-        executor: {},
-        bufferedSteps: [],
-        resultPath: "/synthetic/result.json",
-        params: {
-          root: "/synthetic",
-          opts: { json: mode === "json", run: { runId: "synthetic-run", env: {} } },
-          rollbackBlockedReason: "state-migrated-no-rollback",
-          preUpdatePluginInstallRecords: {},
-          result,
-        },
-      },
+      workerInput({
+        ...finalizationParams(),
+        updateStepTimeoutMs: undefined,
+        opts: { json: mode === "json", run: { runId: "synthetic-run", env: {} } },
+        result,
+      }),
       mode === "check" ? "--check" : undefined,
       async () => {
         await Promise.resolve();
@@ -227,16 +239,9 @@ it.each([false, true])(
       ),
     );
     const input = {
-      params: {
-        root: "/fixture/candidate",
-        result: {
-          status: "ok",
-          mode: "npm",
-          root: "/fixture/candidate",
-          runId: "candidate-run",
-          steps: [],
-          durationMs: 0,
-        },
+      ...workerInput({
+        ...finalizationParams("candidate-run", "/fixture/candidate"),
+        result: { ...result, root: "/fixture/candidate", runId: "candidate-run" },
         opts: {
           json: true,
           run: {
@@ -248,11 +253,7 @@ it.each([false, true])(
               : {}),
           },
         },
-        preUpdatePluginInstallRecords: {},
-        updateStepTimeoutMs: 1_000,
-        rollbackBlockedReason: "state-migrated-no-rollback",
-      },
-      bufferedSteps: [],
+      }),
       resultPath: "/fixture/result.json",
     };
     fixture.finish.mockImplementation(async (_params, options) => {
@@ -276,11 +277,7 @@ it.each([false, true])(
           run: { ...input.params.opts.run, executorFence: fixture.fence },
         },
       },
-      {
-        candidateRuntime: true,
-        adoptedFinalization: true,
-        onGatewayStartAttempted: expect.any(Function),
-      },
+      finalizationOptions,
     );
     expect(fixture.fence.assertCurrent).toHaveBeenCalled();
     expect(fixture.writeFile).toHaveBeenCalledExactlyOnceWith(
@@ -312,14 +309,10 @@ it("times the fresh-driver handoff from the previous driver's last receipt", asy
   });
   const steps: unknown[] = [];
   const input = {
-    params: {
-      root: "/fixture/candidate",
+    ...workerInput({
+      ...finalizationParams("handoff-run", "/fixture/candidate"),
       result: { status: "ok", mode: "git", root: "/fixture/candidate", steps, durationMs: 0 },
-      opts: { json: true, run: { runId: "handoff-run", env: {}, activationTimeoutMs: 1_000 } },
-      preUpdatePluginInstallRecords: {},
-      updateStepTimeoutMs: 1_000,
-      rollbackBlockedReason: "state-migrated-no-rollback",
-    },
+    }),
     bufferedSteps: [
       {
         step: "git-verify-head",
@@ -380,74 +373,45 @@ it("times the fresh-driver handoff from the previous driver's last receipt", asy
   ]);
 });
 
+type DeadlineCase = {
+  name: string;
+  version?: number;
+  operator?: string | boolean | null;
+  owner?: string;
+  serialized?: string;
+  expected?: number;
+  restartPending?: boolean;
+  inherited?: number;
+};
+function deadlineCase(name: string, overrides: Partial<DeadlineCase> = {}): DeadlineCase {
+  return {
+    name,
+    version: 1,
+    operator: null,
+    owner: "parent",
+    serialized: "1800",
+    expected: 10_800_000,
+    ...overrides,
+  };
+}
 it.each([
-  {
-    name: "supported omission",
-    version: 1,
-    operator: null,
-    owner: "parent",
-    serialized: "1800",
-    expected: undefined,
-  },
-  {
-    name: "supported omission with foreground restart pending",
-    version: 1,
-    operator: null,
-    owner: "parent",
-    serialized: "1800",
+  deadlineCase("supported omission", { expected: undefined }),
+  deadlineCase("supported omission with foreground restart pending", {
     restartPending: true,
     expected: undefined,
-  },
-  {
-    name: "explicit deadline",
-    version: 1,
-    operator: "1800",
-    owner: "parent",
-    serialized: "1800",
-    expected: 10_800_000,
-  },
-  {
-    name: "unknown version",
-    version: 2,
-    operator: null,
-    owner: "parent",
-    serialized: "1800",
-    expected: 10_800_000,
-  },
-  {
-    name: "mismatched serialization",
-    version: 1,
-    operator: null,
-    owner: "parent",
-    serialized: "900",
-    expected: 10_800_000,
-  },
-  {
-    name: "malformed operator",
-    version: 1,
-    operator: false,
-    owner: "parent",
-    serialized: "1800",
-    expected: 10_800_000,
-  },
-  {
-    name: "wrong completion owner",
-    version: 1,
-    operator: null,
-    owner: "child",
-    serialized: "1800",
-    expected: 10_800_000,
-  },
-  { name: "legacy producer", expected: 10_800_000 },
-  {
-    name: "inherited explicit allowance",
-    version: 1,
-    operator: null,
-    owner: "parent",
-    serialized: "1800",
-    inherited: 12_345,
-    expected: 12_345,
-  },
+  }),
+  deadlineCase("explicit deadline", { operator: "1800" }),
+  deadlineCase("unknown version", { version: 2 }),
+  deadlineCase("mismatched serialization", { serialized: "900" }),
+  deadlineCase("malformed operator", { operator: false }),
+  deadlineCase("wrong completion owner", { owner: "child" }),
+  deadlineCase("legacy producer", {
+    version: undefined,
+    operator: undefined,
+    owner: undefined,
+    serialized: undefined,
+  }),
+  deadlineCase("inherited explicit allowance", { inherited: 12_345, expected: 12_345 }),
 ])("preserves aggregate deadline intent for $name", async (row) => {
   const input = {
     executor: {},
@@ -463,7 +427,7 @@ it.each([
     bufferedSteps: [],
     resultPath: "/synthetic/result.json",
     params: {
-      root: "/synthetic",
+      ...finalizationParams(),
       opts: {
         json: true,
         timeout: row.version === undefined ? undefined : "1800",
@@ -477,8 +441,6 @@ it.each([
         },
       },
       updateStepTimeoutMs: 1_800_000,
-      rollbackBlockedReason: "state-migrated-no-rollback",
-      preUpdatePluginInstallRecords: {},
       result: { ...result, runId: "synthetic-run" },
     },
   };
@@ -505,11 +467,7 @@ it.each([
       expect.objectContaining({
         opts: expect.objectContaining({ timeout: undefined }),
       }),
-      {
-        candidateRuntime: true,
-        adoptedFinalization: true,
-        onGatewayStartAttempted: expect.any(Function),
-      },
+      finalizationOptions,
     );
     expect(fixture.writeFile).toHaveBeenCalledWith(
       input.resultPath,
@@ -547,20 +505,12 @@ it.each(["inspected", "legacy-unavailable", "windows-suspended"] as const)(
             serviceUpdateVerdict: { kind: "owned", root: "/synthetic", fingerprint: "f" },
           };
     const input = {
-      executor: {},
-      bufferedSteps: [],
-      resultPath: "/synthetic/result.json",
-      ...(mode === "windows-suspended" ? { windowsTaskAutoStartSuspended: true } : {}),
-      params: {
-        root: "/synthetic",
+      ...workerInput({
+        ...finalizationParams(),
         shouldRestart: false,
-        updateStepTimeoutMs: 1_000,
-        opts: { json: true, run: { runId: "synthetic-run", env: {}, activationTimeoutMs: 1_000 } },
-        rollbackBlockedReason: "state-migrated-no-rollback",
-        preUpdatePluginInstallRecords: {},
         preManagedServiceStop: transferred,
-        result: { ...result, steps: [], runId: "synthetic-run" },
-      },
+      }),
+      ...(mode === "windows-suspended" ? { windowsTaskAutoStartSuspended: true } : {}),
     };
     fixture.finish.mockImplementation(async (params: { result: typeof result }) => params.result);
     fixture.terminal.mockReturnValue({ runId: "synthetic-run", status: "succeeded", steps: [] });
@@ -571,11 +521,7 @@ it.each(["inspected", "legacy-unavailable", "windows-suspended"] as const)(
         shouldRestart: false,
         preManagedServiceStop: { ...transferred, windowsTaskAutoStartRecovery: undefined },
       }),
-      {
-        candidateRuntime: true,
-        adoptedFinalization: true,
-        onGatewayStartAttempted: expect.any(Function),
-      },
+      finalizationOptions,
     );
     expect(fixture.stopService).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(originalExitCode);

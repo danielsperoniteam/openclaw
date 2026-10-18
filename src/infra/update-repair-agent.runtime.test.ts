@@ -19,7 +19,10 @@ import {
 } from "../plugins/legacy-sdk-resource-host.js";
 import { getOpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
 import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
-import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import {
+  withOpenClawTestState,
+  type OpenClawTestState,
+} from "../test-utils/openclaw-test-state.js";
 import { getInstallationTarget } from "./installation-target-context.js";
 import { openNodeSqliteDatabase } from "./node-sqlite.js";
 import { resolveManagedUpdateLeaseDatabasePath } from "./update-managed-service-handoff-lease.js";
@@ -86,6 +89,32 @@ beforeEach(() => {
       },
     );
 });
+
+function repairTurn(
+  state: OpenClawTestState,
+  overrides: Partial<Parameters<typeof runUpdateRepairTurn>[0]> = {},
+) {
+  const config: OpenClawConfig = { plugins: { enabled: false } };
+  return runUpdateRepairTurn({
+    target: { ...state, installRoot: state.workspaceDir },
+    route: {
+      runner: "embedded",
+      provider: "fixture",
+      model: "repair",
+      modelLabel: "fixture/repair",
+      agentId: "owner",
+      agentDir: state.agentDir("owner"),
+      runConfig: config,
+      sourceConfig: config,
+    },
+    modelFallbacks: [],
+    prompt: "Repair.",
+    timeoutMs: 10_000,
+    maxToolCalls: 1,
+    signal: new AbortController().signal,
+    ...overrides,
+  });
+}
 
 describe("post-failure repair execution", () => {
   it.each([
@@ -183,8 +212,7 @@ describe("post-failure repair execution", () => {
         const execute = () =>
           cleanup.run(() =>
             withUpdateRepairEnvironment(target, () =>
-              runUpdateRepairTurn({
-                target,
+              repairTurn(state, {
                 route: {
                   runner: "embedded",
                   provider: "fixture",
@@ -198,9 +226,6 @@ describe("post-failure repair execution", () => {
                 },
                 modelFallbacks: ["fixture/backup", "fixture/denied"],
                 prompt: "Repair the failed update.",
-                timeoutMs: 10_000,
-                maxToolCalls: 1,
-                signal: new AbortController().signal,
               }),
             ),
           );
@@ -238,7 +263,6 @@ describe("post-failure repair execution", () => {
     "preserves both %s and database cleanup failures and refuses clean completion",
     async (owner) => {
       await withOpenClawTestState({ layout: "home" }, async (state) => {
-        const config: OpenClawConfig = { plugins: { enabled: false } };
         const processFailure = new Error("Synthetic process cleanup failure");
         const databaseFailure = new Error("Synthetic database cleanup failure");
         const close = vi.fn().mockRejectedValueOnce(databaseFailure).mockResolvedValue(undefined);
@@ -266,28 +290,7 @@ describe("post-failure repair execution", () => {
         }
         const cleanup = createAgentCleanupScope();
         try {
-          await expect(
-            cleanup.run(() =>
-              runUpdateRepairTurn({
-                target: { ...state, installRoot: state.workspaceDir },
-                route: {
-                  runner: "embedded",
-                  provider: "fixture",
-                  model: "repair",
-                  modelLabel: "fixture/repair",
-                  agentId: "owner",
-                  agentDir: state.agentDir("owner"),
-                  runConfig: config,
-                  sourceConfig: config,
-                },
-                modelFallbacks: [],
-                prompt: "Repair.",
-                timeoutMs: 10000,
-                maxToolCalls: 1,
-                signal: new AbortController().signal,
-              }),
-            ),
-          ).rejects.toMatchObject({
+          await expect(cleanup.run(() => repairTurn(state))).rejects.toMatchObject({
             message:
               owner === "process"
                 ? "Repair turn and database resource cleanup failed."
@@ -310,26 +313,7 @@ describe("post-failure repair execution", () => {
 
   it("refuses revoked repair authority before starting the runner", async () => {
     await withOpenClawTestState({ layout: "home" }, async (state) => {
-      const config: OpenClawConfig = { plugins: { enabled: false } };
-      const result = await runUpdateRepairTurn({
-        target: { ...state, installRoot: state.workspaceDir },
-        route: {
-          runner: "embedded",
-          provider: "fixture",
-          model: "repair",
-          modelLabel: "fixture/repair",
-          agentId: "owner",
-          agentDir: state.statePath("agents", "owner", "agent"),
-          runConfig: config,
-          sourceConfig: config,
-        },
-        modelFallbacks: [],
-        prompt: "Repair.",
-        timeoutMs: 10_000,
-        maxToolCalls: 1,
-        signal: new AbortController().signal,
-        isCurrent: () => false,
-      });
+      const result = await repairTurn(state, { isCurrent: () => false });
       expect(result).toMatchObject({
         status: "completed",
         toolCalls: 0,
@@ -345,7 +329,6 @@ describe("post-failure repair execution", () => {
 
   it("keeps full authority at tool effect guards when preparation uses live checks", async () => {
     await withOpenClawTestState({ layout: "home" }, async (state) => {
-      const config: OpenClawConfig = { plugins: { enabled: false } };
       let current = true;
       let allowed = false;
       let refusal: unknown;
@@ -363,23 +346,7 @@ describe("post-failure repair execution", () => {
         }
         return { payloads: [{ text: "Stopped." }], meta: { durationMs: 1 } };
       });
-      const result = await runUpdateRepairTurn({
-        target: { ...state, installRoot: state.workspaceDir },
-        route: {
-          runner: "embedded",
-          provider: "fixture",
-          model: "repair",
-          modelLabel: "fixture/repair",
-          agentId: "owner",
-          agentDir: state.statePath("agents", "owner", "agent"),
-          runConfig: config,
-          sourceConfig: config,
-        },
-        modelFallbacks: [],
-        prompt: "Repair.",
-        timeoutMs: 10_000,
-        maxToolCalls: 1,
-        signal: new AbortController().signal,
+      const result = await repairTurn(state, {
         isCurrent: () => current,
         isLive: () => true,
       });

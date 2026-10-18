@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import path from "node:path";
-import { performance } from "node:perf_hooks";
 import { text as readText } from "node:stream/consumers";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { describe, expect, it, vi } from "vitest";
@@ -56,7 +55,6 @@ type TurnDelegation = {
 };
 
 type RepairDiagnostics = {
-  record: (event: string) => void;
   stdoutTail: string;
   stderrTail: string;
 };
@@ -66,7 +64,6 @@ async function runRepairEnvelope(
   diagnostics: RepairDiagnostics,
   delegation?: TurnDelegation,
 ): Promise<UpdateRepairResult | UpdateRepairTurnResult> {
-  diagnostics.record("worker-spawn");
   const child = spawn(
     process.execPath,
     [path.join(params.target.installRoot, "dist", "infra", "update-repair.worker.js")],
@@ -110,7 +107,6 @@ async function runRepairEnvelope(
     return await new Promise((resolve, reject) => {
       child.once("error", reject);
       child.once("close", (code) => {
-        diagnostics.record(`worker-close:${code}`);
         if (code === 0 && result && !failure) {
           resolve(result);
         } else {
@@ -124,7 +120,6 @@ async function runRepairEnvelope(
               ? (raw as Extract<UpdateRepairWorkerMessage, { type: "turn-result" }>)
               : releasedUpdateRepairWorkerMessageSchema.parse(raw);
           if (message.type === "ready") {
-            diagnostics.record("worker-ready");
             if (delegation) {
               if (delegation.executor !== "unowned" && delegation.executor.bindChild) {
                 if (!child.pid) {
@@ -170,10 +165,7 @@ async function runRepairEnvelope(
           } else if (message.type === "validate") {
             const validation = await params.validate(controller.signal);
             child.send({ type: "validation-result", id: message.id, validation });
-          } else if (message.type === "event" && message.event.type === "route-selected") {
-            diagnostics.record("worker-route-selected");
           } else if (message.type === "result" || message.type === "turn-result") {
-            diagnostics.record(`worker-${message.type}`);
             result = message.result;
           }
         })().catch((error: unknown) => {
@@ -247,19 +239,9 @@ describe("update repair with a local model provider", () => {
   ] as const)(
     "preserves released behavior and scopes repair inference ($entry, $phase)",
     async ({ phase, entry }) => {
-      const startedAt = performance.now();
-      const events: Array<{ event: string; elapsedMs: number }> = [];
-      let droppedEvents = 0;
       const diagnostics: RepairDiagnostics = {
         stdoutTail: "",
         stderrTail: "",
-        record(event) {
-          if (events.length < 64) {
-            events.push({ event: event.slice(0, 128), elapsedMs: performance.now() - startedAt });
-          } else {
-            droppedEvents += 1;
-          }
-        },
       };
       await withOpenClawTestState(
         { prefix: "update-repair-boundary-", layout: "home" },
@@ -272,12 +254,10 @@ describe("update repair with a local model provider", () => {
           await withServer(
             (request, response) => {
               providerCalls.push(`${request.method} ${request.url}`);
-              diagnostics.record(`provider-request:${request.method} ${request.url}`);
               void (async () => {
                 if (request.method === "GET" && request.url === "/v1/models") {
                   response.writeHead(200, { "content-type": "application/json" });
                   response.end(JSON.stringify({ data: [{ id: "repair-model", object: "model" }] }));
-                  diagnostics.record("provider-models-response");
                   return;
                 }
                 if (request.method !== "POST" || request.url !== "/v1/responses") {
@@ -286,11 +266,9 @@ describe("update repair with a local model provider", () => {
                 }
                 const body = JSON.parse(await readText(request)) as ModelRequest;
                 requests.push(body);
-                diagnostics.record("provider-body-parsed");
                 if (body.tools?.some((tool) => tool.name === "write") && !issuedScopeProbe) {
                   issuedScopeProbe = true;
                   writeRepairToolCall(response, "write");
-                  diagnostics.record("provider-write-response");
                   return;
                 }
                 if (body.tools?.some((tool) => tool.name === "exec") && !issuedRepair) {
@@ -302,10 +280,8 @@ describe("update repair with a local model provider", () => {
                       state.configPath,
                       JSON.stringify({ ...current, commands: { ownerAllowFrom: ["other-owner"] } }),
                     );
-                    diagnostics.record("requester-revoked");
                   }
                   writeRepairToolCall(response, "exec");
-                  diagnostics.record("provider-exec-response");
                   return;
                 }
                 writeOpenAiResponsesText(response, {
@@ -315,10 +291,8 @@ describe("update repair with a local model provider", () => {
                   messageId: `msg_repair_${requests.length}`,
                   responseId: `resp_repair_${requests.length}`,
                 });
-                diagnostics.record("provider-text-response");
               })().catch((error: unknown) => {
                 errors.push(error);
-                diagnostics.record("provider-handler-error");
                 response.writeHead(500).end();
               });
             },
@@ -578,8 +552,6 @@ describe("update repair with a local model provider", () => {
           `[update-repair-test] diagnostics ${JSON.stringify({
             phase,
             entry,
-            events,
-            droppedEvents,
             workerStdoutTail: diagnostics.stdoutTail,
             workerStderrTail: diagnostics.stderrTail,
           })}\n`,

@@ -6,6 +6,45 @@ import { updateRunStepsFromResultStep } from "./update-run-step.js";
 import { runStep } from "./update-runner-command.js";
 
 const context = { env: { HOME: "/home/example" }, stateDir: "/npm-report-state" };
+type FailureStep = Awaited<ReturnType<typeof runStep>>;
+function failureReport(
+  step: FailureStep,
+  recorded: boolean,
+  attemptId: string,
+  extra: Partial<Parameters<typeof prepareUpdateFailureReport>[0]["result"]> = {},
+) {
+  return prepareUpdateFailureReport(
+    {
+      attemptId,
+      result: {
+        mode: "npm",
+        status: "error",
+        durationMs: 1,
+        steps: recorded ? [] : [step],
+        ...extra,
+      },
+      ...(recorded
+        ? { recordedRun: { runId: attemptId, steps: updateRunStepsFromResultStep(step) } }
+        : {}),
+    },
+    context,
+  );
+}
+function installStep(
+  runCommand: Parameters<typeof runStep>[0]["runCommand"],
+  overrides: Partial<Parameters<typeof runStep>[0]> = {},
+) {
+  return runStep({
+    name: "package-install",
+    argv: ["npm", "install", "-g", "openclaw"],
+    cwd: process.cwd(),
+    env: context.env,
+    runCommand,
+    stepIndex: 0,
+    totalSteps: 1,
+    ...overrides,
+  });
+}
 
 describe("npm install failure reports", () => {
   it.each(["EACCES", undefined])(
@@ -21,13 +60,9 @@ describe("npm install failure reports", () => {
         "npm ERR! registry https://example-user:synthetic-password@registry.example.test/pkg",
         "npm ERR! omitted line",
       ].join("\n");
-      const step = await runStep({
-        name: "package-install",
-        argv: ["npm", "install", "-g", "openclaw"],
-        cwd: process.cwd(),
-        env: context.env,
+      const step = await installStep(
         // Keep the classified package manager independent of the fixture's Node/Bun runner.
-        runCommand: (_argv, options) =>
+        (_argv, options) =>
           runCommandWithTimeout(
             [
               process.execPath,
@@ -37,28 +72,13 @@ describe("npm install failure reports", () => {
             ],
             options,
           ),
-        stepIndex: 0,
-        totalSteps: 1,
-      });
+      );
       expect(step.exitCode).toBe(1);
       expect(step.failureFacts?.[0]).toMatchObject({ check: "npm", code: code ?? "unknown" });
       for (const recorded of [false, true]) {
-        const report = await prepareUpdateFailureReport(
-          {
-            attemptId: "npm-fixture",
-            result: {
-              mode: "npm",
-              status: "error",
-              reason: "global-install-failed",
-              durationMs: 1,
-              steps: recorded ? [] : [step],
-            },
-            ...(recorded
-              ? { recordedRun: { runId: "npm-fixture", steps: updateRunStepsFromResultStep(step) } }
-              : {}),
-          },
-          context,
-        );
+        const report = await failureReport(step, recorded, "npm-fixture", {
+          reason: "global-install-failed",
+        });
         expect(report.body).toContain(`npm failure code: ${code ?? "unknown"}`);
         expect(report.body).toContain("npm ERR! install failed while preparing package");
         expect(report.body).toContain("[redacted-path]");
@@ -83,13 +103,7 @@ describe("npm install failure reports", () => {
           { manager: "npm", command: "npm", globalRoot: process.cwd(), packageRoot: process.cwd() },
           context.env,
         );
-        const report = await prepareUpdateFailureReport(
-          {
-            attemptId: "npm-permission",
-            result: { mode: "npm", status: "error", durationMs: 1, steps: [classified] },
-          },
-          context,
-        );
+        const report = await failureReport(classified, false, "npm-permission");
         expect(report.body).toContain("npm failure code: EACCES");
         expect(report.body).toContain("npm ERR! install failed while preparing package");
       }
@@ -109,12 +123,8 @@ describe("npm install failure reports", () => {
     const secret = "fixture-only-secret".repeat(30);
     const fifth = "npm error retained fifth diagnostic";
     const marker = " …[truncated]";
-    const step = await runStep({
-      name: "package-install-omit-optional",
-      argv: ["npm", "install", "-g", "openclaw"],
-      cwd: process.cwd(),
-      env: context.env,
-      runCommand: async () => ({
+    const step = await installStep(
+      async () => ({
         code: 1,
         stderr: "",
         stdout: [
@@ -126,9 +136,8 @@ describe("npm install failure reports", () => {
           "npm error sixth diagnostic",
         ].join("\n"),
       }),
-      stepIndex: 0,
-      totalSteps: 1,
-    });
+      { name: "package-install-omit-optional" },
+    );
     const messages = step.failureFacts?.map((fact) => fact.message) ?? [];
     expect(messages).toEqual([
       `npm error code ${code === "PRIVATE_IDENTIFIER" ? "unknown" : code}`,
@@ -152,16 +161,7 @@ describe("npm install failure reports", () => {
     expect(excerpt).not.toContain("omitted");
     expect(excerpt).not.toContain("sixth diagnostic");
     for (const recorded of [false, true]) {
-      const report = await prepareUpdateFailureReport(
-        {
-          attemptId: "npm-bound",
-          result: { mode: "npm", status: "error", steps: recorded ? [] : [step], durationMs: 1 },
-          ...(recorded
-            ? { recordedRun: { runId: "npm-bound", steps: updateRunStepsFromResultStep(step) } }
-            : {}),
-        },
-        context,
-      );
+      const report = await failureReport(step, recorded, "npm-bound");
       expect(report.body).toContain(guidance);
       for (const line of [messages[0], truncated, exactLimit, fifth]) {
         expect(report.body).toContain(`- ${line}\n`);
@@ -181,12 +181,8 @@ it.each([
 ])(
   "replaces the redacted phase with actionable $name $code facts for $spec",
   async ({ name, code, spec }) => {
-    const step = await runStep({
-      name: "package-install",
-      argv: ["npm", "install", "-g", "openclaw@latest", "--registry=https://private.invalid"],
-      cwd: "/private/install",
-      env: context.env,
-      runCommand: async () => ({
+    const step = await installStep(
+      async () => ({
         code: 1,
         stdout: "",
         stderr: [
@@ -197,53 +193,30 @@ it.each([
           "trailing output\n".repeat(800),
         ].join("\n"),
       }),
-      stepIndex: 0,
-      totalSteps: 1,
-    });
+      {
+        argv: ["npm", "install", "-g", "openclaw@latest", "--registry=https://private.invalid"],
+        cwd: "/private/install",
+      },
+    );
     expect(step.failureFacts?.[0]).toMatchObject({
       npmErrorCode: code,
       packageSpec: spec,
     });
     expect(step.stderrTail).not.toContain(code);
-    const legacyReport = await prepareUpdateFailureReport(
-      {
-        attemptId: "legacy-report",
-        result: {
-          status: "error",
-          mode: "npm",
-          reason: "global-install-failed",
-          durationMs: 1,
-          steps: [{ ...step, name: "[redacted-command]", failureFacts: undefined, stderrTail: "" }],
-        },
-      },
-      context,
+    const legacyReport = await failureReport(
+      { ...step, name: "[redacted-command]", failureFacts: undefined, stderrTail: "" },
+      false,
+      "legacy-report",
+      { reason: "global-install-failed" },
     );
     expect(legacyReport.body).toContain("Failed phase [redacted-command]: exit 1");
     for (const recorded of [false, true]) {
       const named = { ...step, name };
-      const report = await prepareUpdateFailureReport(
-        {
-          attemptId: "etarget-report",
-          result: {
-            status: "error",
-            mode: "npm",
-            reason: "global-install-failed",
-            before: { version: "2026.9.4" },
-            after: { version: "2026.9.4" },
-            durationMs: 1,
-            steps: recorded ? [] : [named],
-          },
-          ...(recorded
-            ? {
-                recordedRun: {
-                  runId: "etarget-report",
-                  steps: updateRunStepsFromResultStep(named),
-                },
-              }
-            : {}),
-        },
-        context,
-      );
+      const report = await failureReport(named, recorded, "etarget-report", {
+        reason: "global-install-failed",
+        before: { version: "2026.9.4" },
+        after: { version: "2026.9.4" },
+      });
       expect(report.body).toContain(`Failed phase package-install: exit 1 (${code} ${spec})`);
       expect(report.body).toContain("npm cache verify");
       expect(report.body).toContain("registry/mirror");

@@ -12,6 +12,11 @@ import {
 } from "./update-native-package-stage.js";
 
 const runFile = promisify(execFile);
+async function output(command: string, args: string[] = []) {
+  return (await runFile(command, args, { timeout: 5000 })).stdout.trim();
+}
+const readJson = async (file: string) => JSON.parse(await fs.readFile(file, "utf8"));
+const writeLauncher = (file: string, source: string) => fs.writeFile(file, source, { mode: 0o755 });
 
 async function writeStoredRuntime(packageRoot: string, store: string, generation: string) {
   const payload = path.join(store, generation, "node_modules", "aged-runtime");
@@ -125,18 +130,12 @@ describe.skipIf(process.platform === "win32")("native package stage", () => {
         );
         expect((await fs.lstat(candidateStore)).isSymbolicLink()).toBe(false);
         expect(await fs.realpath(candidateStore)).toBe(candidateStore);
-        expect(
-          (await runFile(process.execPath, [candidateEntry], { timeout: 5000 })).stdout.trim(),
-        ).toBe("old");
+        expect(await output(process.execPath, [candidateEntry])).toBe("old");
         // An aged pnpm install prunes the old payload before installing its replacement.
         await fs.rm(path.join(candidateStore, "old"), { recursive: true });
-        expect(
-          (
-            await runFile(process.execPath, [path.join(packageRoot, "openclaw.mjs")], {
-              timeout: 5000,
-            })
-          ).stdout.trim(),
-        ).toBe("old");
+        expect(await output(process.execPath, [path.join(packageRoot, "openclaw.mjs")])).toBe(
+          "old",
+        );
         if (layout === "pnpm10") {
           expect((await fs.lstat(virtualStoreDir)).isSymbolicLink()).toBe(true);
           expect(await fs.realpath(virtualStoreDir)).toBe(path.join(external, "pnpm-store"));
@@ -148,31 +147,28 @@ describe.skipIf(process.platform === "win32")("native package stage", () => {
         expect(path.resolve(stage.projectRoot, "../sibling")).toBe(
           path.resolve(project, "../sibling"),
         );
-        expect(
-          JSON.parse(await fs.readFile(path.join(candidateRoot, ".modules.yaml"), "utf8")),
-        ).toEqual({ virtualStoreDir: candidateStore, storeDir: external });
+        expect(await readJson(path.join(candidateRoot, ".modules.yaml"))).toEqual({
+          virtualStoreDir: candidateStore,
+          storeDir: external,
+        });
         await writeStoredRuntime(candidateRoot, candidateStore, "candidate");
         const internalLauncher = path.join(candidateRoot, "node_modules", ".bin", "probe");
         if (layout === "pnpm12") {
           await fs.mkdir(path.dirname(internalLauncher), { recursive: true });
-          await fs.writeFile(
+          await writeLauncher(
             internalLauncher,
             `#!/bin/sh\nbasedir_abs=$(CDPATH= cd -P -- "$(dirname "$0")" && pwd -P)\nexec node "$basedir_abs/${path.relative(path.dirname(internalLauncher), candidateEntry)}" "$@"\n`,
-            { mode: 0o755 },
           );
           await expect(fs.access(liveCandidateRoot)).rejects.toMatchObject({ code: "ENOENT" });
         }
         const externalEntry = path.join(external, "entry.mjs");
         await fs.writeFile(externalEntry, 'console.log("external");\n');
         const externalLauncher = path.join(stage.binDir, "shared");
-        await fs.writeFile(
+        await writeLauncher(
           externalLauncher,
           `#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/${path.relative(stage.binDir, externalEntry)}" "$@"\n`,
-          { mode: 0o755 },
         );
-        expect((await runFile(externalLauncher, [], { timeout: 5000 })).stdout.trim()).toBe(
-          "external",
-        );
+        expect(await output(externalLauncher)).toBe("external");
         const launcher = path.join(stage.binDir, "openclaw");
         if (layout.startsWith("bun")) {
           await fs.symlink(path.relative(stage.binDir, candidateEntry), launcher);
@@ -190,19 +186,17 @@ describe.skipIf(process.platform === "win32")("native package stage", () => {
             layout === "pnpm12"
               ? `basedir_win="$basedir_abs"\nif [ "$1" = win ]; then\n  exec node "$basedir_win/${target}" "$@"\nfi\n`
               : "";
-          await fs.writeFile(
+          await writeLauncher(
             launcher,
             `#!/bin/sh\n${basedir}=$(CDPATH= cd -P -- "$(dirname "$0")" && pwd -P)\n${convertedBranch}if [ -x "$${basedir}/node" ]; then\n  exec "$${basedir}/node" "$${basedir}/${target}" "$@"\nelse\n  exec node "$${basedir}/${target}" "$@"\nfi\n# cmd-shim-target=${candidateEntry}\n`,
-            { mode: 0o755 },
           );
           const node = process.execPath.replaceAll("'", "'\\''");
-          await fs.writeFile(
+          await writeLauncher(
             path.join(liveBinDir, "node"),
             `#!/bin/sh\nprintf 'bin-runtime\\n'\nexec '${node}' "$@"\n`,
-            { mode: 0o755 },
           );
         }
-        expect((await runFile(launcher, [], { timeout: 5000 })).stdout.trim()).toBe("candidate");
+        expect(await output(launcher)).toBe("candidate");
         await finalizeNativePackageStage(stage, "openclaw");
         if (layout === "bun-launcher") {
           expect(parseBunCliLauncher(await fs.readFile(launcher, "utf8"))).toEqual({
@@ -210,14 +204,10 @@ describe.skipIf(process.platform === "win32")("native package stage", () => {
             entryPath: path.join(packageRoot, "openclaw.mjs"),
           });
         }
-        expect(
-          (
-            await runFile(process.execPath, [path.join(packageRoot, "openclaw.mjs")], {
-              timeout: 5000,
-            })
-          ).stdout.trim(),
-        ).toBe("old");
-        expect(JSON.parse(await fs.readFile(modulesManifest, "utf8"))).toEqual({
+        expect(await output(process.execPath, [path.join(packageRoot, "openclaw.mjs")])).toBe(
+          "old",
+        );
+        expect(await readJson(modulesManifest)).toEqual({
           virtualStoreDir,
           storeDir: external,
         });
@@ -226,33 +216,23 @@ describe.skipIf(process.platform === "win32")("native package stage", () => {
         await fs.cp(launcher, path.join(liveBinDir, "openclaw"), { verbatimSymlinks: true });
         await fs.copyFile(externalLauncher, path.join(liveBinDir, "shared"));
         await fs.rm(stage.binDir, { recursive: true });
-        expect(
-          (await runFile(path.join(liveBinDir, "openclaw"), [], { timeout: 5000 })).stdout.trim(),
-        ).toBe(layout.startsWith("bun") ? "candidate" : "bin-runtime\ncandidate");
+        expect(await output(path.join(liveBinDir, "openclaw"))).toBe(
+          layout.startsWith("bun") ? "candidate" : "bin-runtime\ncandidate",
+        );
         if (layout === "pnpm12") {
+          expect(await output(path.join(liveBinDir, "openclaw"), ["win"])).toBe("candidate");
           expect(
-            (
-              await runFile(path.join(liveBinDir, "openclaw"), ["win"], { timeout: 5000 })
-            ).stdout.trim(),
-          ).toBe("candidate");
-          expect(
-            (
-              await runFile(
-                path.join(liveCandidateRoot, path.relative(candidateRoot, internalLauncher)),
-                [],
-                { timeout: 5000 },
-              )
-            ).stdout.trim(),
+            await output(
+              path.join(liveCandidateRoot, path.relative(candidateRoot, internalLauncher)),
+            ),
           ).toBe("candidate");
         }
-        expect(
-          (await runFile(path.join(liveBinDir, "shared"), [], { timeout: 5000 })).stdout.trim(),
-        ).toBe("external");
+        expect(await output(path.join(liveBinDir, "shared"))).toBe("external");
         expect(await fs.realpath(path.join(project, "owned-package"))).toBe(liveCandidateRoot);
         expect(await fs.readFile(path.join(project, "shared-package", "dependency"), "utf8")).toBe(
           "shared dependency",
         );
-        expect(JSON.parse(await fs.readFile(modulesManifest, "utf8"))).toEqual({
+        expect(await readJson(modulesManifest)).toEqual({
           virtualStoreDir,
           storeDir: external,
         });
