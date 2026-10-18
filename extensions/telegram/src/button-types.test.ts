@@ -88,12 +88,7 @@ describe("buildTelegramPresentationButtons action domains", () => {
     ];
     const rows = buildButtons(values.map((value) => ({ label: "Plugin", value })));
     const callbacks = rows?.flat().map((button) => button.callback_data);
-    expect(callbacks?.map(parseTelegramOpaqueCallbackData)).toEqual([
-      "tga1:e:x:not-a-typed-action",
-      " tga1:e:o:plugin:123 ",
-      "tgq1:ask_0123456789abcdef0123456789abcdef:0",
-      " tgq1:ask_0123456789abcdef0123456789abcdef:0 ",
-    ]);
+    expect(callbacks?.map(parseTelegramOpaqueCallbackData)).toEqual(values);
     for (const callback of callbacks ?? []) {
       expect(parseTelegramApprovalCallbackData(callback)).toBeNull();
       expect(parseTelegramQuestionCallbackData(callback)).toBeNull();

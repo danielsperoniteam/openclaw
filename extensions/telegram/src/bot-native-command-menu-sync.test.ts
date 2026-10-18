@@ -77,7 +77,8 @@ const makeCommand = (descriptionLocalizations?: Record<string, string>) => ({
   ...(descriptionLocalizations ? { descriptionLocalizations } : {}),
 });
 
-function setMyCommandsCall(setMyCommands: ReturnType<typeof vi.fn>, index: number): unknown[] {
+type MenuMock = ReturnType<typeof createMenu>["setMyCommands"];
+function setMyCommandsCall(setMyCommands: MenuMock, index: number) {
   const call = setMyCommands.mock.calls.at(index);
   if (!call) {
     throw new Error(`Expected setMyCommands call ${index}`);
@@ -85,16 +86,7 @@ function setMyCommandsCall(setMyCommands: ReturnType<typeof vi.fn>, index: numbe
   return call;
 }
 
-function setMyCommandsPayload(
-  setMyCommands: ReturnType<typeof vi.fn>,
-  index: number,
-): Array<unknown> {
-  const payload = setMyCommandsCall(setMyCommands, index).at(0);
-  if (!Array.isArray(payload)) {
-    throw new Error(`Expected setMyCommands call ${index} to include a command payload`);
-  }
-  return payload;
-}
+const setMyCommandsPayload = (mock: MenuMock, index: number) => setMyCommandsCall(mock, index)[0];
 
 function readLanguageCodeFromApiCall(call: readonly unknown[]): unknown {
   const options = call.at(-1);
@@ -205,11 +197,7 @@ describe("bot-native-command-menu sync lifecycle", () => {
 
     await waitForTelegramMenu(() => expect(setMyCommands).toHaveBeenCalledTimes(4));
     for (const index of [2, 3]) {
-      // Captured setMyCommands payloads are grammY BotCommand arrays.
-      const localized = setMyCommandsPayload(setMyCommands, index) as Array<{
-        command: string;
-        description: string;
-      }>;
+      const localized = setMyCommandsPayload(setMyCommands, index);
       const names = localized.map(({ command }) => command);
       expect(names).toHaveLength(24);
       expect(names.slice(0, 2)).toEqual(["configured", "canonical_0"]);
@@ -277,13 +265,13 @@ describe("bot-native-command-menu sync lifecycle", () => {
     ]);
     await waitForTelegramMenu(() => expect(setMyCommands).toHaveBeenCalledTimes(4));
     expect(setMyCommandsPayload(setMyCommands, 0)).toHaveLength(100);
-    const firstRetry = setMyCommandsPayload(setMyCommands, 1) as Array<{ command: string }>;
+    const firstRetry = setMyCommandsPayload(setMyCommands, 1);
     expect(firstRetry).toHaveLength(80);
     expect(firstRetry.filter(({ command }) => command.startsWith("skill_"))).toHaveLength(20);
     expect(firstRetry.some(({ command }) => command.startsWith("plugin_"))).toBe(false);
 
     for (const index of [2, 3]) {
-      const accepted = setMyCommandsPayload(setMyCommands, index) as Array<{ command: string }>;
+      const accepted = setMyCommandsPayload(setMyCommands, index);
       const names = accepted.map(({ command }) => command);
       expect(names).toHaveLength(64);
       expect(names.slice(0, 4)).toEqual(["skill", "custom_one", "custom_two", "native_0"]);

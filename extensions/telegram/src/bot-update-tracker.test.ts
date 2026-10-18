@@ -94,35 +94,22 @@ describe("createTelegramUpdateTracker", () => {
     expect(tracker.beginUpdate(updateCtx(42)).accepted).toBe(true);
   });
 
-  it("keeps below-floor spool replays dispatchable after newer updates advance", () => {
-    const tracker = dispatchTracker({ persistenceFloorUpdateId: 42 });
-
-    tracker.finishUpdate(begin(tracker, 43), { completed: true });
-    tracker.finishUpdate(begin(tracker, 42), { completed: true });
-
-    // Second begin is rejected (numeric set and/or semantic key). After persist
-    // advances, the numeric id may already be pruned below the persisted floor.
-    expect(tracker.beginUpdate(updateCtx(42)).accepted).toBe(false);
-    expect(tracker.beginUpdate(updateCtx(43)).accepted).toBe(false);
-  });
-
-  it("dispatches a delayed lower update id after newer cross-lane ids complete", () => {
-    const tracker = dispatchTracker({ persistenceFloorUpdateId: 100 });
-
-    // Lane B finishes newer global update ids while lane A still holds N+1.
-    const laterA = begin(tracker, 102);
-    const laterB = begin(tracker, 103);
-    tracker.finishUpdate(laterA, { completed: true });
-    tracker.finishUpdate(laterB, { completed: true });
-
-    // Delayed durable-spool replay of N+1 must still dispatch exactly once.
-    tracker.finishUpdate(begin(tracker, 101), { completed: true });
-
-    expect(tracker.beginUpdate(updateCtx(101))).toEqual({
-      accepted: false,
-      reason: "accepted-watermark",
-    });
-    expect(tracker.beginUpdate(updateCtx(103)).accepted).toBe(false);
+  it.each([
+    { name: "below-floor replay", floor: 42, newer: [43], delayed: 42 },
+    { name: "delayed cross-lane replay", floor: 100, newer: [102, 103], delayed: 101 },
+  ])("dispatches $name exactly once after newer updates complete", ({ floor, newer, delayed }) => {
+    const tracker = dispatchTracker({ persistenceFloorUpdateId: floor });
+    const updates = newer.map((id) => begin(tracker, id));
+    for (const update of updates) {
+      tracker.finishUpdate(update, { completed: true });
+    }
+    tracker.finishUpdate(begin(tracker, delayed), { completed: true });
+    const replay = tracker.beginUpdate(updateCtx(delayed));
+    expect(replay.accepted).toBe(false);
+    if (delayed > floor) {
+      expect(replay).toEqual({ accepted: false, reason: "accepted-watermark" });
+    }
+    expect(tracker.beginUpdate(updateCtx(newer.at(-1)!)).accepted).toBe(false);
   });
 
   it("does not prune pending or failed accepted ids from the retention window", () => {

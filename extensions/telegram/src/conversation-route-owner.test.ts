@@ -14,12 +14,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inspectTelegramConversationRouteOwner } from "./conversation-route-owner.test-support.js";
 
 type TelegramConfig = NonNullable<NonNullable<OpenClawConfig["channels"]>["telegram"]>;
+type Owner = Awaited<ReturnType<typeof inspectTelegramConversationRouteOwner>>;
 const config = (
   telegram: TelegramConfig,
   rest: Omit<OpenClawConfig, "channels"> = {},
 ): OpenClawConfig => ({ ...rest, channels: { telegram } });
 const defaultAccounts = { default: {} };
 const unbound = { enabled: false };
+const adapterBase = { channel: "telegram", accountId: "default", listBySession: () => [] };
+const configured = (overrides: TelegramConfig = {}) =>
+  config({ accounts: defaultAccounts, ...overrides });
 
 describe("inspectTelegramConversationRouteOwner", () => {
   let adapter: SessionBindingAdapter;
@@ -45,9 +49,7 @@ describe("inspectTelegramConversationRouteOwner", () => {
     );
     testing.resetSessionBindingAdaptersForTests();
     adapter = {
-      channel: "telegram",
-      accountId: "default",
-      listBySession: () => [],
+      ...adapterBase,
       resolveByConversation: () => null,
     };
     registerSessionBindingAdapter(adapter);
@@ -66,7 +68,7 @@ describe("inspectTelegramConversationRouteOwner", () => {
     "inspects the $kind runtime owner without touching liveness",
     async (conversation) => {
       const touch = vi.fn();
-      const resolveByConversation = vi.fn((boundConversation) => ({
+      const resolve = vi.fn((boundConversation) => ({
         bindingId: "binding-topic",
         targetSessionKey: "agent:runtime:bound",
         targetKind: "session" as const,
@@ -75,16 +77,13 @@ describe("inspectTelegramConversationRouteOwner", () => {
         boundAt: 1,
       }));
       registerSessionBindingAdapter({
-        channel: "telegram",
-        accountId: "default",
-        listBySession: () => [],
-        resolveByConversation,
+        ...adapterBase,
+        resolveByConversation: resolve,
         touch,
       });
       expect(
         await inspectTelegramConversationRouteOwner({
-          cfg: config({
-            accounts: defaultAccounts,
+          cfg: configured({
             groups: { "-100123": { topics: { "42": { agentId: "configured" } } } },
           }),
           accountId: "default",
@@ -93,9 +92,7 @@ describe("inspectTelegramConversationRouteOwner", () => {
       ).toEqual({ kind: "agent", agentId: "runtime" });
       expect(touch).not.toHaveBeenCalled();
       if (conversation.kind === "direct") {
-        expect(resolveByConversation).toHaveBeenCalledWith(
-          expect.objectContaining({ conversationId: "2002" }),
-        );
+        expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "2002" }));
       }
     },
   );
@@ -105,27 +102,15 @@ describe("inspectTelegramConversationRouteOwner", () => {
     { agentId, match: { channel: "telegram", accountId: "bot-main" } },
   ];
   const mainOwner = { kind: "agent", agentId: "main" } as const;
-  const accountCases: Array<
-    [
-      name: string,
-      cfg: OpenClawConfig,
-      expected: Awaited<ReturnType<typeof inspectTelegramConversationRouteOwner>>,
-      accountId?: string,
-      topic?: boolean,
-    ]
-  > = [
-    ["temporary adapter gap", config({ accounts: defaultAccounts }), { kind: "unavailable" }],
-    [
-      "disabled thread bindings",
-      config({ accounts: defaultAccounts, threadBindings: unbound }),
-      mainOwner,
-    ],
-    ["removed account", config({ accounts: defaultAccounts }), null, "retired"],
+  const accountCases: [string, OpenClawConfig, Owner, string?, boolean?][] = [
+    ["temporary adapter gap", configured(), { kind: "unavailable" }],
+    ["disabled thread bindings", configured({ threadBindings: unbound }), mainOwner],
+    ["removed account", configured(), null, "retired"],
     ["removed default account", config({ accounts: {} }), null],
-    ["disabled account", config({ accounts: { default: { enabled: false } } }), null],
+    ["disabled account", configured({ accounts: { default: { enabled: false } } }), null],
     [
       "disabled channel",
-      config({ enabled: false, accounts: { default: { enabled: true } } }),
+      configured({ enabled: false, accounts: { default: { enabled: true } } }),
       null,
     ],
     [

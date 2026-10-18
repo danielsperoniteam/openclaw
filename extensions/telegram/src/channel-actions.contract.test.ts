@@ -15,6 +15,7 @@ function prepareSend(params: PreparedSend["ctx"]["params"], payload: PreparedSen
     payload,
   });
 }
+const presentation = { blocks: [{ type: "text" as const, text: "Quoted chart" }] };
 
 describe("telegram actions contract", () => {
   it("requires send and poll permission on the same discoverable account", () => {
@@ -158,39 +159,25 @@ describe("telegram actions contract", () => {
     });
   });
 
-  it("preserves quote text when presentations use durable core delivery", async () => {
-    const presentation = {
-      blocks: [{ type: "text" as const, text: "Quoted chart" }],
-    };
-    expect(
-      await prepareSend(
-        { quoteText: "  original message\n  " },
-        {
-          text: "Chart",
-          presentation,
-          channelData: { telegram: { parseMode: "MarkdownV2" } },
-        },
-      ),
-    ).toEqual({
+  it.each([
+    { key: "quoteText", quote: "  original message\n  ", telegram: { parseMode: "MarkdownV2" } },
+    { key: "quote_text", quote: " \nsnake case quote  ", telegram: {} },
+  ])("preserves $key on durable presentation delivery", async ({ key, quote, telegram }) => {
+    const payload = {
       text: "Chart",
       presentation,
-      channelData: {
-        telegram: {
-          parseMode: "MarkdownV2",
-          quoteText: "  original message\n  ",
-        },
-      },
+      ...(key === "quoteText" ? { channelData: { telegram } } : {}),
+    };
+    expect(await prepareSend({ [key]: quote }, payload)).toEqual({
+      ...payload,
+      channelData: { telegram: { ...telegram, quoteText: quote } },
     });
+  });
+
+  it("leaves legacy delivery to the legacy owner", async () => {
     expect(
       await prepareSend({ quoteText: "original message" }, { text: "legacy send" }),
     ).toBeNull();
-    expect(
-      await prepareSend({ quote_text: " \nsnake case quote  " }, { text: "Chart", presentation }),
-    ).toEqual({
-      text: "Chart",
-      presentation,
-      channelData: { telegram: { quoteText: " \nsnake case quote  " } },
-    });
   });
 
   it("rejects retired native buttons before prepared presentation delivery", async () => {
@@ -199,14 +186,7 @@ describe("telegram actions contract", () => {
         { buttons: '[[{"text":"Yes","callback_data":"yes"}]]' },
         {
           text: "Choose",
-          presentation: {
-            blocks: [
-              {
-                type: "buttons",
-                buttons: [{ label: "Yes", action: { type: "callback", value: "yes" } }],
-              },
-            ],
-          },
+          presentation,
         },
       ),
     ).rejects.toThrow(/native "buttons" is unsupported.*Use presentation/);
