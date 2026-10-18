@@ -68,6 +68,24 @@ export function registerGatewayCronContextTests({
   requestHeartbeatAndWaitMock,
 }: GatewayCronContextTestHarness) {
   const createBroker = useSpawnBrokerTestFixture(afterEach);
+  function config(name: string) {
+    const cfg = createCronConfig(name);
+    loadConfigMock.mockReturnValue(cfg);
+    return cfg;
+  }
+  function timedConfig(name: string, hour: string) {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(`2026-08-21T${hour}:00:00.000Z`));
+    return { cfg: config(name), clock: createGatewaySchedulerClock(Date.now()) };
+  }
+  const scheduledJob = (): CronJobOverrides => ({
+    deleteAfterRun: false,
+    schedule: { kind: "at", at: new Date(Date.now() + 60_000).toISOString() },
+  });
+  const gatewayContext = () => {
+    const context = { terminalSessions: {}, resolveGatewayContext: () => context } as never;
+    return context;
+  };
   it.each(["main", "agent:ops:cron:job-1:run:one"])(
     "keeps a targeted global wake on its selected agent's stored route (%s)",
     async (sessionKey) => {
@@ -122,15 +140,8 @@ export function registerGatewayCronContextTests({
 
   it("owns timer execution and settlement after its creator context closes", async () => {
     const broker = await createBroker();
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-21T01:00:00.000Z"));
-    const clock = createGatewaySchedulerClock(Date.now());
-    const cfg = createCronConfig("server-cron-scheduled-gateway-context");
-    loadConfigMock.mockReturnValue(cfg);
-    const gatewayContext = {
-      terminalSessions: {},
-      resolveGatewayContext: () => gatewayContext,
-    } as never;
+    const { cfg, clock } = timedConfig("server-cron-scheduled-gateway-context", "01");
+    const context = gatewayContext();
     const creatorContext = new AsyncLocalStorage<string>();
     const creatorWork = new AsyncWorkScope();
     let requestContextActive = true;
@@ -162,19 +173,16 @@ export function registerGatewayCronContextTests({
     const state = runWithSpawnBroker(broker, () =>
       createCronService(cfg, {
         scheduler: createTestGatewayScheduler(clock.clock),
-        resolveGatewayContext: () => gatewayContext,
+        resolveGatewayContext: () => context,
       }),
     );
     try {
       await state.cron.start();
-      await addAgentTurnJob(state, "scheduled-isolated", "run it", {
-        deleteAfterRun: false,
-        schedule: { kind: "at", at: new Date(Date.now() + 60_000).toISOString() },
-      });
+      await addAgentTurnJob(state, "scheduled-isolated", "run it", scheduledJob());
       const cronState = getCronState(state);
       const onEvent = cronState.deps.onEvent;
-      cronState.deps.onEvent = (event, context) => {
-        onEvent?.(event, context);
+      cronState.deps.onEvent = (event, eventContext) => {
+        onEvent?.(event, eventContext);
         if (event.action === "finished") {
           settlementContext = getInProcessGatewayToolContext();
           settled.resolve();
@@ -216,8 +224,8 @@ export function registerGatewayCronContextTests({
 
       expect(observedCreator).toBeUndefined();
       expect(observedWork).toBe("completed");
-      expect(settlementContext).toBe(gatewayContext);
-      expect(observed).toBe(gatewayContext);
+      expect(settlementContext).toBe(context);
+      expect(observed).toBe(context);
       expect(observedClient).toBeUndefined();
       expect(observedBroker).toBe(broker);
       expect(() => assertScheduledCaller?.("chat.history")).not.toThrow();
@@ -231,8 +239,7 @@ export function registerGatewayCronContextTests({
   });
 
   it("leaves a scheduler-triggered isolated run without context when no resolver is wired", async () => {
-    const cfg = createCronConfig("server-cron-scheduled-gateway-context-absent");
-    loadConfigMock.mockReturnValue(cfg);
+    const cfg = config("server-cron-scheduled-gateway-context-absent");
     let observed: unknown = "never-ran";
     runCronIsolatedAgentTurnMock.mockImplementationOnce(async () => {
       observed = getInProcessGatewayToolContext();
@@ -254,17 +261,10 @@ export function registerGatewayCronContextTests({
   });
 
   it("withholds a retired gateway context from a scheduled run", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-21T02:00:00.000Z"));
-    const clock = createGatewaySchedulerClock(Date.now());
-    // The process-wide context holder is not cleared on shutdown, so an
-    // unfenced resolver would hand a queued run a retired context. No context
-    // fails visibly; a retired one operates against a dead Gateway generation.
-    const cfg = createCronConfig("server-cron-retired-gateway-context");
-    loadConfigMock.mockReturnValue(cfg);
+    const { cfg, clock } = timedConfig("server-cron-retired-gateway-context", "02");
+    // A process-wide holder must not lend a retired Gateway generation to queued work.
     const retiredContext = {
       terminalSessions: {},
-      // Instance retired: its own lifecycle resolver reports unavailable.
       resolveGatewayContext: () => undefined,
     } as never;
     let observed: unknown = "never-ran";
@@ -281,10 +281,7 @@ export function registerGatewayCronContextTests({
     });
     try {
       await state.cron.start();
-      await addAgentTurnJob(state, "retired-context", "run it", {
-        deleteAfterRun: false,
-        schedule: { kind: "at", at: new Date(Date.now() + 60_000).toISOString() },
-      });
+      await addAgentTurnJob(state, "retired-context", "run it", scheduledJob());
 
       await clock.advanceBy(60_000);
       await ran.promise;
@@ -297,17 +294,8 @@ export function registerGatewayCronContextTests({
   });
 
   it("gives a scheduled heartbeat wake a resolvable gateway context", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-21T03:00:00.000Z"));
-    const clock = createGatewaySchedulerClock(Date.now());
-    // Main-session cron jobs and heartbeat monitors reach the agent through the
-    // heartbeat adapter, which shares the isolated path's contextless defect.
-    const cfg = createCronConfig("server-cron-heartbeat-gateway-context");
-    loadConfigMock.mockReturnValue(cfg);
-    const gatewayContext = {
-      terminalSessions: {},
-      resolveGatewayContext: () => gatewayContext,
-    } as never;
+    const { cfg, clock } = timedConfig("server-cron-heartbeat-gateway-context", "03");
+    const context = gatewayContext();
     let observed: unknown = "never-ran";
     const ran = createDeferred();
     requestHeartbeatAndWaitMock.mockImplementationOnce(async () => {
@@ -318,20 +306,19 @@ export function registerGatewayCronContextTests({
 
     const state = createCronService(cfg, {
       scheduler: createTestGatewayScheduler(clock.clock),
-      resolveGatewayContext: () => gatewayContext,
+      resolveGatewayContext: () => context,
     });
     try {
       await state.cron.start();
       await addSystemEventJob(state, "scheduled-heartbeat", "run it", {
-        deleteAfterRun: false,
-        schedule: { kind: "at", at: new Date(Date.now() + 60_000).toISOString() },
+        ...scheduledJob(),
         sessionTarget: "main",
         wakeMode: "now",
       });
       await clock.advanceBy(60_000);
       await ran.promise;
 
-      expect(observed).toBe(gatewayContext);
+      expect(observed).toBe(context);
     } finally {
       state.cron.stop();
       vi.useRealTimers();
@@ -339,8 +326,7 @@ export function registerGatewayCronContextTests({
   });
 
   it("replaces an RPC-inherited gateway context with the scheduler owner after activation", async () => {
-    const cfg = createCronConfig("server-cron-rpc-gateway-context");
-    loadConfigMock.mockReturnValue(cfg);
+    const cfg = config("server-cron-rpc-gateway-context");
     const rpcContext = { terminalSessions: { rpc: true } } as never;
     const schedulerContext = {
       terminalSessions: { scheduler: true },

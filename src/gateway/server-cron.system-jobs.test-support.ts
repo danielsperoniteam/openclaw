@@ -17,6 +17,18 @@ import type { buildGatewayCronService } from "./server-cron.js";
 
 type CronFixture = ReturnType<typeof buildGatewayCronService>;
 
+function holdInventory(state: CronFixture) {
+  const entered = createDeferred();
+  const release = createDeferred();
+  const listJobs = state.cron.list.bind(state.cron);
+  vi.spyOn(state.cron, "list").mockImplementationOnce(async (options) => {
+    entered.resolve();
+    await release.promise;
+    return listJobs(options);
+  });
+  return { entered, release, listJobs };
+}
+
 export function registerGatewayCronSystemJobTests({
   createCronConfig,
   loadCronService,
@@ -44,34 +56,26 @@ export function registerGatewayCronSystemJobTests({
       agents: { entries: { main: { heartbeat: { every: "1h" } } } },
     } satisfies OpenClawConfig;
     const state = loadCronService(cfg);
-    const inventoryStarted = createDeferred();
-    const releaseInventory = createDeferred();
-    const listJobs = state.cron.list.bind(state.cron);
+    let held: ReturnType<typeof holdInventory> | undefined;
     try {
       await state.reconcileSystemJobs();
-      vi.spyOn(state.cron, "list").mockImplementationOnce(async (options) => {
-        inventoryStarted.resolve();
-        await releaseInventory.promise;
-        return await listJobs(options);
-      });
+      held = holdInventory(state);
       const reconcile = state.reconcileSystemJobs();
-      await inventoryStarted.promise;
+      await held.entered.promise;
       setRuntimeConfig({
         ...cfg,
         agents: { entries: { main: { heartbeat: { every: "2h" } } } },
       });
-      releaseInventory.resolve();
+      held.release.resolve();
       await expect(reconcile).resolves.toBe("converged");
-      expect(await listJobs({ includeDisabled: true })).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            payload: { kind: "heartbeat" },
-            schedule: expect.objectContaining({ everyMs: 7_200_000 }),
-          }),
-        ]),
+      expect(await held.listJobs({ includeDisabled: true })).toContainEqual(
+        expect.objectContaining({
+          payload: { kind: "heartbeat" },
+          schedule: expect.objectContaining({ everyMs: 7_200_000 }),
+        }),
       );
     } finally {
-      releaseInventory.resolve();
+      held?.release.resolve();
       state.cron.stop();
     }
   });
@@ -87,27 +91,16 @@ export function registerGatewayCronSystemJobTests({
     } satisfies OpenClawConfig;
     await withCronService(autoConfig, async (state) => {
       await expect(state.reconcileSystemJobs()).resolves.toBe("converged");
-      const inventoryStarted = createDeferred();
-      const releaseInventory = createDeferred();
-      const listJobs = state.cron.list.bind(state.cron);
-      let inventoryCall = 0;
-      vi.spyOn(state.cron, "list").mockImplementation(async (options) => {
-        inventoryCall += 1;
-        if (inventoryCall === 1) {
-          inventoryStarted.resolve();
-          await releaseInventory.promise;
-        }
-        return await listJobs(options);
-      });
+      const held = holdInventory(state);
       const addJob = vi.spyOn(state.cron, "add");
       const removeJob = vi.spyOn(state.cron, "remove");
 
       setRuntimeConfig(offConfig);
       const disable = state.reconcileSystemJobs();
-      await inventoryStarted.promise;
+      await held.entered.promise;
       setRuntimeConfig(autoConfig);
       const reenable = state.reconcileSystemJobs();
-      releaseInventory.resolve();
+      held.release.resolve();
 
       await expect(disable).resolves.toBe("superseded");
       await expect(reenable).resolves.toBe("converged");
@@ -262,15 +255,13 @@ export function registerGatewayCronSystemJobTests({
           ),
         ).toBe(true);
         await clock.advanceBy(30_000);
-        expect(await listJobs({ includeDisabled: true })).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              agentId: "retiring",
-              declarationKey: "heartbeat:retiring",
-              enabled: true,
-              schedule: expect.objectContaining({ everyMs: 3_600_000 }),
-            }),
-          ]),
+        expect(await listJobs({ includeDisabled: true })).toContainEqual(
+          expect.objectContaining({
+            agentId: "retiring",
+            declarationKey: "heartbeat:retiring",
+            enabled: true,
+            schedule: expect.objectContaining({ everyMs: 3_600_000 }),
+          }),
         );
       } finally {
         inventory.mockRestore();

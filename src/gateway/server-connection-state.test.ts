@@ -34,6 +34,53 @@ import { claimRpcSourceForTest, createRpcSourceForTest } from "./test-helpers.rp
 
 type ConnectionIdReads = { count: number };
 
+function makeState(
+  bootId: string,
+  cfg: OpenClawConfig = {},
+  getRuntimeConfig?: () => OpenClawConfig,
+) {
+  return createGatewayConnectionState({
+    scheduler: createTestGatewayScheduler(),
+    bootId,
+    cfg,
+    getRuntimeConfig,
+  });
+}
+
+function identify(
+  client: GatewayWsClient,
+  profileId: string,
+  displayName: string | null = null,
+  updatedAt = 1,
+) {
+  client.authenticatedUserProfile = {
+    profileId,
+    displayName,
+    avatarRevision: "test",
+    hasAvatar: false,
+    updatedAt,
+  };
+}
+
+function controlUi(client: GatewayWsClient) {
+  client.connect.client = {
+    id: "openclaw-control-ui",
+    version: "test",
+    platform: "web",
+    mode: "webchat",
+  };
+}
+
+function withoutSql(run: () => void) {
+  const sql = observeHostDataSql();
+  try {
+    run();
+    expect(sql.calls.every((call) => call.mock.calls.length === 0)).toBe(true);
+  } finally {
+    sql.restore();
+  }
+}
+
 function makeClient(
   connId: string,
   reads: ConnectionIdReads,
@@ -70,11 +117,7 @@ function makeClient(
 
 describe("gateway connection state", () => {
   it("retires tool recipients across reconnects without retiring their active runs", () => {
-    const state = createGatewayConnectionState({
-      scheduler: createTestGatewayScheduler(),
-      bootId: "tool-recipient-retirement",
-      cfg: {},
-    });
+    const state = makeState("tool-recipient-retirement");
     onTestFinished(() => state.mentionInbox.dispose());
     const context = createGatewayRequestContext(makeContextParams(state));
     const live = makeClient("live", { count: 0 }).client;
@@ -129,11 +172,7 @@ describe("gateway connection state", () => {
       const source = createRpcSourceForTest({}, { ...scope, storeScope: scope.storePath });
       const release = await claimRpcSourceForTest(source);
       rpcSourceTesting.set("publication-run", source);
-      const state = createGatewayConnectionState({
-        scheduler: createTestGatewayScheduler(),
-        bootId: "active-publication",
-        cfg,
-      });
+      const state = makeState("active-publication", cfg);
       onTestFinished(() => state.mentionInbox.dispose());
       const projection = await createSessionRowProjection({ cfg, modelCatalog: [] });
       onTestFinished(() => projection.dispose());
@@ -143,37 +182,24 @@ describe("gateway connection state", () => {
       const second = makeClient("publication-second", { count: 0 });
       for (const peer of [first, second]) {
         peer.client.connect.scopes = ["operator.admin"];
-        peer.client.connect.client = {
-          id: "openclaw-control-ui",
-          version: "test",
-          platform: "web",
-          mode: "webchat",
-        };
+        controlUi(peer.client);
         state.clients.add(peer.client);
       }
       first.send.mockImplementationOnce(() => {
         requestRpcSourceCancellation(source);
       });
-      state.broadcast(
-        "sessions.changed",
-        { sessionKey: scope.sessionKey, reason: "metadata" },
-        {
-          sessionKeys: [scope.sessionKey],
-          agentId: scope.agentId,
-        },
-      );
+      const publish = () =>
+        state.broadcast(
+          "sessions.changed",
+          { sessionKey: scope.sessionKey, reason: "metadata" },
+          { sessionKeys: [scope.sessionKey], agentId: scope.agentId },
+        );
+      publish();
       const frame = (peer: typeof first, index = 0): { payload: { session: GatewaySessionRow } } =>
         JSON.parse(String(peer.send.mock.calls[index]?.[0]));
       expect(frame(first).payload.session.hasActiveRun).toBe(true);
       expect(frame(second).payload.session.hasActiveRun).toBe(true);
-      state.broadcast(
-        "sessions.changed",
-        { sessionKey: scope.sessionKey, reason: "metadata" },
-        {
-          sessionKeys: [scope.sessionKey],
-          agentId: scope.agentId,
-        },
-      );
+      publish();
       expect(frame(first, 1).payload.session.hasActiveRun).toBe(false);
       expect(frame(second, 1).payload.session.hasActiveRun).toBe(false);
       release();
@@ -220,12 +246,7 @@ describe("gateway connection state", () => {
           },
         );
       }
-      const state = createGatewayConnectionState({
-        scheduler: createTestGatewayScheduler(),
-        bootId: "committed-event-policy",
-        cfg: restricted,
-        getRuntimeConfig: () => runtimeConfig,
-      });
+      const state = makeState("committed-event-policy", restricted, () => runtimeConfig);
       try {
         const projection = await createSessionRowProjection({
           cfg: runtimeConfig,
@@ -236,19 +257,8 @@ describe("gateway connection state", () => {
         try {
           const peer = makeClient("policy-reader", { count: 0 });
           peer.client.connect.scopes = ["operator.sessions.read"];
-          peer.client.connect.client = {
-            id: "openclaw-control-ui",
-            version: "test",
-            platform: "web",
-            mode: "webchat",
-          };
-          peer.client.authenticatedUserProfile = {
-            profileId: reader.id,
-            displayName: "Reader",
-            avatarRevision: "test",
-            hasAvatar: false,
-            updatedAt: reader.updatedAt,
-          };
+          controlUi(peer.client);
+          identify(peer.client, reader.id, "Reader", reader.updatedAt);
           prepareGatewayRecipientProfile(peer.client);
           state.clients.add(peer.client);
           const publish = (stage: string, visibleKeys: string[]) => {
@@ -404,26 +414,11 @@ describe("gateway connection state", () => {
         ["requester", requester],
         ["recipient", recipient],
       ] as const) {
-        peer.client.connect.client = {
-          id: "openclaw-control-ui",
-          version: "test",
-          platform: "web",
-          mode: "webchat",
-        };
-        peer.client.authenticatedUserProfile = {
-          profileId: ensureProfileForEmail(`${name}@example.test`).id,
-          displayName: name,
-          avatarRevision: "test",
-          hasAvatar: false,
-          updatedAt: 1,
-        };
+        controlUi(peer.client);
+        identify(peer.client, ensureProfileForEmail(`${name}@example.test`).id, name);
       }
       using _ = { [Symbol.dispose]: (await prepareUserProfileCatalog()).release };
-      const state = createGatewayConnectionState({
-        scheduler: createTestGatewayScheduler(),
-        bootId: "online-recipients",
-        cfg: { agents: { entries: { main: {} } } },
-      });
+      const state = makeState("online-recipients", { agents: { entries: { main: {} } } });
       onTestFinished(() => state.mentionInbox.dispose());
       for (const peer of [requester, recipient]) {
         prepareGatewayRecipientProfile(peer.client);
@@ -477,21 +472,11 @@ describe("gateway connection state", () => {
         }
       });
       const projection = await createSessionRowProjection({ cfg, modelCatalog: [] });
-      const state = createGatewayConnectionState({
-        scheduler: createTestGatewayScheduler(),
-        bootId: "members",
-        cfg,
-      });
+      const state = makeState("members", cfg);
       const detach = state.attachSessionRowProjection(projection);
       const peers = Array.from({ length: 50 }, (_, index) => {
         const peer = makeClient(`viewer-${index}`, { count: 0 });
-        peer.client.authenticatedUserProfile = {
-          profileId: "member",
-          displayName: null,
-          avatarRevision: "test",
-          hasAvatar: false,
-          updatedAt: 1,
-        };
+        identify(peer.client, "member");
         peer.client.preparedSessionProfile = {
           profileId: "member",
           aliases: new Set(["member"]),
@@ -515,23 +500,15 @@ describe("gateway connection state", () => {
         await projection.ensureMaterialized();
         sessionChanges.emit(scope);
         expect(projection.dirtyRowCount).toBeGreaterThan(0);
-        const sql = observeHostDataSql();
-        try {
+        withoutSql(() => {
           broadcast();
           expect(peers.every((peer) => peer.send.mock.calls.length === 1)).toBe(true);
-          expect(sql.calls.every((call) => call.mock.calls.length === 0)).toBe(true);
-        } finally {
-          sql.restore();
-        }
+        });
         removeSessionMember(scope, "member");
-        const revokedSql = observeHostDataSql();
-        try {
+        withoutSql(() => {
           broadcast();
           expect(peers.every((peer) => peer.send.mock.calls.length === 1)).toBe(true);
-          expect(revokedSql.calls.every((call) => call.mock.calls.length === 0)).toBe(true);
-        } finally {
-          revokedSql.restore();
-        }
+        });
         addSessionMember(scope, { identityId: "member", addedBy: "owner", addedAt: 2 });
         broadcast();
         expect(peers.every((peer) => peer.send.mock.calls.length === 2)).toBe(true);
@@ -541,14 +518,10 @@ describe("gateway connection state", () => {
           visibility: "suggest",
           createdActor: { type: "human", source: "profile", id: "owner" },
         });
-        const replacementSql = observeHostDataSql();
-        try {
+        withoutSql(() => {
           broadcast();
           expect(peers.every((peer) => peer.send.mock.calls.length === 2)).toBe(true);
-          expect(replacementSql.calls.every((call) => call.mock.calls.length === 0)).toBe(true);
-        } finally {
-          replacementSql.restore();
-        }
+        });
         await projection.ensureMaterialized();
         expect(
           projection.describe({ agentId: scope.agentId, key: scope.sessionKey })?.membership.size,
@@ -626,22 +599,12 @@ describe("gateway connection state", () => {
         );
       }
       const projection = await createSessionRowProjection({ cfg, modelCatalog: [] });
-      const state = createGatewayConnectionState({
-        scheduler: createTestGatewayScheduler(),
-        bootId: "presence-boundaries",
-        cfg,
-      });
+      const state = makeState("presence-boundaries", cfg);
       const detach = state.attachSessionRowProjection(projection);
       const peers = ["reader", "admin", "trailing-reader"].map((name) => {
         const peer = makeClient(`presence-${name}`, { count: 0 });
         peer.client.connect.scopes = [name === "admin" ? "operator.admin" : "operator.read"];
-        peer.client.authenticatedUserProfile = {
-          profileId: reader.id,
-          displayName: null,
-          avatarRevision: "test",
-          hasAvatar: false,
-          updatedAt: reader.updatedAt,
-        };
+        identify(peer.client, reader.id, null, reader.updatedAt);
         prepareGatewayRecipientProfile(peer.client);
         state.clients.add(peer.client);
         return peer;
@@ -741,11 +704,7 @@ describe("gateway connection state", () => {
   });
 
   it("bounds targeted delivery and connection lookups to the requested connection", () => {
-    const state = createGatewayConnectionState({
-      scheduler: createTestGatewayScheduler(),
-      bootId: "targeted-delivery",
-      cfg: {} as OpenClawConfig,
-    });
+    const state = makeState("targeted-delivery");
     onTestFinished(() => state.mentionInbox.dispose());
     const reads = { count: 0 };
     for (let index = 0; index < 256; index += 1) {
@@ -800,11 +759,7 @@ describe("gateway connection state", () => {
   });
 
   it("preserves connection insertion order for targeted fanout", () => {
-    const state = createGatewayConnectionState({
-      scheduler: createTestGatewayScheduler(),
-      bootId: "ordered-delivery",
-      cfg: {} as OpenClawConfig,
-    });
+    const state = makeState("ordered-delivery");
     onTestFinished(() => state.mentionInbox.dispose());
     const reads = { count: 0 };
     const sendOrder: string[] = [];

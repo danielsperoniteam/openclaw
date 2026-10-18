@@ -1,11 +1,19 @@
+import { expectDefined } from "@openclaw/normalization-core/expect";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { reconcileHeartbeatMonitorJobs } from "../cron/heartbeat-monitor.js";
-import type { CronJob } from "../cron/types.js";
+import type { CronJob, CronJobCreate } from "../cron/types.js";
 
 const logger = { warn: vi.fn() };
 
 type AddOptions = { matchesExisting?: (job: CronJob) => boolean };
+
+function heartbeatConfig(
+  every: string,
+  entries: NonNullable<OpenClawConfig["agents"]>["entries"] = { main: {} },
+): OpenClawConfig {
+  return { agents: { ownership: "explicit", defaults: { heartbeat: { every } }, entries } };
+}
 
 function monitorJob(agentId: string, id = `job-${agentId}`): CronJob {
   return {
@@ -55,13 +63,10 @@ describe("reconcileHeartbeatMonitorJobs", () => {
         }
         return { ok: true, removed: true };
       });
-      const cfg: OpenClawConfig = {
-        agents: {
-          ownership: "explicit",
-          defaults: { heartbeat: { every: "30m" } },
-          entries: mutation === "add" ? { a: {}, b: {}, c: {} } : { main: {} },
-        },
-      };
+      const cfg = heartbeatConfig(
+        "30m",
+        mutation === "add" ? { a: {}, b: {}, c: {} } : { main: {} },
+      );
       try {
         const result = await reconcileHeartbeatMonitorJobs({
           cron: {
@@ -112,13 +117,7 @@ describe("reconcileHeartbeatMonitorJobs", () => {
       await expect(
         reconcileHeartbeatMonitorJobs({
           cron: { add, remove: vi.fn(), list: vi.fn(async () => []) } as never,
-          cfg: {
-            agents: {
-              ownership: "explicit",
-              defaults: { heartbeat: { every: "30m" } },
-              entries: { a: {}, b: {} },
-            },
-          },
+          cfg: heartbeatConfig("30m", { a: {}, b: {} }),
           logger,
           commitGuard,
         }),
@@ -130,7 +129,7 @@ describe("reconcileHeartbeatMonitorJobs", () => {
   });
 
   it("converges one monitor per heartbeat agent and prunes unconfigured ones", async () => {
-    const add = vi.fn(async (input: { declarationKey?: string }, _options?: AddOptions) => ({
+    const add = vi.fn(async (input: CronJobCreate, _options?: AddOptions) => ({
       job: input,
     }));
     const remove = vi.fn(async () => ({ ok: true }));
@@ -162,49 +161,38 @@ describe("reconcileHeartbeatMonitorJobs", () => {
       logger,
     });
 
-    const declarationKeys = add.mock.calls.map(
-      ([input]) => (input as { declarationKey?: string }).declarationKey,
-    );
+    const declarationKeys = add.mock.calls.map(([input]) => input.declarationKey);
     expect(declarationKeys.toSorted((a, b) => (a ?? "").localeCompare(b ?? ""))).toEqual([
       "heartbeat:main",
       "heartbeat:ops",
     ]);
-    for (const [input] of add.mock.calls) {
-      const spec = input as {
-        payload: { kind: string };
-        schedule: { kind: string; everyMs: number; anchorMs?: number };
-        sessionTarget: string;
-        enabled: boolean;
-      };
-      expect(spec.payload).toEqual({ kind: "heartbeat" });
-      expect(spec.schedule.kind).toBe("every");
-      expect(spec.schedule.everyMs).toBe(15 * 60_000);
+    for (const [input, opts] of add.mock.calls) {
+      expect(input.payload).toEqual({ kind: "heartbeat" });
+      expect(input).toMatchObject({
+        schedule: { kind: "every", everyMs: 15 * 60_000 },
+        sessionTarget: "main",
+        enabled: true,
+      });
+      if (input.schedule.kind !== "every") {
+        throw new Error("expected heartbeat interval");
+      }
       // Deterministic phase anchor spreads multi-agent beats inside the interval.
-      expect(spec.schedule.anchorMs).toBeGreaterThanOrEqual(0);
-      expect(spec.schedule.anchorMs).toBeLessThan(15 * 60_000);
-      expect(spec.sessionTarget).toBe("main");
-      expect(spec.enabled).toBe(true);
-    }
-    // Only the stale monitor is pruned; user jobs without the prefix survive.
-    expect(remove).toHaveBeenCalledTimes(1);
-    expect(remove).toHaveBeenCalledWith("job-stale-agent", { systemOwned: true });
-    // Declarative matching is scoped to real monitors so a colliding user job
-    // is never adopted by the system upsert.
-    for (const call of add.mock.calls) {
-      const input = call[0] as { agentId: string };
-      const opts = call[1];
+      expect(input.schedule.anchorMs).toBeGreaterThanOrEqual(0);
+      expect(input.schedule.anchorMs).toBeLessThan(15 * 60_000);
       if (!opts) {
         throw new Error("expected system-owned add options");
       }
-      expect(opts.matchesExisting?.(monitorJob(input.agentId))).toBe(true);
+      const agentId = expectDefined(input.agentId, "heartbeat agent");
+      expect(opts.matchesExisting?.(monitorJob(agentId))).toBe(true);
       expect(opts.matchesExisting?.(monitorJob("another-agent"))).toBe(false);
       expect(
         opts.matchesExisting?.({
-          ...monitorJob(input.agentId),
+          ...monitorJob(agentId),
           payload: { kind: "systemEvent", text: "user" },
         } as CronJob),
       ).toBe(false);
     }
+    expect(remove).toHaveBeenCalledExactlyOnceWith("job-stale-agent", { systemOwned: true });
   });
 
   it("keeps a stable disabled monitor when heartbeat cadence is disabled", async () => {

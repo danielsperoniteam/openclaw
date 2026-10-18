@@ -32,6 +32,18 @@ import {
 } from "./server-control-ui-root.js";
 import { makeMockHttpResponse } from "./test-http-response.js";
 
+const buildResult = {
+  stdout: "",
+  stderr: "",
+  code: 0,
+  signal: null,
+  killed: false,
+  termination: "exit",
+};
+const assetId = (buildId: string) => `${buildId}-${"a".repeat(64)}`;
+const macRoot = () =>
+  path.join(fixture.root, "OpenClaw.app", "Contents", "Resources", "control-ui");
+
 async function requestIndex(root: ControlUiRootState) {
   const response = makeMockHttpResponse();
   await handleControlUiHttpRequest(
@@ -47,7 +59,7 @@ async function writeUi(root: string, buildId: string) {
   await fs.writeFile(path.join(root, "assets/startup.js"), "export {};");
   await fs.writeFile(
     path.join(root, "index.html"),
-    `<html data-openclaw-control-ui-build-id="${buildId}-${"a".repeat(64)}"><script src="./assets/startup.js"></script></html>`,
+    `<html data-openclaw-control-ui-build-id="${assetId(buildId)}"><script src="./assets/startup.js"></script></html>`,
   );
 }
 
@@ -95,14 +107,7 @@ describe("source-selected Control UI identity preparation", () => {
         new Promise((resolve) => {
           finishBuild = async () => {
             await writeUi(selectedRoot, buildId);
-            resolve({
-              stdout: "",
-              stderr: "",
-              code: 0,
-              signal: null,
-              killed: false,
-              termination: "exit",
-            });
+            resolve(buildResult);
           };
         }),
     );
@@ -127,11 +132,11 @@ describe("source-selected Control UI identity preparation", () => {
     expect(rootReference).toMatchObject({
       kind: "bundled",
       path: selectedRoot,
-      publicAssetBuildId: `${buildId}-${"a".repeat(64)}`,
+      publicAssetBuildId: assetId(buildId),
     });
     const ready = await requestIndex(rootReference);
     expect(ready.res.statusCode).toBe(200);
-    expect(String(ready.end.mock.calls[0]?.[0])).toContain(`${buildId}-${"a".repeat(64)}`);
+    expect(String(ready.end.mock.calls[0]?.[0])).toContain(assetId(buildId));
     await lifecycle.start();
     await lifecycle.stop();
     expect(fixture.build).toHaveBeenCalledOnce();
@@ -143,13 +148,7 @@ describe("source-selected Control UI identity preparation", () => {
     "preserves the %s root without rebuilding",
     async (kind) => {
       if (kind === "macOS") {
-        fixture.selectedRoot = path.join(
-          fixture.root,
-          "OpenClaw.app",
-          "Contents",
-          "Resources",
-          "control-ui",
-        );
+        fixture.selectedRoot = macRoot();
       }
       await writeUi(
         fixture.selectedRoot,
@@ -170,14 +169,7 @@ describe("source-selected Control UI identity preparation", () => {
   );
 
   test("reports an unchanged UI after a successful builder instead of publishing it", async () => {
-    fixture.build.mockResolvedValueOnce({
-      stdout: "",
-      stderr: "",
-      code: 0,
-      signal: null,
-      killed: false,
-      termination: "exit",
-    });
+    fixture.build.mockResolvedValueOnce(buildResult);
     const { lifecycle, warn } = createLifecycle();
     await lifecycle.start();
     await lifecycle.stop();
@@ -190,13 +182,7 @@ describe("source-selected Control UI identity preparation", () => {
     "does not mask %s macOS Resources with a healthy source dist",
     async (kind) => {
       await writeUi(fixture.selectedRoot, fixture.buildId);
-      fixture.selectedRoot = path.join(
-        fixture.root,
-        "OpenClaw.app",
-        "Contents",
-        "Resources",
-        "control-ui",
-      );
+      fixture.selectedRoot = macRoot();
       await writeUi(fixture.selectedRoot, "2026.9.1-runtime-a");
       if (kind === "incomplete") {
         await fs.unlink(path.join(fixture.selectedRoot, "assets", "startup.js"));

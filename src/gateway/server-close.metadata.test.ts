@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
 import { expect, it, vi } from "vitest";
+import { awaitGateBeforeSettlement } from "../../test/helpers/promise.js";
 import { getPluginValueInstance } from "../plugins/plugin-instance-scope.js";
 import { PluginRuntimeCloseRetainedError } from "../plugins/runtime-close-error.js";
 import { disposePluginRegistryInstances } from "../plugins/runtime.js";
@@ -14,6 +15,26 @@ import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import { createGatewayMetadataCloseFixture as createFixture } from "./server-close.metadata.test-support.js";
 import { loadGatewayPlugins } from "./server-plugins.js";
 
+async function start(fixture: Awaited<ReturnType<typeof createFixture>>) {
+  const port = await fixture.reservePort();
+  const server = await fixture.start(port);
+  const kernel = fixture.kernels.get(port);
+  assert(kernel);
+  return { server, kernel };
+}
+
+function setupOwner(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  kernel: Awaited<ReturnType<typeof start>>["kernel"],
+) {
+  const metadata = kernel.getPluginMetadataSnapshot();
+  assert(metadata);
+  const callback = fixture.loadCallback(metadata);
+  const owner = getPluginValueInstance(callback);
+  assert(owner);
+  return { callback, owner };
+}
+
 it("retires retained Gateway bindings after metadata close fails", async () => {
   const fixture = await createFixture("gateway-context-close-failure");
   const entered = createDeferredCore();
@@ -23,10 +44,7 @@ it("retires retained Gateway bindings after metadata close fails", async () => {
   let closing: Promise<unknown> | undefined;
   let restoreClose: (() => void) | undefined;
   try {
-    const port = await fixture.reservePort();
-    const server = await fixture.start(port);
-    const kernel = fixture.kernels.get(port);
-    assert(kernel);
+    const { server, kernel } = await start(fixture);
     let available: PluginRuntime["gateway"]["isAvailable"] | undefined;
     const loader = await import("../plugins/loader.js");
     const load = loader.loadOpenClawPluginsAsync;
@@ -64,12 +82,7 @@ it("retires retained Gateway bindings after metadata close fails", async () => {
       });
     restoreClose = () => held.mockRestore();
     closing = server.close({ reason: "retire bound context" }).catch((error: unknown) => error);
-    await Promise.race([
-      entered.promise,
-      closing.then(() => {
-        throw new Error("metadata close not reached");
-      }),
-    ]);
+    await awaitGateBeforeSettlement(entered.promise, closing, "metadata close not reached");
     await expect(available()).resolves.toBe(true);
     release.resolve();
     const result = await closing;
@@ -94,15 +107,8 @@ it("joins managed setup cleanup before releasing shared state and secrets", asyn
   const release = createDeferredCore();
   let closing: Promise<void> | undefined;
   try {
-    const port = await fixture.reservePort();
-    const server = await fixture.start(port);
-    const kernel = fixture.kernels.get(port);
-    assert(kernel);
-    const metadata = kernel.getPluginMetadataSnapshot();
-    assert(metadata);
-    const callback = fixture.loadCallback(metadata);
-    const owner = getPluginValueInstance(callback);
-    assert(owner);
+    const { server, kernel } = await start(fixture);
+    const { owner } = setupOwner(fixture, kernel);
     const database = openOpenClawStateDatabase({ env: fixture.state.env }).db;
     assert(getActiveSecretsRuntimeSnapshotState());
     owner.lifecycle.onDispose(async () => {
@@ -113,12 +119,11 @@ it("joins managed setup cleanup before releasing shared state and secrets", asyn
     closing = server.close({ reason: "join setup cleanup" }).then(() => {
       settled = true;
     });
-    await Promise.race([
+    await awaitGateBeforeSettlement(
       entered.promise,
-      closing.then(() => {
-        throw new Error("Gateway closed without joining its setup owner");
-      }),
-    ]);
+      closing,
+      "Gateway closed without joining its setup owner",
+    );
     await nextTurn();
     expect(settled).toBe(false);
     expect(database.isOpen).toBe(true);
@@ -146,15 +151,8 @@ it("refuses a new Gateway until the final shared-state reset finishes", async ()
   let closing: Promise<void> | undefined;
   let reset: { enabled: boolean } | undefined;
   try {
-    const port = await fixture.reservePort();
-    const server = await fixture.start(port);
-    const kernel = fixture.kernels.get(port);
-    assert(kernel);
-    const metadata = kernel.getPluginMetadataSnapshot();
-    assert(metadata);
-    const callback = fixture.loadCallback(metadata);
-    const setupOwner = getPluginValueInstance(callback);
-    assert(setupOwner);
+    const { server, kernel } = await start(fixture);
+    const { callback, owner } = setupOwner(fixture, kernel);
     reset = resolveGlobalSingleton(
       Symbol("gateway-metadata-final-reset-fixture"),
       () => ({ enabled: true }),
@@ -167,13 +165,12 @@ it("refuses a new Gateway until the final shared-state reset finishes", async ()
       "close-only",
     );
     closing = server.close({ reason: "hold final shared reset" });
-    await Promise.race([
+    await awaitGateBeforeSettlement(
       entered.promise,
-      closing.then(() => {
-        throw new Error("Gateway closed without entering the final shared reset");
-      }),
-    ]);
-    expect(setupOwner.lifecycle.signal.aborted).toBe(true);
+      closing,
+      "Gateway closed without entering the final shared reset",
+    );
+    expect(owner.lifecycle.signal.aborted).toBe(true);
     expect(() => callback()).toThrow("reloaded or disabled");
     const attempted = await fixture.start(await fixture.reservePort()).then(
       (admitted) => ({ admitted }),
