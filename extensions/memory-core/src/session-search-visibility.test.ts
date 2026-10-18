@@ -68,53 +68,39 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
     expect(filtered).toStrictEqual([]);
   });
 
-  it.each(["configured"] as const)(
-    "does not load session history for memory-only hits with recall corpus %s",
-    async (corpus) => {
-      const guard = vi.spyOn(sessionVisibility, "createSessionVisibilityGuard");
-      const hits: MemorySearchResult[] = [searchHit("memory/foo.md", "memory", "x")];
-      const filtered = await filter(hits, {
-        cfg: visibilityConfig("all"),
-        requesterSessionKey: "agent:main:main",
-        conversationRecall: {
-          anchorSessionKey: "agent:main:main",
-          scope: "same-agent-private",
-          corpus,
-        },
-      });
-      expect(filtered).toEqual(hits);
-      expect(sessionTranscriptHit.loadCombinedSessionStoreForGatewayAsync).not.toHaveBeenCalled();
-      expect(guard).not.toHaveBeenCalled();
-    },
-  );
+  it("does not load session history for memory-only hits with configured recall", async () => {
+    const guard = vi.spyOn(sessionVisibility, "createSessionVisibilityGuard");
+    const hits: MemorySearchResult[] = [searchHit("memory/foo.md", "memory", "x")];
+    const filtered = await filter(hits, {
+      cfg: visibilityConfig("all"),
+      requesterSessionKey: "agent:main:main",
+      conversationRecall: {
+        anchorSessionKey: "agent:main:main",
+        scope: "same-agent-private",
+        corpus: "configured",
+      },
+    });
+    expect(filtered).toEqual(hits);
+    expect(sessionTranscriptHit.loadCombinedSessionStoreForGatewayAsync).not.toHaveBeenCalled();
+    expect(guard).not.toHaveBeenCalled();
+  });
 
-  it.each([undefined] as const)(
-    "applies %s visibility to unrelated same-agent recall from a voice requester",
-    async (visibility) => {
-      combinedSessionStore = {
-        "agent:main:voice:15550001111": directEntry("voice", 2),
-        [anchorSessionKey]: directEntry("private", 1),
-      };
-      const memoryHit: MemorySearchResult = searchHit(
-        "memory/allowed.md",
-        "memory",
-        "Visible memory",
-      );
-      const sessionHit: MemorySearchResult = searchHit(
-        "sessions/private.jsonl",
-        "sessions",
-        "Private session secret",
-      );
+  it("applies default visibility to unrelated same-agent recall from a voice requester", async () => {
+    combinedSessionStore = {
+      "agent:main:voice:15550001111": directEntry("voice", 2),
+      [anchorSessionKey]: directEntry("private", 1),
+    };
+    const memoryHit = searchHit("memory/allowed.md", "memory", "Visible memory");
+    const sessionHit = searchHit("sessions/private.jsonl", "sessions", "Private session secret");
 
-      const filtered = await filter([memoryHit, sessionHit], {
-        cfg: asOpenClawConfig({ tools: { sessions: { visibility } } }),
-        agentId: "main",
-        requesterSessionKey: "agent:main:voice:15550001111",
-      });
+    const filtered = await filter([memoryHit, sessionHit], {
+      cfg: asOpenClawConfig({ tools: { sessions: { visibility: undefined } } }),
+      agentId: "main",
+      requesterSessionKey: "agent:main:voice:15550001111",
+    });
 
-      expect(filtered).toEqual([memoryHit, sessionHit]);
-    },
-  );
+    expect(filtered).toEqual([memoryHit, sessionHit]);
+  });
 
   it("allows recognized explicit private sessions with persisted direct metadata", async () => {
     const explicitAnchor = "agent:main:explicit:laptop";
@@ -137,11 +123,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
         }),
       }),
     };
-    const hit: MemorySearchResult = searchHit(
-      "sessions/explicit-private.jsonl",
-      "sessions",
-      "private context",
-    );
+    const hit = searchHit("sessions/explicit-private.jsonl", "sessions", "private context");
     const filtered = await recall([hit], {
       requesterSessionKey: `${explicitAnchor}:active-memory:123456abcdef`,
       conversationRecall: {
@@ -162,7 +144,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
       }),
       "agent:main:qa-channel:direct:dm:friend": directEntry("other-private", 1),
     };
-    const hit: MemorySearchResult = searchHit(
+    const hit = searchHit(
       "sessions/main/current.jsonl.reset.2026-08-11T08-00-00.000Z",
       "sessions",
       "prior private context",
@@ -177,11 +159,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
       [anchorSessionKey]: directEntry("current", 2),
       global: directEntry("global-shared", 1),
     };
-    const hit: MemorySearchResult = searchHit(
-      "sessions/global-shared.jsonl",
-      "sessions",
-      "shared global context",
-    );
+    const hit = searchHit("sessions/global-shared.jsonl", "sessions", "shared global context");
     const cfg = asOpenClawConfig({
       session: { scope: "global" },
       tools: { sessions: { visibility: "self" } },
@@ -197,11 +175,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
       "agent:main:global": directEntry("global-shared", 2),
       "agent:main:qa-channel:direct:dm:friend": directEntry("other-private", 1),
     };
-    const hit: MemorySearchResult = searchHit(
-      "sessions/other-private.jsonl",
-      "sessions",
-      "private context",
-    );
+    const hit = searchHit("sessions/other-private.jsonl", "sessions", "private context");
     const cfg = asOpenClawConfig({
       session: { scope: "global" },
       tools: { sessions: { visibility: "self" } },
@@ -225,11 +199,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
       [anchorSessionKey]: directEntry("current", 2),
       "agent:main:explicit:model-run-probe": entry("model-run-probe", 1),
     };
-    const hit: MemorySearchResult = searchHit(
-      "sessions/model-run-probe.jsonl",
-      "sessions",
-      "internal model probe",
-    );
+    const hit = searchHit("sessions/model-run-probe.jsonl", "sessions", "internal model probe");
     const filtered = await recall([hit]);
 
     expect(filtered).toStrictEqual([]);
@@ -248,7 +218,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
         [anchorSessionKey]: directEntry("current", 2),
         "agent:peer:telegram:direct:owner": directEntry("peer-private", 1),
       };
-      const hit: MemorySearchResult = searchHit(path, "sessions", "other agent context");
+      const hit = searchHit(path, "sessions", "other agent context");
       const filtered = await recall([hit], { cfg: visibilityConfig("all") });
 
       expect(filtered).toStrictEqual([]);
@@ -260,11 +230,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
       "agent:main:explicit:laptop": directEntry("current", 2),
       "agent:main:explicit:laptop:active-memory:abcdef123456": entry("helper", 1),
     };
-    const hit: MemorySearchResult = searchHit(
-      "sessions/helper.jsonl",
-      "sessions",
-      "internal helper transcript",
-    );
+    const hit = searchHit("sessions/helper.jsonl", "sessions", "internal helper transcript");
     const filtered = await recall([hit], {
       cfg: visibilityConfig("agent"),
       requesterSessionKey: "agent:main:explicit:laptop:active-memory:123456abcdef",
@@ -278,27 +244,16 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
     expect(filtered).toStrictEqual([]);
   });
 
-  it.each([{ name: "unknown", chatType: undefined }])(
-    "denies $name transcript hits from trusted conversation recall",
-    async ({ chatType }) => {
-      combinedSessionStore = {
-        [anchorSessionKey]: directEntry("current", 2),
-        [chatType ? "agent:main:telegram:group:family" : "agent:main:unknown-surface"]: entry(
-          "candidate",
-          1,
-          chatType ? { chatType } : {},
-        ),
-      };
-      const hit: MemorySearchResult = searchHit(
-        "sessions/candidate.jsonl",
-        "sessions",
-        "not private",
-      );
-      const filtered = await recall([hit], { cfg: visibilityConfig("agent") });
+  it("denies unknown transcript hits from trusted conversation recall", async () => {
+    combinedSessionStore = {
+      [anchorSessionKey]: directEntry("current", 2),
+      "agent:main:unknown-surface": entry("candidate", 1, {}),
+    };
+    const hit = searchHit("sessions/candidate.jsonl", "sessions", "not private");
+    const filtered = await recall([hit], { cfg: visibilityConfig("agent") });
 
-      expect(filtered).toStrictEqual([]);
-    },
-  );
+    expect(filtered).toStrictEqual([]);
+  });
 
   it("rejects a transcript when one alias is private and another alias is shared", async () => {
     combinedSessionStore = {
@@ -306,11 +261,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
       "agent:main:telegram:direct:private-alias": directEntry("candidate", 2),
       "agent:main:telegram:group:shared-alias": entry("candidate", 1, { chatType: "group" }),
     };
-    const hit: MemorySearchResult = searchHit(
-      "sessions/candidate.jsonl",
-      "sessions",
-      "shared transcript",
-    );
+    const hit = searchHit("sessions/candidate.jsonl", "sessions", "shared transcript");
     const filtered = await recall([hit], { cfg: visibilityConfig("agent") });
 
     expect(filtered).toStrictEqual([]);
@@ -321,7 +272,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
       "agent:main:telegram:group:family": entry("current", 2, { chatType: "group" }),
       "agent:main:webchat:direct:owner": directEntry("past", 1),
     };
-    const hit: MemorySearchResult = searchHit("sessions/past.jsonl", "sessions", "private context");
+    const hit = searchHit("sessions/past.jsonl", "sessions", "private context");
     const conversationRecall = {
       anchorSessionKey: "agent:main:telegram:group:family",
       scope: "same-agent-private" as const,
@@ -351,17 +302,10 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
 
   it("preserves ordinary memory while denying unauthorized configured transcript recall", async () => {
     combinedSessionStore = {};
-    const memoryHit: MemorySearchResult = searchHit(
-      "MEMORY.md",
-      "memory",
-      "shared workspace memory",
-    );
-    const sessionHit: MemorySearchResult = searchHit(
-      "sessions/private.jsonl",
-      "sessions",
-      "private transcript",
-      { score: 0.9 },
-    );
+    const memoryHit = searchHit("MEMORY.md", "memory", "shared workspace memory");
+    const sessionHit = searchHit("sessions/private.jsonl", "sessions", "private transcript", {
+      score: 0.9,
+    });
     const filtered = await recall([memoryHit, sessionHit], {
       cfg: visibilityConfig("all"),
       requesterSessionKey: "agent:main:main:active-memory:abcdef123456",
@@ -379,7 +323,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
     combinedSessionStore = {
       [anchorSessionKey]: directEntry("current", 2),
     };
-    const hit: MemorySearchResult = searchHit("memory/private.md", "memory", "workspace memory");
+    const hit = searchHit("memory/private.md", "memory", "workspace memory");
     const filtered = await recall([hit], { cfg: visibilityConfig("agent") });
 
     expect(filtered).toStrictEqual([]);
@@ -396,7 +340,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
           chatType: "channel",
         }),
       };
-      const hit: MemorySearchResult = searchHit("sessions/team.jsonl", "sessions", "team context");
+      const hit = searchHit("sessions/team.jsonl", "sessions", "team context");
 
       const filtered = await filter([hit], {
         cfg: asOpenClawConfig({
@@ -413,7 +357,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
 
   it("keeps same-agent live orphan transcript hits", async () => {
     combinedSessionStore = {};
-    const hit: MemorySearchResult = searchHit("sessions/main/live-orphan.jsonl", "sessions", "x");
+    const hit = searchHit("sessions/main/live-orphan.jsonl", "sessions", "x");
     const filtered = await filter([hit], {
       cfg: visibilityConfig("agent"),
       requesterSessionKey: "agent:main:main",
@@ -423,7 +367,7 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
 
   it("does not treat a same-agent orphan filename as proven self-session lineage", async () => {
     combinedSessionStore = {};
-    const hit: MemorySearchResult = searchHit("sessions/main/main.jsonl", "sessions", "x");
+    const hit = searchHit("sessions/main/main.jsonl", "sessions", "x");
     const filtered = await filter([hit], {
       requesterSessionKey: "agent:main:main",
     });

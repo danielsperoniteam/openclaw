@@ -12,6 +12,15 @@ import { asOpenClawConfig } from "./tools.test-helpers.js";
 
 let combinedSessionStore: Record<string, TestSessionEntry> = {};
 const anchorSessionKey = "agent:main:telegram:direct:owner";
+const directEntry = (id: string, updatedAt: number) =>
+  sessionEntry(id, updatedAt, `/tmp/sessions/${id}.jsonl`, { chatType: "direct" });
+const archiveRecord = (archiveName: string, sessionId: string) => ({
+  agentId: "main",
+  archiveName,
+  sessionId,
+  sessionKey: anchorSessionKey,
+  createdAt: 1,
+});
 
 function filter(
   hits: MemorySearchResult[],
@@ -53,40 +62,28 @@ vi.mock("openclaw/plugin-sdk/session-transcript-hit", async (importOriginal) => 
 describe("reset-generation session search visibility", () => {
   beforeEach(() => {
     combinedSessionStore = {
-      [anchorSessionKey]: sessionEntry("current", 2, "/tmp/sessions/current.jsonl", {
-        chatType: "direct",
-      }),
+      [anchorSessionKey]: directEntry("current", 2),
     };
   });
   afterEach(() => {
     vi.mocked(sessionTranscriptHit.loadCombinedSessionStoreForGatewayAsync).mockClear();
-    vi.mocked(engineSessions.readSessionResetRecallCutoff).mockReset();
-    vi.mocked(engineSessions.readSessionResetRecallCutoff).mockResolvedValue({ state: "absent" });
-    vi.mocked(engineSessions.loadArchivedSessionsAsync).mockReset();
-    vi.mocked(engineSessions.loadArchivedSessionsAsync).mockResolvedValue([]);
+    vi.mocked(engineSessions.readSessionResetRecallCutoff)
+      .mockReset()
+      .mockResolvedValue({ state: "absent" });
+    vi.mocked(engineSessions.loadArchivedSessionsAsync).mockReset().mockResolvedValue([]);
     combinedSessionStore = {};
   });
 
   it("resolves bounded archive filenames through canonical SQLite identity", async () => {
     const archivedSessionId = `oversized-${"x".repeat(300)}`;
-    const sessionKey = anchorSessionKey;
     const archiveName = `session-${"a".repeat(64)}.jsonl.reset.2026-08-11T08-00-00.000Z.zst`;
     combinedSessionStore = {
-      [sessionKey]: sessionEntry(
-        "current-after-reset",
-        2,
-        "/tmp/sessions/current-after-reset.jsonl",
-        { chatType: "direct" },
-      ),
+      [anchorSessionKey]: directEntry("current-after-reset", 2),
     };
     vi.mocked(engineSessions.loadArchivedSessionsAsync).mockResolvedValue([
-      { agentId: "main", archiveName, sessionId: archivedSessionId, sessionKey, createdAt: 1 },
+      archiveRecord(archiveName, archivedSessionId),
     ]);
-    const hit: MemorySearchResult = searchHit(
-      `sessions/main/${archiveName}`,
-      "sessions",
-      "retained context",
-    );
+    const hit = searchHit(`sessions/main/${archiveName}`, "sessions", "retained context");
 
     await expect(
       filter([hit], {
@@ -94,7 +91,7 @@ describe("reset-generation session search visibility", () => {
           session: { store: "/tmp/memory-search-archive-test/sessions.json" },
           tools: { sessions: { visibility: "self" } },
         }),
-        requesterSessionKey: sessionKey,
+        requesterSessionKey: anchorSessionKey,
         conversationRecall: undefined,
       }),
     ).resolves.toEqual([hit]);
@@ -106,20 +103,19 @@ describe("reset-generation session search visibility", () => {
   });
 
   it("rechecks private conversation metadata after awaiting archive inventory", async () => {
-    const sessionKey = anchorSessionKey;
     const archiveName = "previous.jsonl.reset.2026-08-11T08-00-00.000Z";
     combinedSessionStore = {
-      [sessionKey]: sessionEntry("current", 2, "/tmp/current.jsonl", { chatType: "direct" }),
+      [anchorSessionKey]: sessionEntry("current", 2, "/tmp/current.jsonl", { chatType: "direct" }),
     };
     vi.mocked(engineSessions.loadArchivedSessionsAsync).mockImplementationOnce(async () => {
       combinedSessionStore = {
-        [sessionKey]: sessionEntry("current", 3, "/tmp/current.jsonl", { chatType: "group" }),
+        [anchorSessionKey]: sessionEntry("current", 3, "/tmp/current.jsonl", { chatType: "group" }),
       };
-      return [{ agentId: "main", archiveName, sessionId: "previous", sessionKey, createdAt: 1 }];
+      return [archiveRecord(archiveName, "previous")];
     });
     await expect(
       filter([searchHit(`sessions/main/${archiveName}`, "sessions", "private context")], {
-        requesterSessionKey: sessionKey,
+        requesterSessionKey: anchorSessionKey,
       }),
     ).resolves.toEqual([]);
   });
@@ -135,12 +131,10 @@ describe("reset-generation session search visibility", () => {
     } else {
       vi.mocked(engineSessions.readSessionResetRecallCutoff).mockResolvedValue(cutoff);
     }
-    const hit: MemorySearchResult = searchHit(
-      "sessions/main/current.jsonl",
-      "sessions",
-      "short fact",
-      { startLine: range[0], endLine: range[1] },
-    );
+    const hit = searchHit("sessions/main/current.jsonl", "sessions", "short fact", {
+      startLine: range[0],
+      endLine: range[1],
+    });
 
     await expect(filter([hit])).resolves.toEqual([]);
   });
@@ -179,11 +173,9 @@ describe("reset-generation session search visibility", () => {
   });
 
   it("denies an archived deleted generation from another private conversation", async () => {
-    combinedSessionStore["agent:main:telegram:direct:deleted-source"] = sessionEntry(
+    combinedSessionStore["agent:main:telegram:direct:deleted-source"] = directEntry(
       "deleted-source",
       1,
-      "/tmp/sessions/deleted-source.jsonl",
-      { chatType: "direct" },
     );
     const hit = searchHit(
       "sessions/main/deleted-source.jsonl.deleted.2026-08-11T08-00-00.000Z",
