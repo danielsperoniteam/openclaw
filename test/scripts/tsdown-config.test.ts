@@ -103,6 +103,42 @@ it("keeps the standalone launcher bootstrap within its measured metadata-only bo
   }
 });
 
+it("keeps catalog projections independent of discovery I/O", async () => {
+  const selected = configs.find((config) => config.name === TSDOWN_UNIFIED_CONFIG_GROUP);
+  if (!selected) {
+    throw new Error("Missing unified build config");
+  }
+  const { bundles } = await build({
+    ...selected,
+    config: false,
+    entry: { "catalog-projections": "src/plugins/catalog-discovery.ts" },
+    outDir: createTempDir("openclaw-catalog-projections-"),
+    dts: false,
+    logLevel: "silent",
+  });
+  try {
+    const chunks = bundles.flatMap((bundle) =>
+      bundle.chunks.filter((chunk) => chunk.type === "chunk"),
+    );
+    const modules = chunks.flatMap((chunk) =>
+      Object.entries(chunk.modules)
+        .filter(([, module]) => module.renderedLength > 0)
+        .map(([id]) => id.replaceAll("\\", "/")),
+    );
+    expect(
+      modules.filter((id) =>
+        /\/src\/(?:plugins\/(?:management-service|catalog-discovery-runtime)|skills\/discovery\/status)\.ts$/u.test(
+          id,
+        ),
+      ),
+    ).toEqual([]);
+  } finally {
+    for (const bundle of bundles) {
+      await bundle[Symbol.asyncDispose]();
+    }
+  }
+});
+
 const workerBuildTargets = [
   ["worker", "worker/worker", "src/worker/worker-deploy-entry.ts"],
   ["code-mode-node", "worker/code-mode-node.worker", "src/agents/code-mode-node.worker.ts"],
