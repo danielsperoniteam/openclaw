@@ -15,7 +15,10 @@ import { admitSqliteSchema, getAdmittedSqliteSchemaFacts } from "../infra/sqlite
 import { extractSqliteTableSchema } from "../infra/sqlite-schema-sql.js";
 import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import { requireNativeSqliteDatabase } from "../test-utils/native-sqlite.js";
-import { OPENCLAW_STATE_SCHEMA_VERSION } from "./openclaw-state-db-contract.js";
+import {
+  OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
+  OPENCLAW_STATE_SCHEMA_VERSION,
+} from "./openclaw-state-db-contract.js";
 import { assertExistingOpenClawStateRuntimeSchema } from "./openclaw-state-db-existing-schema.js";
 import { openExistingOpenClawStateWriter } from "./openclaw-state-db-existing-write.js";
 import {
@@ -45,9 +48,13 @@ it("preserves full verification across a disposable startup checkpoint write", a
   expect(verified).toBeDefined();
   await closeOpenClawStateDatabaseAsync();
   const observed = observeSqliteReadSql(StatementSync.prototype);
+  const exec = vi.spyOn(DatabaseSync.prototype, "exec");
   try {
     withOpenClawStateStartupMigrationCheckpointDatabase(
       (db) => {
+        expect(db.prepare("PRAGMA busy_timeout").get()).toEqual({
+          timeout: OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
+        });
         db.prepare(
           `INSERT INTO state_leases(scope, lease_key, owner, created_at, updated_at)
            VALUES('checkpoint-proof', 'global', 'startup', 1, 1)`,
@@ -55,6 +62,7 @@ it("preserves full verification across a disposable startup checkpoint write", a
       },
       { env, atomic: true },
     );
+    expect(exec.mock.calls.filter(([sql]) => /PRAGMA busy_timeout/iu.test(sql))).toEqual([]);
     expect(readSqliteDatabaseCleanClose(state.path)).toBe(true);
     const reopened = openOpenClawStateDatabase({ env });
     expect(
@@ -64,6 +72,7 @@ it("preserves full verification across a disposable startup checkpoint write", a
       observed.queries.filter((sql) => /PRAGMA (?:integrity|foreign_key)_check/iu.test(sql)),
     ).toEqual([]);
   } finally {
+    exec.mockRestore();
     observed.restore();
   }
 });
