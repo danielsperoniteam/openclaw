@@ -1,6 +1,6 @@
 import { expectDefined } from "@openclaw/normalization-core/expect";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
-import { expect, it, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import {
   awaitGateBeforeSettlement,
   createDeferred,
@@ -111,7 +111,7 @@ it.for([false, true])(
     const { scope, params } = fixture;
     params.idempotencyKey = `ordered-first-${retry}`;
     const profile = ensureProfileForEmail("ordered-preparation@example.test");
-    using _catalog = { [Symbol.dispose]: (await prepareUserProfileCatalog()).release };
+    onTestFinished((await prepareUserProfileCatalog()).release);
     setClientProfile(fixture.client, profile, "Ordering fixture");
     // Keep reply preparation and queue policy real; observe execution after their admission.
     dispatchInboundMessageMock.mockReset();

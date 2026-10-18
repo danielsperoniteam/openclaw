@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   observeHostDataSql,
   trackSqliteStatementExecutions,
@@ -289,7 +289,7 @@ describe("skill library worker reads and prepared selection authority", () => {
         },
       },
     });
-    using _catalog = { [Symbol.dispose]: (await prepareUserProfileCatalog(options)).release };
+    onTestFinished((await prepareUserProfileCatalog(options)).release);
     const { db } = openOpenClawStateDatabase(options);
     using reads = vi.spyOn(stateRead, "executeExistingOpenClawStateRead");
     const before = await prepareSkillLibrarySession(admin, options);
@@ -443,7 +443,7 @@ describe("skill library worker reads and prepared selection authority", () => {
       if (mergeTarget) {
         setUserProfileRole(mergeTarget.id, "blocked", options);
       }
-      using _catalog = { [Symbol.dispose]: (await prepareUserProfileCatalog(options)).release };
+      onTestFinished((await prepareUserProfileCatalog(options)).release);
       const saved = await saveSkillLibrary(alice, draft(), options);
       await mutateSkillLibrary(
         alice,

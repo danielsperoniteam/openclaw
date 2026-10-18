@@ -1,6 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
-import { expect, it, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import {
   awaitGateBeforeSettlement,
   createDeferred,
@@ -353,7 +353,7 @@ it.for(["dispatch", "failure", "cancel"] as const)(
   async (outcome, { signal }) => {
     const fixture = await createFixture({ active: false });
     const profile = ensureProfileForEmail("preparation-ack@example.test");
-    using _catalog = { [Symbol.dispose]: (await prepareUserProfileCatalog()).release };
+    onTestFinished((await prepareUserProfileCatalog()).release);
     setClientProfile(fixture.client, profile, "Preparation fixture");
     const entered = createDeferred();
     const release = createDeferred();
