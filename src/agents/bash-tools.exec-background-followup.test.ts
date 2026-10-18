@@ -8,15 +8,19 @@ import * as sessionEvents from "../auto-reply/reply/session-event-handoff.js";
 import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import { resolveSessionStorePathCore } from "../config/sessions/paths.js";
 import {
+  loadSessionEntry,
   readSessionTranscriptMessageEvents,
   replaceSessionEntry,
+  upsertSessionEntryCore,
 } from "../config/sessions/session-accessor.js";
 import * as sessionReads from "../config/sessions/session-entry-read-runtime.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { removeCronRunContinuationSessionIfIdle } from "../cron/run-continuation-cleanup.js";
 import { claimAgentRunContext, releaseAgentRunContext } from "../infra/agent-run-registry.js";
 import { resetSystemEventsForTest } from "../infra/system-events.js";
 import { withSessionTurn } from "../sessions/session-controller.admission.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
+import { createDeferredCore } from "../shared/deferred.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
 import {
@@ -156,6 +160,22 @@ test.for(["ordinary", "live cron", "queued cron", "ended cron", "cron ended duri
       : "agent:main:main";
     const sessionId = sessionKey.replaceAll(":", "-");
     await seedOrigin(sessionKey);
+    const exact = { agentId: "main", sessionKey };
+    const base = { agentId: "main", sessionKey: "agent:main:cron:nightly" };
+    const removed = createDeferredCore();
+    let unsubscribe = () => {};
+    if (scenario === "queued cron") {
+      await replaceSessionEntry(base, expectDefined(loadSessionEntry(exact), "cron base entry"));
+      unsubscribe = sessionChanges.subscribeFacts((change) => {
+        if (
+          "sessionKey" in change &&
+          change.sessionKey === sessionKey &&
+          change.facts?.kind === "removed"
+        ) {
+          removed.resolve();
+        }
+      });
+    }
     const claim = claimAgentRunContext(
       "cron-run-followup",
       { sessionKey, sessionId, agentId: "main" },
@@ -200,6 +220,16 @@ test.for(["ordinary", "live cron", "queued cron", "ended cron", "cron ended duri
           expect(
             readSessionTranscriptMessageEvents({ agentId: "main", sessionKey, sessionId }),
           ).toEqual([]);
+          // Successful cron teardown seals the alias after persisting its stable base.
+          await upsertSessionEntryCore(exact, {
+            cronRunContinuation: {
+              lifecycleRevision: "original",
+              phase: "ready",
+              basePersisted: true,
+            },
+          });
+          await removeCronRunContinuationSessionIfIdle(sessionKey);
+          expect(loadSessionEntry(exact)?.sessionId).toBe(sessionId);
           release();
         }
         return started;
@@ -237,9 +267,12 @@ test.for(["ordinary", "live cron", "queued cron", "ended cron", "cron ended duri
         const [params] = expectDefined(model.mock.calls[0], "completion turn");
         expect(params.sessionKey).toBe(sessionKey);
         if (scenario === "queued cron") {
-          expect(
-            readSessionTranscriptMessageEvents({ agentId: "main", sessionKey, sessionId }),
-          ).toMatchObject([{ event: { type: "message", message: { role: "user" } } }]);
+          await withinTest(removed.promise, signal);
+          expect(loadSessionEntry(exact)).toBeUndefined();
+          expect(loadSessionEntry(base)?.sessionId).toBe(sessionId);
+          expect(readSessionTranscriptMessageEvents({ ...base, sessionId })).toMatchObject([
+            { event: { type: "message", message: { role: "user" } } },
+          ]);
           expect(params.prompt).toContain("CRON_EXEC_DONE");
         }
       }
@@ -252,6 +285,7 @@ test.for(["ordinary", "live cron", "queued cron", "ended cron", "cron ended duri
       });
       expect(result.content).toContainEqual({ type: "text", text: "CRON_EXEC_DONE" });
     } finally {
+      unsubscribe();
       release();
     }
   },

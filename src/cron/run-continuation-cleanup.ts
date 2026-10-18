@@ -10,6 +10,7 @@ import { getAgentEventLifecycleGeneration } from "../infra/agent-events.js";
 import { loadPendingSessionDeliveries } from "../infra/session-delivery-queue-storage.js";
 import { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import {
+  hasSessionControllerQueuedWork,
   isCompetingSessionControllerWorkActive,
   runSessionMutation,
 } from "../sessions/session-controller.lifecycle.js";
@@ -80,7 +81,10 @@ export async function removeCronRunContinuationSessionIfIdle(
     scope: storePath,
     identities: [sessionKey, original.sessionId],
     run: async () => {
-      if (isCompetingSessionControllerWorkActive(storePath, [sessionKey, original.sessionId])) {
+      if (
+        isCompetingSessionControllerWorkActive(storePath, [sessionKey, original.sessionId]) ||
+        hasSessionControllerQueuedWork(storePath, [sessionKey, original.sessionId])
+      ) {
         return;
       }
       const pendingSessionDeliveries = await loadPendingSessionDeliveries(context);
