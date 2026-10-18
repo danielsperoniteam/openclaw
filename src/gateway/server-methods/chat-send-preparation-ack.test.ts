@@ -68,6 +68,12 @@ function expectUserTurn(
   });
 }
 
+async function expectUnstaged(fixture: Fixture) {
+  expect(await listSessionPendingInputs(fixture.scope)).toEqual({ items: [], total: 0 });
+  expect(loadTranscriptEventsSync(fixture.scope)).toEqual(fixture.activeTranscript);
+  expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
+}
+
 it("acknowledges staged chat input and joins its terminal disposition without host pending-input writes", async () => {
   const fixture = await createFixture();
   let clock = 0;
@@ -132,9 +138,7 @@ it("retries a failed custody write with the same request identity without acknow
       expect.objectContaining({ message: expect.stringContaining("custody unavailable") }),
       expect.anything(),
     );
-    expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
-    expect(loadTranscriptEventsSync(fixture.scope)).toEqual(fixture.activeTranscript);
-    expect(await listSessionPendingInputs(fixture.scope)).toEqual({ items: [], total: 0 });
+    await expectUnstaged(fixture);
     expect(rpcSourceTesting.has(fixture.params.idempotencyKey)).toBe(false);
     await getCompetingSessionWorkAdmissionRelease({
       scope: fixture.scope.storePath,
@@ -249,9 +253,7 @@ it.each(["unchanged", "selected profile", "session access"] as const)(
         "Idle send settled before reaching its transcript owner",
       );
       expect(fixture.beforeApprove).not.toHaveBeenCalled();
-      expect(await listSessionPendingInputs(fixture.scope)).toEqual({ items: [], total: 0 });
-      expect(loadTranscriptEventsSync(fixture.scope)).toEqual(fixture.activeTranscript);
-      expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
+      await expectUnstaged(fixture);
       if (change === "selected profile") {
         setClientProfile(fixture.client, other);
       } else if (change === "session access") {
@@ -292,59 +294,48 @@ it.each(["unchanged", "selected profile", "session access"] as const)(
 );
 
 it("recovers an older queued input into one idle transcript commit before ACK", async () => {
-  const fixture = await createFixture({ preserveContent: true });
+  await using fixture = await createFixture({ preserveContent: true });
   const profile = ensureProfileForEmail("queued-input-upgrade@example.test");
   setClientProfile(fixture.client, profile, "Queued input upgrade fixture");
-  try {
-    await fixture.send();
-    await fixture.dispatchedRecorder;
-    const queued = (await listSessionPendingInputs(fixture.scope)).items[0];
-    expect(queued).toMatchObject({ state: "queued", runId: fixture.params.idempotencyKey });
-    expect(loadTranscriptEventsSync(fixture.scope)).toEqual(fixture.activeTranscript);
+  await fixture.send();
+  await fixture.dispatchedRecorder;
+  const queued = (await listSessionPendingInputs(fixture.scope)).items[0];
+  expect(queued).toMatchObject({ state: "queued", runId: fixture.params.idempotencyKey });
+  expect(loadTranscriptEventsSync(fixture.scope)).toEqual(fixture.activeTranscript);
 
-    // Recreate the durable state left by the former two-commit path after a restart.
-    rotateAgentEventLifecycleGeneration();
-    await fixture.finishDispatch();
-    fixture.context.dedupe.clear();
-    const registry = getTestPluginRegistry();
-    registry.typedHooks = registry.typedHooks.filter(
-      (hook) => hook.pluginId !== "approved-input-fixture",
-    );
-    await patchSessionEntryCore(fixture.scope, () => ({ status: "done" }));
-    dispatchInboundMessageMock.mockClear();
+  // Recreate the durable state left by the former two-commit path after a restart.
+  rotateAgentEventLifecycleGeneration();
+  await fixture.finishDispatch();
+  fixture.context.dedupe.clear();
+  const registry = getTestPluginRegistry();
+  registry.typedHooks = registry.typedHooks.filter(
+    (hook) => hook.pluginId !== "approved-input-fixture",
+  );
+  await patchSessionEntryCore(fixture.scope, () => ({ status: "done" }));
+  dispatchInboundMessageMock.mockClear();
 
-    let atAck: ReturnType<typeof loadTranscriptEventsSync> | undefined;
-    let claimAtAck: ReturnType<typeof loadSessionEntry>;
-    const response = await fixture.send(
-      vi.fn<RespondFn>((ok) => {
-        if (ok) {
-          atAck = loadTranscriptEventsSync(fixture.scope);
-          claimAtAck = loadSessionEntry(fixture.scope);
-        }
-      }),
-    );
-    expectStarted(fixture, response);
-    expect(claimAtAck).toMatchObject({
-      sessionId: fixture.scope.sessionId,
-      restartRecoveryDeliveryRunId: fixture.params.idempotencyKey,
-      restartRecoveryDeliverySourceRunId: fixture.params.idempotencyKey,
-    });
-    expect(atAck).toHaveLength(fixture.activeTranscript.length + 1);
-    expect(atAck?.at(-1)).toMatchObject({
-      id: queued?.id,
-      message: {
-        role: "user",
-        content: fixture.params.message,
-        idempotencyKey: `${fixture.params.idempotencyKey}:user`,
-      },
-    });
-    expect(fixture.beforeApprove).toHaveBeenCalledOnce();
-    await fixture.finishDispatch();
-    expect(await listSessionPendingInputs(fixture.scope)).toEqual({ items: [], total: 0 });
-    expect(loadTranscriptEventsSync(fixture.scope)).toEqual(atAck);
-  } finally {
-    await fixture.cleanup();
-  }
+  let atAck: ReturnType<typeof loadTranscriptEventsSync> | undefined;
+  let claimAtAck: ReturnType<typeof loadSessionEntry>;
+  const response = await fixture.send(
+    vi.fn<RespondFn>((ok) => {
+      if (ok) {
+        atAck = loadTranscriptEventsSync(fixture.scope);
+        claimAtAck = loadSessionEntry(fixture.scope);
+      }
+    }),
+  );
+  expectStarted(fixture, response);
+  expect(claimAtAck).toMatchObject({
+    sessionId: fixture.scope.sessionId,
+    restartRecoveryDeliveryRunId: fixture.params.idempotencyKey,
+    restartRecoveryDeliverySourceRunId: fixture.params.idempotencyKey,
+  });
+  expectUserTurn(fixture, atAck);
+  expect(atAck?.at(-1)).toMatchObject({ id: queued?.id });
+  expect(fixture.beforeApprove).toHaveBeenCalledOnce();
+  await fixture.finishDispatch();
+  expect(await listSessionPendingInputs(fixture.scope)).toEqual({ items: [], total: 0 });
+  expect(loadTranscriptEventsSync(fixture.scope)).toEqual(atAck);
 });
 
 it.for(["dispatch", "failure", "cancel"] as const)(
@@ -458,11 +449,10 @@ it.for(["dispatch", "failure", "cancel"] as const)(
         const dispatch = dispatchInboundMessageMock.mock.calls[0]?.[0] as Parameters<
           typeof dispatchInboundMessage
         >[0];
-        expect(dispatch.ctx).toMatchObject({
-          Body: fixture.params.message,
-          MessageSid: fixture.params.idempotencyKey,
+        expect(dispatch).toMatchObject({
+          ctx: { Body: fixture.params.message, MessageSid: fixture.params.idempotencyKey },
+          replyOptions: { skillLibraryAuthoring: { target: "personal" } },
         });
-        expect(dispatch.replyOptions?.skillLibraryAuthoring).toMatchObject({ target: "personal" });
         expect(dispatch.replyOptions?.recordedSessionActivity).toEqual({
           sessionId: fixture.scope.sessionId,
           sessionKey: fixture.scope.sessionKey,

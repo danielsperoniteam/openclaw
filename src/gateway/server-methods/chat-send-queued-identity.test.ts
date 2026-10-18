@@ -42,6 +42,20 @@ const target = captureSessionTarget({
 });
 const ownedSources: RpcSourceRef[] = [];
 const ownedOperations: ReplyOperation[] = [];
+
+function replyBatch(
+  runId: string,
+  completion: QueuedFollowupReplyBatch["completion"],
+  payloads: QueuedFollowupReplyBatch["payloads"] = [],
+  originatingChannel = "webchat",
+): QueuedFollowupReplyBatch {
+  return { kind: "queued-followup", runId, originatingChannel, payloads, completion };
+}
+
+async function waitResult(context: ReturnType<typeof createDirectChatContext>, runId: string) {
+  return (await prepareAgentWaitForTurn(context, { runId, timeoutMs: 0 }).wait()).result;
+}
+
 afterEach(async () => {
   clearFollowupQueue(sessionKey);
   ownedOperations.splice(0).forEach((operation) => operation.complete());
@@ -176,23 +190,14 @@ describe("queued chat input identity", () => {
           runId: id,
           status: "accepted",
         });
-        expect(
-          (await prepareAgentWaitForTurn(context, { runId: id, timeoutMs: 0 }).wait()).result
-            .status,
-        ).toBe("pending");
+        expect((await waitResult(context, id)).status).toBe("pending");
       }
       const collected = collectRuntimeMetadata(inputs.map(({ run }) => run));
       expect(collected.queuedFollowupReplyDisposition?.kind).toBe("deliver");
       if (collected.queuedFollowupReplyDisposition?.kind !== "deliver") {
         throw new Error("missing collected delivery owner");
       }
-      const batch: QueuedFollowupReplyBatch = {
-        kind: "queued-followup",
-        runId: "execution-C",
-        originatingChannel: "webchat",
-        payloads: [],
-        completion,
-      };
+      const batch = replyBatch("execution-C", completion);
       await Promise.all([
         collected.queuedFollowupReplyDisposition.deliver(batch),
         collected.queuedFollowupReplyDisposition.deliver(batch),
@@ -201,9 +206,7 @@ describe("queued chat input identity", () => {
       expect(terminals()).toEqual(ids.map((runId) => expect.objectContaining({ runId, state })));
       expect(ids.every((id) => !isRpcSourceQueued(rpcSourceTesting.get(id)))).toBe(true);
       for (const id of ids) {
-        expect(
-          (await prepareAgentWaitForTurn(context, { runId: id, timeoutMs: 0 }).wait()).result,
-        ).toMatchObject({ runId: id, status });
+        expect(await waitResult(context, id)).toMatchObject({ runId: id, status });
       }
     },
   );
@@ -217,13 +220,7 @@ describe("queued chat input identity", () => {
       throw new Error("progress preparation failed");
     };
     context.getRuntimeConfig = failPreparation;
-    const batch: QueuedFollowupReplyBatch = {
-      kind: "queued-followup",
-      runId: "progress-C",
-      originatingChannel: "webchat",
-      payloads: [{ text: "working" }],
-      completion: { kind: "progress" },
-    };
+    const batch = replyBatch("progress-C", { kind: "progress" }, [{ text: "working" }]);
     await expect(adoption.onQueuedFollowupReplyBatch(batch)).rejects.toThrow(
       "progress preparation failed",
     );
@@ -276,13 +273,9 @@ describe("queued chat input identity", () => {
     expect(context.dedupe.get(`chat:running-B-${count}`)?.payload).toMatchObject({
       status: "accepted",
     });
-    await source.adoption.onQueuedFollowupReplyBatch({
-      kind: "queued-followup",
-      runId: "running-C",
-      originatingChannel: "webchat",
-      payloads: [],
-      completion: { kind: "aborted", stopReason: "aborted" },
-    });
+    await source.adoption.onQueuedFollowupReplyBatch(
+      replyBatch("running-C", { kind: "aborted", stopReason: "aborted" }),
+    );
     expect(terminals()).toEqual([
       expect.objectContaining({ runId: `running-B-${count}`, state: "aborted" }),
     ]);
@@ -294,19 +287,16 @@ describe("queued chat input identity", () => {
     await adoption.lifecycle.onAdopted();
     adoption.onRunStarted("channel-C");
     expect(context.addChatRun).not.toHaveBeenCalled();
-    await adoption.onQueuedFollowupReplyBatch({
-      kind: "queued-followup",
-      runId: "channel-C",
-      originatingChannel: "discord",
-      payloads: [{ text: "channel reply" }],
-      completion: { kind: "progress" },
-    });
+    const batch = replyBatch(
+      "channel-C",
+      { kind: "progress" },
+      [{ text: "channel reply" }],
+      "discord",
+    );
+    await adoption.onQueuedFollowupReplyBatch(batch);
     expect(terminals()).toEqual([]);
     await adoption.onQueuedFollowupReplyBatch({
-      kind: "queued-followup",
-      runId: "channel-C",
-      originatingChannel: "discord",
-      payloads: [{ text: "channel reply" }],
+      ...batch,
       completion: { kind: "completed" },
     });
     expect(terminals()).toEqual([
@@ -328,9 +318,7 @@ describe("queued chat input identity", () => {
           errorMessage: expect.stringContaining("dropped"),
         }),
       ]);
-      expect(
-        (await prepareAgentWaitForTurn(context, { runId: dropped, timeoutMs: 0 }).wait()).result,
-      ).toMatchObject({ runId: dropped, status: "error" });
+      expect(await waitResult(context, dropped)).toMatchObject({ runId: dropped, status: "error" });
     },
   );
 });
