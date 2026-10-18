@@ -376,6 +376,7 @@ describe("health session store paths", () => {
                 await healthCommand({ config: cfg }, fallbackRuntime);
                 const fallbackOutput = stripAnsi(fallbackRuntime.log.mock.calls.flat().join("\n"));
                 expect(fallbackOutput).toContain("Heartbeat interval: 1m (survivor)");
+                expect(fallbackOutput).toContain("Agents: survivor (default)");
                 expect(fallbackOutput).toContain("Session store (survivor):");
                 expect(fallbackOutput).not.toContain("Session store (deleting):");
                 expect(health.defaultAgentId).toBe("survivor");

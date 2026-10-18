@@ -160,10 +160,15 @@ async function prepareHealthAgentSummaries(
   return {
     publish() {
       const stores = prepared.publish();
+      // A deleted configured default hands the display flag to the first surviving row.
+      const displayDefaultId =
+        defaultAgentId && !stores.byAgent.some(({ agent }) => agent.id === defaultAgentId)
+          ? stores.byAgent[0]?.agent.id
+          : defaultAgentId;
       const agents: AgentHealthSummary[] = stores.byAgent.map(({ agent, ...store }) => ({
         agentId: agent.id,
         name: agent.name,
-        isDefault: agent.id === defaultAgentId,
+        isDefault: agent.id === displayDefaultId,
         heartbeat: agent.heartbeat,
         sessions: projectHealthSessions(store.path, store),
       }));
@@ -617,16 +622,8 @@ export async function collectGatewayHealthSnapshot(params: {
   const pluginHealth = buildPluginHealthSummary(cfg);
   const contextEngineHealth = await buildContextEngineHealthSummary();
   const deliveryQueueHealth = await buildDeliveryQueueHealthSummary(stateContext);
-  const published = agentSummaries.publish();
-  const summaryAgent = published.agents.find((agent) => agent.isDefault) ?? published.agents[0];
-  const { sessions } = published;
-  // A deleted configured default hands the display flag to the surviving summary row.
-  const agents =
-    defaultAgentId && summaryAgent && !summaryAgent.isDefault
-      ? published.agents.map((agent) =>
-          agent === summaryAgent ? { ...agent, isDefault: true } : agent,
-        )
-      : published.agents;
+  const { agents, sessions } = agentSummaries.publish();
+  const summaryAgent = agents.find((agent) => agent.isDefault) ?? agents[0];
   const configuredHeartbeatAgentId = normalizeOptionalString(
     cfg.agents?.defaults?.heartbeat?.agentId,
   );
