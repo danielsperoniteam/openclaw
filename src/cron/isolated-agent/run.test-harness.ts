@@ -119,8 +119,6 @@ const setSessionRuntimeModelMock = vi.fn();
 export const registerAgentRunContextMock = vi.fn();
 export const buildSafeExternalPromptMock = vi.fn();
 const detectSuspiciousPatternsMock = vi.fn();
-const mapHookExternalContentSourceMock = vi.fn();
-const isExternalHookSessionMock = vi.fn();
 const resolveHookExternalContentSourceMock = vi.fn();
 const getSkillsSnapshotVersionMock = vi.fn();
 export const loadModelCatalogMock = vi.fn();
@@ -175,8 +173,6 @@ vi.mock("./run.runtime.js", async () => ({
   setSessionRuntimeModel: setSessionRuntimeModelMock,
   logWarn: (...args: unknown[]) => logWarnMock(...args),
   normalizeAgentId: vi.fn((id: string) => id),
-  mapHookExternalContentSource: mapHookExternalContentSourceMock,
-  isExternalHookSession: isExternalHookSessionMock,
   resolveHookExternalContentSource: resolveHookExternalContentSourceMock,
   getRemoteSkillEligibility: getRemoteSkillEligibilityMock,
 }));
@@ -572,8 +568,6 @@ function resetRunConfigMocks(): void {
     ({ message }: { message?: string }) => message ?? "",
   );
   detectSuspiciousPatternsMock.mockReturnValue([]);
-  mapHookExternalContentSourceMock.mockReturnValue("unknown");
-  isExternalHookSessionMock.mockReturnValue(false);
   resolveHookExternalContentSourceMock.mockReturnValue(undefined);
   getSkillsSnapshotVersionMock.mockReturnValue(42);
   loadModelCatalogMock.mockResolvedValue([]);
