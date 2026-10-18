@@ -62,6 +62,10 @@ function writeRuntimeOverride(pluginDir: string) {
   ]);
 }
 
+function entrySource(source: string) {
+  return { source, built: source };
+}
+
 function alphaChannelMetadata({
   includeSetup = false,
   rootDir = path.join(
@@ -76,16 +80,10 @@ function alphaChannelMetadata({
       id: "alpha",
       channels: ["alpha"],
     },
-    source: {
-      source: "./index.js",
-      built: "./index.js",
-    },
+    source: entrySource("./index.js"),
     ...(includeSetup
       ? {
-          setupSource: {
-            source: "./setup-entry.js",
-            built: "./setup-entry.js",
-          },
+          setupSource: entrySource("./setup-entry.js"),
         }
       : {}),
   };
@@ -293,147 +291,99 @@ describe("bundled channel entry shape guards", () => {
     const bundled = await loadBundled("bundled-package-metadata");
 
     const plugin = bundled.getBundledChannelPlugin("alpha");
-    expect(plugin?.meta.id).toBe("alpha");
-    expect(plugin?.meta.label).toBe("Alpha");
-    expect(plugin?.meta.selectionLabel).toBe("Use Alpha");
-    expect(plugin?.meta.docsPath).toBe("/channels/alpha");
-    expect(plugin?.meta.blurb).toBe("Alpha channel metadata.");
+    expect(plugin?.meta).toMatchObject({
+      id: "alpha",
+      label: "Alpha",
+      selectionLabel: "Use Alpha",
+      docsPath: "/channels/alpha",
+      blurb: "Alpha channel metadata.",
+    });
   });
 
-  it("uses the active bundled plugin root override for channel entry loading", async () => {
-    const tempRoot = makeBundledEsmFixtureRoot("openclaw-bundled-override-");
-    const pluginDir = path.join(tempRoot, "dist", "extensions", "alpha");
-    fs.mkdirSync(pluginDir, { recursive: true });
-    writeRuntimeOverride(pluginDir);
-
-    let metadataRootDir: string | undefined;
-    let generatedRootDir: string | undefined;
-
-    vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
-      listBundledChannelPluginMetadata: (params?: { rootDir?: string }) => {
-        metadataRootDir = params?.rootDir;
-        return [alphaChannelMetadata()];
-      },
-      resolveBundledChannelGeneratedPath: (
-        rootDir: string,
-        entry: { built?: string; source?: string },
-        pluginDirName?: string,
-      ) => {
-        generatedRootDir = rootDir;
-        return path.join(
-          rootDir,
-          "dist",
-          "extensions",
-          pluginDirName ?? "alpha",
-          (entry.built ?? entry.source ?? "./index.js").replace(/^\.\//u, ""),
-        );
-      },
-    }));
-
-    vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", path.join(tempRoot, "dist", "extensions"));
-
-    const bundled = await loadBundled("bundled-override-root");
-
-    bundled.setBundledChannelRuntime("alpha", { marker: "ok" } as never);
-
-    expect(metadataRootDir).toBe(tempRoot);
-    expect(generatedRootDir).toBe(tempRoot);
-    expect(testGlobal["__bundledOverrideRuntime"]).toBe("ok");
-    expect(bundled.getBundledChannelPlugin("alpha")?.id).toBe("alpha");
-  });
-
-  it("loads package-local dist entries with SDK aliases", async () => {
-    const root = makeBundledEsmFixtureRoot("openclaw-bundled-package-dist-");
-    const pluginDir = path.join(root, "extensions", "alpha", "dist");
-    writeAlphaSdkAliasDistFixture(pluginDir, "Package dist Alpha");
-
-    vi.doMock("./bundled-root.js", () => ({
-      resolveBundledChannelRootScope: () => ({
-        packageRoot: root,
-        cacheKey: `${root}:package-local-dist`,
-      }),
-    }));
-    vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
-      listBundledChannelPluginMetadata: () => [
-        {
-          ...alphaChannelMetadata(),
-          source: {
-            source: path.join(root, "extensions", "alpha", "index.ts"),
-            built: path.join(root, "extensions", "alpha", "index.ts"),
-          },
-          rootDir: path.join(root, "extensions", "alpha"),
+  it.each(["package", "direct"] as const)(
+    "loads entries through a %s root override",
+    async (layout) => {
+      const root = makeBundledEsmFixtureRoot("openclaw-bundled-override-");
+      const pluginsRoot =
+        layout === "direct"
+          ? path.join(root, "bundled-plugins")
+          : path.join(root, "dist", "extensions");
+      const pluginDir = path.join(pluginsRoot, "alpha");
+      fs.mkdirSync(pluginDir, { recursive: true });
+      writeRuntimeOverride(pluginDir);
+      const observed: {
+        metadata?: { rootDir?: string; scanDir?: string };
+        generated?: { rootDir: string; scanDir?: string };
+      } = {};
+      vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
+        listBundledChannelPluginMetadata: (params?: { rootDir?: string; scanDir?: string }) => {
+          observed.metadata = params;
+          return [alphaChannelMetadata()];
         },
-      ],
-      resolveBundledChannelGeneratedPath: () => path.join(pluginDir, "index.js"),
-    }));
+        resolveBundledChannelGeneratedPath: (
+          rootDir: string,
+          entry: BundledEntrySource,
+          pluginDirName?: string,
+          scanDir?: string,
+        ) => {
+          observed.generated = { rootDir, scanDir };
+          return path.join(
+            scanDir ?? path.join(rootDir, "dist", "extensions"),
+            pluginDirName ?? "alpha",
+            (entry.built ?? entry.source ?? "./index.js").replace(/^\.\//u, ""),
+          );
+        },
+      }));
+      vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", pluginsRoot);
+      const bundled = await loadBundled(`bundled-${layout}-override-root`);
+      bundled.setBundledChannelRuntime("alpha", { marker: "ok" } as never);
+      const rootDir = layout === "direct" ? pluginsRoot : root;
+      expect(observed).toMatchObject({
+        metadata: { rootDir, scanDir: pluginsRoot },
+        generated: { rootDir, scanDir: pluginsRoot },
+      });
+      expect(testGlobal["__bundledOverrideRuntime"]).toBe("ok");
+      expect(bundled.getBundledChannelPlugin("alpha")?.id).toBe("alpha");
+    },
+  );
 
-    const bundled = await loadBundled("bundled-package-local-dist-sdk-alias");
-
-    expect(bundled.getBundledChannelPlugin("alpha")?.meta.label).toBe("Package dist Alpha");
-  });
-
-  it("loads direct override dist entries with SDK aliases", async () => {
-    const root = makeBundledEsmFixtureRoot("openclaw-bundled-direct-dist-");
-    const pluginsRoot = path.join(root, "bundled-plugins");
-    const pluginDir = path.join(pluginsRoot, "alpha", "dist");
-    writeAlphaSdkAliasDistFixture(pluginDir, "Direct dist Alpha");
-
-    vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
-      listBundledChannelPluginMetadata: () => [alphaChannelMetadata()],
-      resolveBundledChannelGeneratedPath: () => path.join(pluginDir, "index.js"),
-    }));
-
-    vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", pluginsRoot);
-
-    const bundled = await loadBundled("bundled-direct-dist-sdk-alias");
-
-    expect(bundled.getBundledChannelPlugin("alpha")?.meta.label).toBe("Direct dist Alpha");
-  });
-
-  it("treats direct bundled plugin-tree overrides as scan roots", async () => {
-    const tempRoot = makeBundledEsmFixtureRoot("openclaw-bundled-direct-override-");
-    const pluginsRoot = path.join(tempRoot, "bundled-plugins");
-    const pluginDir = path.join(pluginsRoot, "alpha");
-    fs.mkdirSync(pluginDir, { recursive: true });
-    writeRuntimeOverride(pluginDir);
-
-    let metadataScanDir: string | undefined;
-    let generatedRootDir: string | undefined;
-    let generatedScanDir: string | undefined;
-
-    vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
-      listBundledChannelPluginMetadata: (params?: { rootDir?: string; scanDir?: string }) => {
-        metadataScanDir = params?.scanDir;
-        return [alphaChannelMetadata()];
-      },
-      resolveBundledChannelGeneratedPath: (
-        rootDir: string,
-        entry: { built?: string; source?: string },
-        pluginDirName?: string,
-        scanDir?: string,
-      ) => {
-        generatedRootDir = rootDir;
-        generatedScanDir = scanDir;
-        return path.join(
-          scanDir ?? path.join(rootDir, "dist", "extensions"),
-          pluginDirName ?? "alpha",
-          (entry.built ?? entry.source ?? "./index.js").replace(/^\.\//u, ""),
-        );
-      },
-    }));
-
-    vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", pluginsRoot);
-
-    const bundled = await loadBundled("bundled-direct-override-root");
-
-    bundled.setBundledChannelRuntime("alpha", { marker: "ok" } as never);
-
-    expect(metadataScanDir).toBe(pluginsRoot);
-    expect(generatedRootDir).toBe(pluginsRoot);
-    expect(generatedScanDir).toBe(pluginsRoot);
-    expect(testGlobal["__bundledOverrideRuntime"]).toBe("ok");
-    expect(bundled.getBundledChannelPlugin("alpha")?.id).toBe("alpha");
-  });
+  it.each(["package-local", "direct"] as const)(
+    "loads %s dist entries with SDK aliases",
+    async (layout) => {
+      const root = makeBundledEsmFixtureRoot("openclaw-bundled-dist-");
+      const pluginsRoot = path.join(root, "bundled-plugins");
+      const pluginDir =
+        layout === "direct"
+          ? path.join(pluginsRoot, "alpha", "dist")
+          : path.join(root, "extensions", "alpha", "dist");
+      const label = layout === "direct" ? "Direct dist Alpha" : "Package dist Alpha";
+      writeAlphaSdkAliasDistFixture(pluginDir, label);
+      if (layout === "package-local") {
+        vi.doMock("./bundled-root.js", () => ({
+          resolveBundledChannelRootScope: () => ({
+            packageRoot: root,
+            cacheKey: `${root}:package-local-dist`,
+          }),
+        }));
+      } else {
+        vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", pluginsRoot);
+      }
+      vi.doMock("../../plugins/bundled-channel-runtime.js", () => ({
+        listBundledChannelPluginMetadata: () => [
+          layout === "direct"
+            ? alphaChannelMetadata()
+            : {
+                ...alphaChannelMetadata(),
+                source: entrySource(path.join(root, "extensions", "alpha", "index.ts")),
+                rootDir: path.join(root, "extensions", "alpha"),
+              },
+        ],
+        resolveBundledChannelGeneratedPath: () => path.join(pluginDir, "index.js"),
+      }));
+      const bundled = await loadBundled(`bundled-${layout}-dist-sdk-alias`);
+      expect(bundled.getBundledChannelPlugin("alpha")?.meta.label).toBe(label);
+    },
+  );
 
   it("partitions bundled channel lazy caches by active bundled root without re-importing", async () => {
     const rootA = makeBundledEsmFixtureRoot("openclaw-bundled-root-a-");
@@ -671,10 +621,7 @@ describe("bundled channel entry shape guards", () => {
         {
           dirName: "escape",
           rootDir: escapedPluginDir,
-          source: {
-            source: path.join(escapedPluginDir, "index.js"),
-            built: path.join(escapedPluginDir, "index.js"),
-          },
+          source: entrySource(path.join(escapedPluginDir, "index.js")),
           manifest: {
             id: "escape",
             channels: ["escape"],
@@ -720,10 +667,7 @@ describe("bundled channel entry shape guards", () => {
         {
           ...alphaChannelMetadata({ includeSetup: true }),
           rootDir: pluginDir,
-          setupSource: {
-            source: setupEntryPath,
-            built: setupEntryPath,
-          },
+          setupSource: entrySource(setupEntryPath),
         },
       ],
       resolveBundledChannelGeneratedPath: () => null,

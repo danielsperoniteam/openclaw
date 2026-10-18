@@ -23,63 +23,60 @@ function cfg(
 afterEach(() => vi.unstubAllEnvs());
 
 describe("createAccountListHelpers", () => {
-  describe("listAccountIds", () => {
-    it("keeps an implicit default account when root env credentials coexist with named accounts", () => {
-      vi.stubEnv("TESTCHANNEL_TOKEN", "env-token");
-      const helpers = createAccountListHelpers("testchannel", {
-        implicitDefaultAccount: { envVars: ["TESTCHANNEL_TOKEN"] },
-      });
-      expect(helpers.listAccountIds(cfg({ work: {} }))).toEqual(["default", "work"]);
+  it("keeps an implicit default account when root env credentials coexist with named accounts", () => {
+    vi.stubEnv("TESTCHANNEL_TOKEN", "env-token");
+    const helpers = createAccountListHelpers("testchannel", {
+      implicitDefaultAccount: { envVars: ["TESTCHANNEL_TOKEN"] },
     });
-
-    it("does not synthesize an account when an owner disables the empty fallback", () => {
-      const helpers = createAccountListHelpers("testchannel", {
-        fallbackAccountIdWhenEmpty: false,
-        implicitDefaultAccount: { channelKeys: ["token"] },
-      });
-
-      expect(helpers.listAccountIds({} as OpenClawConfig)).toEqual([]);
-      expect(helpers.listAccountIds(cfg({}))).toEqual([]);
-      expect(
-        helpers.listAccountIds({
-          channels: { testchannel: { token: "root-token" } },
-        } as unknown as OpenClawConfig),
-      ).toEqual(["default"]);
-      expect(helpers.resolveDefaultAccountId({} as OpenClawConfig)).toBe("default");
-    });
-
-    it("combines additional owner-discovered accounts without changing stable order", () => {
-      const helpers = createAccountListHelpers("testchannel", {
-        additionalAccountIds: () => ["bound", "work", "bound"],
-      });
-
-      expect(helpers.listAccountIds(cfg({ work: {}, alerts: {} }))).toEqual([
-        "alerts",
-        "bound",
-        "work",
-      ]);
-    });
-
-    it("allows a single-account owner to name its configured implicit account", () => {
-      const helpers = createAccountListHelpers("testchannel", {
-        fallbackAccountIdWhenEmpty: false,
-        resolveImplicitAccountId: (config) => {
-          const channel = config.channels?.["testchannel"] as
-            | { token?: string; defaultAccount?: string }
-            | undefined;
-          return channel?.token ? (channel.defaultAccount ?? "default") : undefined;
-        },
-      });
-
-      expect(helpers.listAccountIds({} as OpenClawConfig)).toEqual([]);
-      expect(
-        helpers.listAccountIds({
-          channels: { testchannel: { token: "root-token", defaultAccount: "work" } },
-        } as unknown as OpenClawConfig),
-      ).toEqual(["work"]);
-    });
+    expect(helpers.listAccountIds(cfg({ work: {} }))).toEqual(["default", "work"]);
   });
 
+  it("does not synthesize an account when an owner disables the empty fallback", () => {
+    const helpers = createAccountListHelpers("testchannel", {
+      fallbackAccountIdWhenEmpty: false,
+      implicitDefaultAccount: { channelKeys: ["token"] },
+    });
+
+    expect(helpers.listAccountIds({} as OpenClawConfig)).toEqual([]);
+    expect(helpers.listAccountIds(cfg({}))).toEqual([]);
+    expect(
+      helpers.listAccountIds({
+        channels: { testchannel: { token: "root-token" } },
+      } as unknown as OpenClawConfig),
+    ).toEqual(["default"]);
+    expect(helpers.resolveDefaultAccountId({} as OpenClawConfig)).toBe("default");
+  });
+
+  it("combines additional owner-discovered accounts without changing stable order", () => {
+    const helpers = createAccountListHelpers("testchannel", {
+      additionalAccountIds: () => ["bound", "work", "bound"],
+    });
+
+    expect(helpers.listAccountIds(cfg({ work: {}, alerts: {} }))).toEqual([
+      "alerts",
+      "bound",
+      "work",
+    ]);
+  });
+
+  it("allows a single-account owner to name its configured implicit account", () => {
+    const helpers = createAccountListHelpers("testchannel", {
+      fallbackAccountIdWhenEmpty: false,
+      resolveImplicitAccountId: (config) => {
+        const channel = config.channels?.["testchannel"] as
+          | { token?: string; defaultAccount?: string }
+          | undefined;
+        return channel?.token ? (channel.defaultAccount ?? "default") : undefined;
+      },
+    });
+
+    expect(helpers.listAccountIds({} as OpenClawConfig)).toEqual([]);
+    expect(
+      helpers.listAccountIds({
+        channels: { testchannel: { token: "root-token", defaultAccount: "work" } },
+      } as unknown as OpenClawConfig),
+    ).toEqual(["work"]);
+  });
   it('returns "default" for empty config', () => {
     expect(resolveDefaultAccountId({})).toBe("default");
   });
@@ -135,41 +132,36 @@ describe("createAccountListHelpers account resolution", () => {
   });
 });
 
-describe("resolveListedDefaultAccountId", () => {
-  it("supports an explicit fallback id for ambiguous multi-account setups", () => {
-    expect(
-      resolveListedDefaultAccountId({
-        accountIds: ["alerts", "work"],
-        ambiguousFallbackAccountId: "default",
-      }),
-    ).toBe("default");
+it("supports an explicit fallback id for ambiguous multi-account setups", () => {
+  expect(
+    resolveListedDefaultAccountId({
+      accountIds: ["alerts", "work"],
+      ambiguousFallbackAccountId: "default",
+    }),
+  ).toBe("default");
+});
+it("normalizes missing identity fields to the shared defaults", () => {
+  expect(describeAccountSnapshot({ account: {} })).toEqual({
+    accountId: "default",
+    name: undefined,
+    enabled: true,
+    configured: undefined,
   });
 });
 
-describe("account snapshots", () => {
-  it("normalizes missing identity fields to the shared defaults", () => {
-    expect(describeAccountSnapshot({ account: {} })).toEqual({
-      accountId: "default",
-      name: undefined,
-      enabled: true,
-      configured: undefined,
-    });
-  });
-
-  it("defaults mode to webhook while preserving caller extras", () => {
-    expect(
-      describeWebhookAccountSnapshot({
-        account: { accountId: "work", name: "Work" },
-        configured: true,
-        extra: { tokenSource: "config" },
-      }),
-    ).toEqual({
-      accountId: "work",
-      name: "Work",
-      enabled: true,
+it("defaults mode to webhook while preserving caller extras", () => {
+  expect(
+    describeWebhookAccountSnapshot({
+      account: { accountId: "work", name: "Work" },
       configured: true,
-      tokenSource: "config",
-      mode: "webhook",
-    });
+      extra: { tokenSource: "config" },
+    }),
+  ).toEqual({
+    accountId: "work",
+    name: "Work",
+    enabled: true,
+    configured: true,
+    tokenSource: "config",
+    mode: "webhook",
   });
 });

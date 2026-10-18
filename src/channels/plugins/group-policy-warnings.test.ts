@@ -40,8 +40,7 @@ const missingRouteAllowlist = {
 };
 const accountPolicy = {
   providerConfigPresent: (cfg: OpenClawConfig) => cfg.channels?.example !== undefined,
-  resolveGroupPolicy: (account: { groupPolicy?: "open" | "allowlist" | "disabled" }) =>
-    account.groupPolicy,
+  resolveGroupPolicy: (account: PolicyAccount) => account.groupPolicy,
 };
 type PolicyAccount = { groupPolicy?: "open" | "allowlist" | "disabled" };
 const routeWarnings = {
@@ -70,47 +69,33 @@ function withAccount<const T>(account: T) {
 const defaultOpenConfig = { channels: { defaults: { groupPolicy: "open" as const } } };
 
 describe("group policy warning builders", () => {
-  it("projects cfg+accountId warning collector inputs", () => {
-    const collect = projectConfigAccountIdWarningCollector<{
-      cfg: OpenClawConfig;
-      accountId?: string | null;
-      account: { accountId: string };
-    }>(({ accountId }) => [accountId ?? "default"]);
-
-    expect(
-      collect({
-        cfg: {} as OpenClawConfig,
-        accountId: "acct-1",
-        account: { accountId: "ignored" },
-      }),
-    ).toEqual(["acct-1"]);
-  });
-
-  it("projects account-only warning collector inputs", () => {
-    const collect = projectAccountWarningCollector<
-      { accountId: string },
-      { account: { accountId: string } }
-    >((account) => [account.accountId]);
-
-    expect(collect({ account: { accountId: "acct-1" } })).toEqual(["acct-1"]);
-  });
-
-  it("projects account+cfg warning collector inputs", () => {
-    const collect = projectAccountConfigWarningCollector<
-      { accountId: string },
-      Record<string, unknown>,
-      { account: { accountId: string }; cfg: OpenClawConfig }
-    >(
-      (cfg: OpenClawConfig) => cfg.channels ?? {},
-      ({ account, cfg }) => [account.accountId, Object.keys(cfg).join(",") || "none"],
-    );
-
-    expect(
-      collect({
-        account: { accountId: "acct-1" },
-        cfg: { channels: { slack: {} } } as OpenClawConfig,
-      }),
-    ).toEqual(["acct-1", "slack"]);
+  const input = {
+    cfg: { channels: { slack: {} } },
+    accountId: "acct-2",
+    account: { accountId: "acct-1" },
+  };
+  type Input = typeof input;
+  it.each([
+    [
+      "cfg+accountId",
+      projectConfigAccountIdWarningCollector<Input>(({ accountId }) => [accountId ?? "default"]),
+      ["acct-2"],
+    ],
+    [
+      "account",
+      projectAccountWarningCollector<Input["account"], Input>((account) => [account.accountId]),
+      ["acct-1"],
+    ],
+    [
+      "account+cfg",
+      projectAccountConfigWarningCollector<Input["account"], Record<string, unknown>, Input>(
+        (cfg) => cfg.channels ?? {},
+        ({ account, cfg }) => [account.accountId, Object.keys(cfg).join(",") || "none"],
+      ),
+      ["acct-1", "slack"],
+    ],
+  ] as const)("projects %s warning collector inputs", (_name, collect, expected) => {
+    expect(collect(input)).toEqual(expected);
   });
 
   it("composes account-scoped warning collectors", () => {
@@ -208,32 +193,47 @@ describe("group policy warning builders", () => {
     ]);
   });
 
-  it("builds config-aware allowlist-provider collectors", () => {
-    const collectWarnings = createAllowlistProviderGroupPolicyWarningCollector<{
-      cfg: OpenClawConfig;
-      channelLabel: string;
-      configuredGroupPolicy?: "open" | "allowlist" | "disabled";
-    }>({
-      providerConfigPresent: (cfg) => cfg.channels?.example !== undefined,
-      resolveGroupPolicy: ({ configuredGroupPolicy }) => configuredGroupPolicy,
-      collect: ({ channelLabel, groupPolicy }) =>
+  type ConfigInput = {
+    cfg: OpenClawConfig;
+    channelLabel: string;
+    configuredGroupPolicy?: PolicyAccount["groupPolicy"];
+  };
+  type ResolvedPolicy = ConfigInput & { groupPolicy: NonNullable<PolicyAccount["groupPolicy"]> };
+  it.each([
+    [
+      "allowlist",
+      createAllowlistProviderGroupPolicyWarningCollector,
+      ({ channelLabel, groupPolicy }: ResolvedPolicy) =>
         groupPolicy === "open" ? [`warn:${channelLabel}`] : [],
+      ["warn:example"],
+    ],
+    [
+      "open",
+      createOpenProviderGroupPolicyWarningCollector,
+      ({ groupPolicy }: ResolvedPolicy) => [groupPolicy],
+      ["open"],
+    ],
+  ] as const)("builds config-aware %s-provider collectors", (_name, create, collect, expected) => {
+    const collectWarnings = create<ConfigInput>({
+      providerConfigPresent: accountPolicy.providerConfigPresent,
+      resolveGroupPolicy: ({ configuredGroupPolicy }) => configuredGroupPolicy,
+      collect,
     });
-
     expect(
       collectWarnings({
         cfg: exampleConfig,
         channelLabel: "example",
         configuredGroupPolicy: "open",
       }),
-    ).toEqual(["warn:example"]);
+    ).toEqual(expected);
   });
 
   it("builds account-aware route-allowlist collectors", () => {
-    const collectWarnings = createAllowlistProviderRouteAllowlistWarningCollector<{
-      groupPolicy?: "open" | "allowlist" | "disabled";
-      groups?: Record<string, unknown>;
-    }>({
+    const collectWarnings = createAllowlistProviderRouteAllowlistWarningCollector<
+      PolicyAccount & {
+        groups?: Record<string, unknown>;
+      }
+    >({
       ...accountPolicy,
       resolveRouteAllowlistConfigured: (account) => Object.keys(account.groups ?? {}).length > 0,
       ...routeWarnings,
@@ -245,10 +245,11 @@ describe("group policy warning builders", () => {
   });
 
   it("builds account-aware configured-route collectors", () => {
-    const collectWarnings = createOpenProviderConfiguredRouteWarningCollector<{
-      groupPolicy?: "open" | "allowlist" | "disabled";
-      channels?: Record<string, unknown>;
-    }>({
+    const collectWarnings = createOpenProviderConfiguredRouteWarningCollector<
+      PolicyAccount & {
+        channels?: Record<string, unknown>;
+      }
+    >({
       ...accountPolicy,
       resolveRouteAllowlistConfigured: (account) => Object.keys(account.channels ?? {}).length > 0,
       configureRouteAllowlist,
@@ -258,24 +259,6 @@ describe("group policy warning builders", () => {
     expect(
       collectWarnings(withAccount({ groupPolicy: "open", channels: { general: true } })),
     ).toEqual([buildOpenGroupPolicyConfigureRouteAllowlistWarning(configureRouteAllowlist)]);
-  });
-
-  it("builds config-aware open-provider collectors", () => {
-    const collectWarnings = createOpenProviderGroupPolicyWarningCollector<{
-      cfg: { channels?: { example?: Record<string, unknown> } };
-      configuredGroupPolicy?: "open" | "allowlist" | "disabled";
-    }>({
-      providerConfigPresent: (cfg) => cfg.channels?.example !== undefined,
-      resolveGroupPolicy: ({ configuredGroupPolicy }) => configuredGroupPolicy,
-      collect: ({ groupPolicy }) => [groupPolicy],
-    });
-
-    expect(
-      collectWarnings({
-        cfg: exampleConfig,
-        configuredGroupPolicy: "open",
-      }),
-    ).toEqual(["open"]);
   });
 
   it("builds account-aware simple open warning collectors", () => {
