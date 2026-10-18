@@ -4,69 +4,18 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { prepareConfigFileWrite } from "./backup-rotation.js";
-import { hashConfigRaw } from "./io.read-helpers.js";
 import {
-  captureConfigFileWritePathProof,
-  createConfigFileWriteGuard,
-  rollbackConfigFileWriteIfUnchanged,
-} from "./io.write-safety.js";
+  content,
+  createWriteEffectsFixture,
+  original,
+  prepareWriteEffects as prepare,
+} from "./io.write-effects.test-support.js";
+import { createConfigFileWriteGuard } from "./io.write-safety.js";
 
 const dirs = useAutoCleanupTempDirTracker(afterEach);
 afterEach(() => vi.restoreAllMocks());
-const original = '{"channel":"stable"}\n';
-const content = '{"channel":"beta"}\n';
-
 function fixture() {
-  const dir = fs.realpathSync(dirs.make("config-effects-"));
-  const target = path.join(dir, "channel.json");
-  fs.writeFileSync(target, original);
-  const proof = captureConfigFileWritePathProof(target, target, fs);
-  let current = true;
-  const refusal = new Error("original executor revoked");
-  const assertCurrent = () => {
-    if (!current) {
-      throw refusal;
-    }
-    proof.assertCurrent();
-  };
-  const revoke = () => {
-    current = false;
-  };
-  const options = {
-    snapshot: { path: target, exists: true, raw: original },
-    includeGraph: { hashes: {}, targets: {} },
-    targetPathProof: proof,
-    preserveDirectoryMode: true,
-  };
-  const backups = () =>
-    ["", ".1", ".2", ".3", ".4"].map((suffix) => {
-      try {
-        return fs.readFileSync(`${target}.bak${suffix}`, "utf8");
-      } catch {
-        return null;
-      }
-    });
-  return { dir, target, proof, assertCurrent, revoke, refusal, options, backups };
-}
-
-async function prepare(
-  f: ReturnType<typeof fixture>,
-  io: typeof fs = fs,
-  options: Parameters<typeof createConfigFileWriteGuard>[3] = f.options,
-) {
-  const guarded = createConfigFileWriteGuard(f.target, io, f.assertCurrent, options);
-  const prepared = await prepareConfigFileWrite({
-    configPath: f.target,
-    previousRaw: original,
-    content,
-    fsModule: guarded.fileSystem,
-    assertCurrent: guarded.assertCurrent,
-    assertBeforeMutation: guarded.assertBeforeMutation,
-    onDestinationState: guarded.onDestinationState,
-    destinationHardlinks: "reject",
-    durable: true,
-  });
-  return { guarded, prepared };
+  return createWriteEffectsFixture(fs.realpathSync(dirs.make("config-effects-")));
 }
 
 describe("guarded config final effects", () => {
@@ -127,13 +76,8 @@ describe("guarded config final effects", () => {
       );
       expect(warn).toHaveBeenCalledWith(expect.stringContaining(f.dir));
       await expect(
-        rollbackConfigFileWriteIfUnchanged({
-          configPath: f.target,
-          previousSnapshot: f.options.snapshot,
-          committedHash: hashConfigRaw(content),
-          fsModule: io,
+        f.rollback(io, guarded.captureRollbackProof(f.assertCurrent), {
           stateDirectory,
-          ...guarded.captureRollbackProof(f.assertCurrent),
         }),
       ).resolves.toBe(true);
       expect(fs.readFileSync(f.target, "utf8")).toBe(original);
@@ -163,15 +107,12 @@ describe("guarded config final effects", () => {
         },
       }),
     };
-    const { prepared, guarded } = await prepare(f, io);
-    try {
-      expect(prepared.publish().method).toBe("copy-fallback");
-      guarded.assertPublishedIdentity();
-      expect(calls).toBeGreaterThan(1);
-      expect(fs.readFileSync(f.target, "utf8")).toBe(content);
-    } finally {
-      await prepared[Symbol.asyncDispose]();
-    }
+    const { prepared: stage, guarded } = await prepare(f, io);
+    await using prepared = stage;
+    expect(prepared.publish().method).toBe("copy-fallback");
+    guarded.assertPublishedIdentity();
+    expect(calls).toBeGreaterThan(1);
+    expect(fs.readFileSync(f.target, "utf8")).toBe(content);
   });
 
   it("does not swallow a transient assertion failure during awaited backup preparation", async () => {
@@ -237,25 +178,21 @@ it.each(["replacement", "unlink-failure"] as const)(
         fs.unlinkSync(name);
       },
     };
-    const { prepared } = await prepare(f, io);
+    await using prepared = (await prepare(f, io)).prepared;
+    let caught: unknown;
     try {
-      let caught: unknown;
-      try {
-        prepared.publish();
-      } catch (error) {
-        caught = error;
-      }
-      if (fault === "replacement") {
-        expect(caught).toBe(primary);
-        expect(fs.readFileSync(stage!, "utf8")).toBe("stranger");
-      } else {
-        expect(caught).toMatchObject({ cause: primary });
-        expect(String(caught)).toContain("private cleanup denied");
-      }
-      expect(fs.readFileSync(f.target, "utf8")).toBe(original);
-    } finally {
-      await prepared[Symbol.asyncDispose]();
+      prepared.publish();
+    } catch (error) {
+      caught = error;
     }
+    if (fault === "replacement") {
+      expect(caught).toBe(primary);
+      expect(fs.readFileSync(stage!, "utf8")).toBe("stranger");
+    } else {
+      expect(caught).toMatchObject({ cause: primary });
+      expect(String(caught)).toContain("private cleanup denied");
+    }
+    expect(fs.readFileSync(f.target, "utf8")).toBe(original);
   },
 );
 
@@ -284,16 +221,12 @@ it("refuses a backup destination replaced between mode and rename", async () => 
       }
     },
   };
-  const { prepared } = await prepare(f, io);
-  try {
-    expect(() => prepared.publish()).toThrow("config backup destination changed");
-    expect(replaced).toBe(true);
-    expect(fs.readFileSync(`${base}.1`, "utf8")).toBe("concurrent backup");
-    expect(fs.readFileSync(base, "utf8")).toBe("previous backup");
-    expect(fs.readFileSync(f.target, "utf8")).toBe(original);
-  } finally {
-    await prepared[Symbol.asyncDispose]();
-  }
+  await using prepared = (await prepare(f, io)).prepared;
+  expect(() => prepared.publish()).toThrow("config backup destination changed");
+  expect(replaced).toBe(true);
+  expect(fs.readFileSync(`${base}.1`, "utf8")).toBe("concurrent backup");
+  expect(fs.readFileSync(base, "utf8")).toBe("previous backup");
+  expect(fs.readFileSync(f.target, "utf8")).toBe(original);
 });
 
 describe("rollback owns only its permission-fallback transitions", () => {
@@ -396,12 +329,7 @@ describe("rollback owns only its permission-fallback transitions", () => {
       };
       try {
         await expect(
-          rollbackConfigFileWriteIfUnchanged({
-            configPath: f.target,
-            previousSnapshot: f.options.snapshot,
-            committedHash: hashConfigRaw(content),
-            fsModule: io,
-            ...rollbackProof,
+          f.rollback(io, rollbackProof, {
             preserveDirectoryMode: true,
             durable: true,
             destinationHardlinks: "reject",

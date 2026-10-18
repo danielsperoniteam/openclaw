@@ -100,6 +100,21 @@ function workspaceSnapshot(
   });
 }
 
+function metadataLoader() {
+  return createConfigIoContext({
+    env: {},
+    observe: false,
+  }).createValidationPluginMetadataSnapshotLoader({ env: {} });
+}
+
+function mockWorkspaces(entries: [string, ReturnType<typeof workspaceSnapshot>][]) {
+  const snapshots = new Map(entries);
+  mocks.resolvePluginMetadataSnapshotInput.mockImplementation(
+    ({ workspaceDir }: { workspaceDir: string }) => snapshots.get(workspaceDir),
+  );
+  return snapshots;
+}
+
 describe("config IO plugin metadata snapshots", () => {
   beforeEach(() => {
     clearCurrentPluginMetadataSnapshot();
@@ -125,10 +140,7 @@ describe("config IO plugin metadata snapshots", () => {
       setGatewayPluginMetadataSnapshot(snapshot, { config, env: {} });
       mocks.resolvePluginMetadataSnapshotInput.mockReturnValue(snapshot);
       const nextConfig = { ...config, logging: { level: "debug" } };
-      const loader = createConfigIoContext({
-        env: {},
-        observe: false,
-      }).createValidationPluginMetadataSnapshotLoader({ env: {} });
+      const loader = metadataLoader();
 
       const result = await withPluginCache(createPluginCache(), () =>
         mode === "sync"
@@ -164,18 +176,12 @@ describe("config IO plugin metadata snapshots", () => {
     const initial = workspaceSnapshot("/srv/base", [], [], policyHash);
     setGatewayPluginMetadataSnapshot(initial, { config, env: {} });
     const added = manifestRecord("new-workspace-plugin", "/srv/base/ops/plugin");
-    const snapshots = new Map([
+    mockWorkspaces([
       ["/srv/base", workspaceSnapshot("/srv/base", [], [], policyHash)],
       ["/srv/base/ops", workspaceSnapshot("/srv/base/ops", [added], [], policyHash)],
     ]);
-    mocks.resolvePluginMetadataSnapshotInput.mockImplementation(
-      ({ workspaceDir }: { workspaceDir: string }) => snapshots.get(workspaceDir),
-    );
     const nextConfig = createCanonicalAgentConfigFixture(legacyConfig("research")).config;
-    const loader = createConfigIoContext({
-      env: {},
-      observe: false,
-    }).createValidationPluginMetadataSnapshotLoader({ env: {} });
+    const loader = metadataLoader();
 
     const result = await withPluginCache(createPluginCache(), () =>
       validateConfigObjectWithPluginsAsync(nextConfig, {
@@ -202,7 +208,7 @@ describe("config IO plugin metadata snapshots", () => {
       code: "persisted-registry-stale-source" as const,
       message: "Retained secondary registry metadata",
     };
-    const snapshots = new Map([
+    const snapshots = mockWorkspaces([
       ["/srv/ops", workspaceSnapshot("/srv/ops", [primary], ["primary"])],
       [
         "/srv/research",
@@ -212,9 +218,6 @@ describe("config IO plugin metadata snapshots", () => {
         },
       ],
     ]);
-    mocks.resolvePluginMetadataSnapshotInput.mockImplementation(
-      ({ workspaceDir }: { workspaceDir: string }) => snapshots.get(workspaceDir),
-    );
     const cfg = {
       agents,
       channels: { "research-chat": { enabled: true } },
@@ -223,17 +226,12 @@ describe("config IO plugin metadata snapshots", () => {
         entries: { "research-chat-plugin": { enabled: true } },
       },
     };
-    const context = createConfigIoContext({ env: {}, observe: false });
-    const loader = context.createValidationPluginMetadataSnapshotLoader({
-      env: {},
-    });
+    const loader = metadataLoader();
     loader.load(cfg);
     const snapshot = loader.getSnapshot();
 
-    expect(snapshot?.index.plugins.map((plugin) => plugin.pluginId)).toEqual([
-      "primary",
-      "research-chat-plugin",
-    ]);
+    const ids = ["primary", "research-chat-plugin"];
+    expect(snapshot?.index.plugins.map((plugin) => plugin.pluginId)).toEqual(ids);
     expect(snapshot?.registryIndex).toEqual(snapshots.get("/srv/ops")?.registryIndex);
     expect(snapshot?.registryIndex.plugins.map((plugin) => plugin.pluginId)).toEqual(["primary"]);
     expect(snapshot?.registryDiagnostics).toEqual([secondaryDiagnostic]);
@@ -248,10 +246,7 @@ describe("config IO plugin metadata snapshots", () => {
       "/srv/ops",
       "/srv/research",
     ]);
-    expect(snapshot?.discovery?.candidates.map(resolvePluginCandidateInstallOwner)).toEqual([
-      "primary",
-      "research-chat-plugin",
-    ]);
+    expect(snapshot?.discovery?.candidates.map(resolvePluginCandidateInstallOwner)).toEqual(ids);
     expect(Object.isFrozen(snapshot?.index.plugins)).toBe(true);
     expect(loader.getSnapshot()).toBe(snapshot);
     expect(
@@ -266,7 +261,7 @@ describe("config IO plugin metadata snapshots", () => {
     const primary = manifestRecord("primary", "/srv/ops/primary");
     const shared = manifestRecord("shared", "/plugins/shared");
     const secondary = manifestRecord("secondary", "/srv/research/secondary");
-    const snapshots = new Map([
+    mockWorkspaces([
       [
         "/srv/ops",
         workspaceSnapshot("/srv/ops", [
@@ -284,23 +279,13 @@ describe("config IO plugin metadata snapshots", () => {
         ]),
       ],
     ]);
-    mocks.resolvePluginMetadataSnapshotInput.mockImplementation(
-      ({ workspaceDir }: { workspaceDir: string }) => snapshots.get(workspaceDir),
-    );
 
     const snapshot = resolveConfigWidePluginMetadataSnapshot({ config: { agents }, env: {} });
 
-    expect(snapshot.plugins.map((plugin) => plugin.id)).toEqual(["primary", "shared", "secondary"]);
-    expect(snapshot.index.plugins.map((plugin) => plugin.pluginId)).toEqual([
-      "primary",
-      "shared",
-      "secondary",
-    ]);
-    expect(snapshot.discovery?.candidates.map((candidate) => candidate.idHint)).toEqual([
-      "primary",
-      "shared",
-      "secondary",
-    ]);
+    const ids = ["primary", "shared", "secondary"];
+    expect(snapshot.plugins.map((plugin) => plugin.id)).toEqual(ids);
+    expect(snapshot.index.plugins.map((plugin) => plugin.pluginId)).toEqual(ids);
+    expect(snapshot.discovery?.candidates.map((candidate) => candidate.idHint)).toEqual(ids);
     expect(structuredClone(snapshot.manifestRegistry)).toEqual(snapshot.manifestRegistry);
     expect(
       structuredClone(

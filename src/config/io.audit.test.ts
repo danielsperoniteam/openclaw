@@ -1,4 +1,3 @@
-// Covers config audit reporting for files, paths, and values.
 import fs, { promises as fsPromises } from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -19,6 +18,12 @@ import {
 } from "./io.audit.js";
 import { listConfigAuditRecordsForTests } from "./io.audit.test-support.js";
 
+const metadata = { dev: "10", ino: "11", mode: 0o600, nlink: 1, uid: 501, gid: 20 };
+
+function redactionCase(name: string, prefix: string[], value: string, redacted = "***") {
+  return [name, [...prefix, value], [...prefix, redacted]] as const;
+}
+
 function createAuditRecordBase(
   configPath: string,
   argv?: string[],
@@ -32,14 +37,7 @@ function createAuditRecordBase(
     nextHash: "next-hash",
     previousBytes: 12,
     nextBytes: 24,
-    previousMetadata: {
-      dev: "10",
-      ino: "11",
-      mode: 0o600,
-      nlink: 1,
-      uid: 501,
-      gid: 20,
-    },
+    previousMetadata: metadata,
     changedPathCount: 1,
     hasMetaBefore: true,
     hasMetaAfter: true,
@@ -47,17 +45,7 @@ function createAuditRecordBase(
     gatewayModeAfter: "local",
     suspicious: [],
     now: "2026-04-07T08:00:00.000Z",
-    ...(argv
-      ? {
-          processInfo: {
-            pid: 101,
-            ppid: 99,
-            cwd: "/work",
-            argv,
-            execArgv: [],
-          },
-        }
-      : {}),
+    processInfo: argv ? { pid: 101, ppid: 99, cwd: "/work", argv, execArgv: [] } : undefined,
     ...overrides,
   });
 }
@@ -72,14 +60,7 @@ function createRenameAuditRecord(home: string) {
       },
     }),
     result: "rename",
-    nextMetadata: {
-      dev: "12",
-      ino: "13",
-      mode: 0o600,
-      nlink: 1,
-      uid: 501,
-      gid: 20,
-    },
+    nextMetadata: { ...metadata, dev: "12", ino: "13" },
   });
 }
 
@@ -187,18 +168,9 @@ describe("config io audit helpers", () => {
       err: Object.assign(new Error("payload contained abcd-efgh-ijkl-mnop"), { code: "EFAIL" }),
     });
 
-    await appendConfigAuditRecord({
-      env: {},
-      homedir: () => home,
-      record,
-    });
-
-    const raw = JSON.stringify(
-      listConfigAuditRecordsForTests({
-        env: {},
-        homedir: () => home,
-      }),
-    );
+    const deps = { env: {}, homedir: () => home };
+    await appendConfigAuditRecord({ ...deps, record });
+    const raw = JSON.stringify(listConfigAuditRecordsForTests(deps));
     expect(raw).not.toContain("AIzaSyD-very-real-looking");
     expect(raw).not.toContain("ya29.fake-access-token");
     expect(raw).not.toContain("abcd-efgh-ijkl-mnop");
@@ -224,73 +196,48 @@ describe("config io audit helpers", () => {
   });
 
   it.each([
-    [
-      "dash-leading secret value",
-      ["openclaw", "--password", "-fake"],
-      ["openclaw", "--password", "***"],
-    ],
-    [
+    redactionCase("dash-leading secret value", ["openclaw", "--password"], "-fake"),
+    redactionCase(
       "sensitive config set value after boolean option",
-      ["openclaw", "config", "set", "--json", "channels.slack.token", '"secret-value"'],
-      ["openclaw", "config", "set", "--json", "channels.slack.token", "***"],
-    ],
-    [
+      ["openclaw", "config", "set", "--json", "channels.slack.token"],
+      '"secret-value"',
+    ),
+    redactionCase(
       "sensitive config set value after root value option",
-      ["openclaw", "config", "set", "--profile", "work", "channels.slack.token", "secret-value"],
-      ["openclaw", "config", "set", "--profile", "work", "channels.slack.token", "***"],
-    ],
-    [
+      ["openclaw", "config", "set", "--profile", "work", "channels.slack.token"],
+      "secret-value",
+    ),
+    redactionCase(
       "sensitive config set value after option before subcommand",
-      ["openclaw", "config", "--profile", "work", "set", "channels.slack.token", "secret-value"],
-      ["openclaw", "config", "--profile", "work", "set", "channels.slack.token", "***"],
-    ],
-    [
+      ["openclaw", "config", "--profile", "work", "set", "channels.slack.token"],
+      "secret-value",
+    ),
+    redactionCase(
       "sensitive config set value when a root option value is config",
-      ["openclaw", "--profile", "config", "config", "set", "channels.slack.token", "secret-value"],
-      ["openclaw", "--profile", "config", "config", "set", "channels.slack.token", "***"],
-    ],
-    [
+      ["openclaw", "--profile", "config", "config", "set", "channels.slack.token"],
+      "secret-value",
+    ),
+    redactionCase(
       "independent option terminators for command and positional scanning",
-      [
-        "openclaw",
-        "config",
-        "--",
-        "set",
-        "--section=channels",
-        "channels.slack.token",
-        "secret-value",
-      ],
-      ["openclaw", "config", "--", "set", "--section=channels", "channels.slack.token", "***"],
-    ],
-    [
+      ["openclaw", "config", "--", "set", "--section=channels", "channels.slack.token"],
+      "secret-value",
+    ),
+    redactionCase(
       "dash-leading positional after inline parent option and terminator",
-      ["openclaw", "config", "--profile=work", "set", "--", "channels.slack.token", "--dash-value"],
-      ["openclaw", "config", "--profile=work", "set", "--", "channels.slack.token", "***"],
-    ],
-    [
+      ["openclaw", "config", "--profile=work", "set", "--", "channels.slack.token"],
+      "--dash-value",
+    ),
+    redactionCase(
       "batch JSON after both positionals and an option terminator",
-      [
-        "openclaw",
-        "config",
-        "set",
-        "ui.theme",
-        "dark",
-        "--",
-        '--batch-json={"value":"secret-value"}',
-      ],
-      ["openclaw", "config", "set", "ui.theme", "dark", "--", "--batch-json=***"],
-    ],
-    [
+      ["openclaw", "config", "set", "ui.theme", "dark", "--"],
+      '--batch-json={"value":"secret-value"}',
+      "--batch-json=***",
+    ),
+    redactionCase(
       "config set batch JSON",
-      [
-        "openclaw",
-        "config",
-        "set",
-        "--batch-json",
-        '[{"path":"channels.slack.token","value":"secret-value"}]',
-      ],
-      ["openclaw", "config", "set", "--batch-json", "***"],
-    ],
+      ["openclaw", "config", "set", "--batch-json"],
+      '[{"path":"channels.slack.token","value":"secret-value"}]',
+    ),
   ])("redacts $0 in persisted audit process info", (_name, argv, expected) => {
     expect(createAuditRecordBase("/tmp/openclaw.json", argv).argv).toEqual(expected);
   });
@@ -311,11 +258,8 @@ describe("config io audit helpers", () => {
       { encoding: "utf-8", mode: 0o600 },
     );
 
-    const env = {} as NodeJS.ProcessEnv;
-    const result = await scrubConfigAuditLog({
-      env,
-      homedir: () => home,
-    });
+    const deps = { env: {}, homedir: () => home };
+    const result = await scrubConfigAuditLog(deps);
 
     expect(result).toEqual({ scanned: 3, rewritten: 1, skipped: 1, aborted: false });
     expect(fs.readFileSync(auditPath, "utf8").split("\n")[0]).toBe("{not json");
@@ -335,19 +279,13 @@ describe("config io audit helpers", () => {
       expect(fs.statSync(path.dirname(auditPath)).mode & 0o777).toBe(0o755);
     }
 
-    const second = await scrubConfigAuditLog({
-      env,
-      homedir: () => home,
-    });
+    const second = await scrubConfigAuditLog(deps);
     expect(second).toEqual({ scanned: 3, rewritten: 0, skipped: 1, aborted: false });
   });
 
   it("returns zero counts and does not create the audit file when none exists", async () => {
     const home = await suiteRootTracker.make("scrub-missing");
-    const result = await scrubConfigAuditLog({
-      env: {},
-      homedir: () => home,
-    });
+    const result = await scrubConfigAuditLog({ env: {}, homedir: () => home });
     expect(result).toEqual({ scanned: 0, rewritten: 0, skipped: 0, aborted: false });
     const auditPath = path.join(home, ".openclaw", "logs", "config-audit.jsonl");
     expect(fs.existsSync(auditPath)).toBe(false);

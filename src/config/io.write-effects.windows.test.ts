@@ -15,17 +15,14 @@ import {
   buildEncodedPowerShellArgs,
   WINDOWS_POWERSHELL_COLD_SPAWN_TIMEOUT_MS,
 } from "../infra/windows-powershell-spawn.js";
-import { prepareConfigFileWrite } from "./backup-rotation.js";
-import { hashConfigRaw } from "./io.read-helpers.js";
 import {
-  captureConfigFileWritePathProof,
-  createConfigFileWriteGuard,
-  rollbackConfigFileWriteIfUnchanged,
-} from "./io.write-safety.js";
+  content,
+  createWriteEffectsFixture,
+  original,
+  prepareWriteEffects as prepare,
+} from "./io.write-effects.test-support.js";
 
 const dirs = useAutoCleanupTempDirTracker(afterEach);
-const original = '{"channel":"stable"}\n';
-const content = '{"channel":"beta"}\n';
 const handshakeTimeout = WINDOWS_POWERSHELL_COLD_SPAWN_TIMEOUT_MS;
 const testTimeout = 4 * handshakeTimeout;
 
@@ -146,40 +143,7 @@ function fixture() {
   const root = fs.realpathSync(dirs.make("config-windows-effects-"));
   const dir = path.join(root, "owned");
   fs.mkdirSync(dir);
-  const target = path.join(dir, "channel.json");
-  fs.writeFileSync(target, original);
-  const proof = captureConfigFileWritePathProof(target, target, fs);
-  const refusal = new Error("original updater revoked");
-  let current = true;
-  const assertCurrent = () => {
-    if (!current) {
-      throw refusal;
-    }
-    proof.assertCurrent();
-  };
-  const options = {
-    snapshot: { path: target, exists: true, raw: original },
-    includeGraph: { hashes: {}, targets: {} },
-    targetPathProof: proof,
-    preserveDirectoryMode: true,
-  };
-  return { root, dir, target, options, assertCurrent, refusal, revoke: () => (current = false) };
-}
-
-async function prepare(f: ReturnType<typeof fixture>, io: typeof fs = fs) {
-  const guarded = createConfigFileWriteGuard(f.target, io, f.assertCurrent, f.options);
-  const prepared = await prepareConfigFileWrite({
-    configPath: f.target,
-    previousRaw: original,
-    content,
-    fsModule: guarded.fileSystem,
-    assertCurrent: guarded.assertCurrent,
-    assertBeforeMutation: guarded.assertBeforeMutation,
-    onDestinationState: guarded.onDestinationState,
-    destinationHardlinks: "reject",
-    durable: true,
-  });
-  return { guarded, prepared };
+  return createWriteEffectsFixture(dir);
 }
 
 function acl(target: string): string {
@@ -208,26 +172,18 @@ describe.runIf(process.platform === "win32")("native Windows config fallback eff
       const f = fixture();
       const beforeAcl = acl(f.target);
       const rollbackProof = await withNativeSharingViolation(f.target, signal, async (io) => {
-        const { prepared, guarded } = await prepare(f, io);
-        try {
-          expect(prepared.publish().method).toBe("copy-fallback");
-          guarded.assertPublishedIdentity();
-          return guarded.captureRollbackProof(f.assertCurrent);
-        } finally {
-          await prepared[Symbol.asyncDispose]();
-        }
+        const { prepared: stage, guarded } = await prepare(f, io);
+        await using prepared = stage;
+        expect(prepared.publish().method).toBe("copy-fallback");
+        guarded.assertPublishedIdentity();
+        return guarded.captureRollbackProof(f.assertCurrent);
       });
       expect(fs.readFileSync(f.target, "utf8")).toBe(content);
       expect(fs.readFileSync(`${f.target}.bak`, "utf8")).toBe(original);
       expect(acl(f.target)).toBe(beforeAcl);
       await withNativeSharingViolation(f.target, signal, async (io) => {
         await expect(
-          rollbackConfigFileWriteIfUnchanged({
-            configPath: f.target,
-            previousSnapshot: f.options.snapshot,
-            committedHash: hashConfigRaw(content),
-            fsModule: io,
-            ...rollbackProof,
+          f.rollback(io, rollbackProof, {
             preserveDirectoryMode: true,
             durable: true,
             destinationHardlinks: "reject",
@@ -288,20 +244,11 @@ describe.runIf(process.platform === "win32")("native Windows config fallback eff
           }),
         };
         if (phase === "publication") {
-          const { prepared } = await prepare(f, instrumented);
-          try {
-            expect(() => prepared.publish()).toThrow(f.refusal);
-          } finally {
-            await prepared[Symbol.asyncDispose]();
-          }
+          await using prepared = (await prepare(f, instrumented)).prepared;
+          expect(() => prepared.publish()).toThrow(f.refusal);
         } else {
           await expect(
-            rollbackConfigFileWriteIfUnchanged({
-              configPath: f.target,
-              previousSnapshot: f.options.snapshot,
-              committedHash: hashConfigRaw(content),
-              fsModule: instrumented,
-              ...initial.guarded.captureRollbackProof(f.assertCurrent),
+            f.rollback(instrumented, initial.guarded.captureRollbackProof(f.assertCurrent), {
               durable: true,
               destinationHardlinks: "reject",
             }),
@@ -380,12 +327,7 @@ describe.runIf(process.platform === "win32")("native Windows config fallback eff
             },
           }),
         };
-        const rollback = rollbackConfigFileWriteIfUnchanged({
-          configPath: f.target,
-          previousSnapshot: f.options.snapshot,
-          committedHash: hashConfigRaw(content),
-          fsModule: instrumented,
-          ...rollbackProof,
+        const rollback = f.rollback(instrumented, rollbackProof, {
           durable: true,
           destinationHardlinks: "reject",
         });

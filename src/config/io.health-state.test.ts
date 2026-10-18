@@ -38,10 +38,7 @@ afterEach(async () => {
 it("preserves typed maintenance errors after broker reuse", async () => {
   const warm = createHealthDeps();
   patchConfigHealthEntryToStore(warm, "/warm.json", { lastObservedSuspiciousSignature: "warm" });
-  {
-    const first = captureConfigHealthStateStore(warm, "/warm.json");
-    expect(await first.read()).not.toBeNull();
-  }
+  expect(await captureConfigHealthStateStore(warm, "/warm.json").read()).not.toBeNull();
   await closeOpenClawStateDatabaseAsync();
   const deps = createHealthDeps();
   makeNewerSchema(deps);
@@ -61,13 +58,8 @@ it("preserves typed maintenance errors after broker reuse", async () => {
   );
   try {
     const store = captureConfigHealthStateStore(deps, "/config.json");
-    const previous = await readCurrent(store);
-    let failure: unknown;
-    try {
-      await store.update({ lastObservedSuspiciousSignature: "observed" }, previous);
-    } catch (error) {
-      failure = error;
-    }
+    const previous = await store.read();
+    const failure = await store.update(healthEntry, previous).catch((error: unknown) => error);
     expect(incoming).toBeInstanceOf(StartupMaintenanceRequiredError);
     expect(failure).toBe(incoming);
     expect(findStartupMaintenanceRequiredError(failure)).toMatchObject({
@@ -110,13 +102,22 @@ function makeNewerSchema(deps: ReturnType<typeof createHealthDeps>) {
   database.close();
 }
 
-async function readCurrent(store: ReturnType<typeof captureConfigHealthStateStore>) {
-  return await store.read();
+const healthEntry = { lastObservedSuspiciousSignature: "observed" };
+const healthState = {
+  entries: { "/config.json": healthEntry },
+};
+
+function patchHealth(
+  deps: ReturnType<typeof createHealthDeps>,
+  changes: Parameters<typeof patchConfigHealthEntryToStore>[2] = healthEntry,
+) {
+  patchConfigHealthEntryToStore(deps, "/config.json", changes);
 }
 
-const healthState = {
-  entries: { "/config.json": { lastObservedSuspiciousSignature: "observed" } },
-};
+function expectWarning(deps: ReturnType<typeof createHealthDeps>, count: number, text: string) {
+  expect(deps.logger.warn).toHaveBeenCalledTimes(count);
+  expect(deps.logger.warn).toHaveBeenLastCalledWith(expect.stringContaining(text));
+}
 
 describe("config health-state warnings", () => {
   it("observes config on the worker and durably reopens without main-thread SQLite", async () => {
@@ -132,7 +133,7 @@ describe("config health-state warnings", () => {
       expect(fs.existsSync(databasePath)).toBe(false);
       await observeConfigSnapshot(observationDeps, snapshot);
       const verification = captureConfigHealthStateStore(deps, configPath);
-      const observed = await readCurrent(verification);
+      const observed = await verification.read();
       expect(observed.state.entries?.[configPath]?.lastKnownGood?.hash).toBe(hashConfigRaw(raw));
       await closeOpenClawStateDatabaseAsync();
       const reopened = captureConfigHealthStateStore(deps, configPath);
@@ -152,10 +153,7 @@ describe("config health-state warnings", () => {
       lastObservedSuspiciousSignature: "seed",
     });
     const seeded = readConfigHealthStateFromStore(deps);
-    {
-      const retained = captureConfigHealthStateStore(deps, configPath);
-      expect(await retained.read()).not.toBeNull();
-    }
+    expect(await captureConfigHealthStateStore(deps, configPath).read()).not.toBeNull();
     const entered = createDeferredCore();
     const release = createDeferredCore();
     const normalized = normalizeConfigIoDeps(options);
@@ -186,10 +184,10 @@ describe("config health-state warnings", () => {
     const databasePath = resolveOpenClawStateSqlitePath(deps.env);
     fs.mkdirSync(databasePath, { recursive: true });
     const store = captureConfigHealthStateStore(deps, "/config.json");
-    const previous = await readCurrent(store);
+    const previous = await store.read();
     expect(previous.state).toEqual({});
-    await store.update({ lastObservedSuspiciousSignature: "observed" }, previous);
-    await store.update({ lastObservedSuspiciousSignature: "observed" }, previous);
+    await store.update(healthEntry, previous);
+    await store.update(healthEntry, previous);
     expect(deps.logger.warn).toHaveBeenCalledExactlyOnceWith(
       expect.stringContaining("Config health-state write failed:"),
     );
@@ -200,14 +198,11 @@ describe("config health-state warnings", () => {
     const deps = createHealthDeps();
     makeNewerSchema(deps);
     const store = captureConfigHealthStateStore(deps, "/config.json");
-    const previous = await readCurrent(store);
+    const previous = await store.read();
     expect(previous).toEqual({ state: {}, basis: null });
-    let failure: unknown;
-    try {
-      await store.updateAfterFileCommit({ lastObservedSuspiciousSignature: "observed" }, previous);
-    } catch (error) {
-      failure = error;
-    }
+    const failure = await store
+      .updateAfterFileCommit(healthEntry, previous)
+      .catch((error: unknown) => error);
     expect(findStartupMaintenanceRequiredError(failure)).toMatchObject({ kind: "newer-schema" });
     expect(deps.logger.warn).not.toHaveBeenCalled();
   });
@@ -215,7 +210,7 @@ describe("config health-state warnings", () => {
   it("deduplicates write failures across fresh sync and async config reads", async () => {
     const { deps, configPath, options } = configFixture();
     const store = captureConfigHealthStateStore(deps, configPath);
-    const previous = await readCurrent(store);
+    const previous = await store.read();
     await store.update({ lastObservedSuspiciousSignature: "seed" }, previous);
     openOpenClawStateDatabase(deps).db.exec(`
       CREATE TRIGGER reject_async_health_write BEFORE INSERT ON config_health_entries
@@ -265,7 +260,7 @@ describe("config health-state warnings", () => {
     db.close();
     let failure: unknown;
     try {
-      patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
+      patchHealth(deps);
     } catch (error) {
       failure = error;
     }
@@ -285,57 +280,50 @@ describe("config health-state warnings", () => {
     const deps = createHealthDeps();
     const { db } = openOpenClawStateDatabase(deps);
     db.exec("PRAGMA query_only = ON");
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
+    patchHealth(deps);
     readConfigHealthStateFromStore(deps);
-    patchConfigHealthEntryToStore(deps, "/config.json", {});
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
-    expect(deps.logger.warn).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining("readonly database"),
-    );
+    patchHealth(deps, {});
+    patchHealth(deps);
+    expectWarning(deps, 1, "readonly database");
 
     db.exec(`
       PRAGMA query_only = OFF;
       CREATE TRIGGER reject_health_write BEFORE INSERT ON config_health_entries
       BEGIN SELECT RAISE(FAIL, 'health write rejected'); END;
     `);
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
-    expect(deps.logger.warn).toHaveBeenCalledTimes(2);
-    expect(deps.logger.warn).toHaveBeenLastCalledWith(
-      expect.stringContaining("health write rejected"),
-    );
+    patchHealth(deps);
+    patchHealth(deps);
+    expectWarning(deps, 2, "health write rejected");
 
     db.exec("PRAGMA query_only = ON");
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
-    expect(deps.logger.warn).toHaveBeenCalledTimes(3);
-    expect(deps.logger.warn).toHaveBeenLastCalledWith(expect.stringContaining("readonly database"));
+    patchHealth(deps);
+    expectWarning(deps, 3, "readonly database");
 
     db.exec("PRAGMA query_only = OFF; DROP TRIGGER reject_health_write");
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
+    patchHealth(deps);
     expect(readConfigHealthStateFromStore(deps)).toEqual(healthState);
     db.exec("PRAGMA query_only = ON");
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
-    expect(deps.logger.warn).toHaveBeenCalledTimes(4);
-    expect(deps.logger.warn).toHaveBeenLastCalledWith(expect.stringContaining("readonly database"));
+    patchHealth(deps);
+    patchHealth(deps);
+    expectWarning(deps, 4, "readonly database");
   });
 
   it("does not re-arm a repeated warning when a nested successful write rolls back", () => {
     const deps = createHealthDeps();
     const { db } = openOpenClawStateDatabase(deps);
     db.exec("PRAGMA query_only = ON");
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
+    patchHealth(deps);
     expect(deps.logger.warn).toHaveBeenCalledTimes(1);
     db.exec("PRAGMA query_only = OFF");
     const abort = new Error("outer rollback");
     expect(() =>
       runOpenClawStateWriteTransaction(() => {
-        patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
+        patchHealth(deps);
         throw abort;
       }, deps),
     ).toThrow(abort);
     db.exec("PRAGMA query_only = ON");
-    patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
+    patchHealth(deps);
     expect(deps.logger.warn).toHaveBeenCalledTimes(1);
     db.exec("PRAGMA query_only = OFF");
     expect(readConfigHealthStateFromStore(deps)).toEqual({ entries: {} });
@@ -349,13 +337,13 @@ describe("config health-state warnings", () => {
     }
     for (let i = 0; i < 2; i++) {
       for (const deps of stores) {
-        patchConfigHealthEntryToStore(deps, "/config.json", healthState.entries["/config.json"]);
+        patchHealth(deps);
       }
     }
     expect(warn).toHaveBeenCalledTimes(2);
     openOpenClawStateDatabase(stores[1]).db.exec("PRAGMA query_only = OFF");
-    patchConfigHealthEntryToStore(stores[1], "/config.json", healthState.entries["/config.json"]);
-    patchConfigHealthEntryToStore(stores[0], "/config.json", healthState.entries["/config.json"]);
+    patchHealth(stores[1]);
+    patchHealth(stores[0]);
     expect(warn).toHaveBeenCalledTimes(2);
   });
 });
