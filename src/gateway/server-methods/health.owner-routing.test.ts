@@ -124,8 +124,8 @@ describe("Gateway status owner routing", () => {
           deleteFiles: true,
         });
         release.resolve();
-        const respond = await pending;
-        expect(respond.mock.calls[0]?.[1].sessions).toMatchObject({
+        const response = await pending;
+        expect(response.sessions).toMatchObject({
           count: 1,
           byAgent: [{ agentId: "survivor", count: 1 }],
         });
