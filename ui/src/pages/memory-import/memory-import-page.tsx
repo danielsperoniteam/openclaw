@@ -12,6 +12,7 @@ import { SettingsWorkspace } from "../../components/solid/settings-workspace.tsx
 import { listSelectableAgents } from "../../lib/agents/display.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
+import { createPageRequest } from "../../lib/page-request.ts";
 import { projectAgentSelection, projectGateway } from "../../lib/reactive/application.ts";
 import { useApplication } from "../../lib/reactive/context.ts";
 import { projectAgents } from "../../lib/reactive/domain-capabilities.ts";
@@ -80,15 +81,13 @@ export function MemoryImportPage() {
   };
   let applyEpoch = 0;
   let backfillEpoch = 0;
-  let planEpoch = 0;
-  let planAbort: AbortController | undefined;
-  let planLoading = false;
   let planError: string | null = null;
   let workspaceAuthorized = false;
   let lastPlanValue: {
     client: MemoryImportClient;
     agentId: string;
     overwrite: boolean;
+    scopeKey: number;
     plan: MigrationsMemoryPlanResult;
   } | null = null;
   const read = <K extends keyof typeof state>(key: K) => {
@@ -111,35 +110,22 @@ export function MemoryImportPage() {
     { equals: (previous, next) => previous.every((value, index) => value === next[index]) },
   );
 
-  async function loadPlan() {
-    const snapshot = context.gateway.snapshot;
-    const client = snapshot.phase === "connected" ? snapshot.client : null;
-    const agentId = currentAgentId();
-    const overwrite = state.replaceExisting;
-    const scopeKey = presentationScopeKey;
-    const epoch = ++planEpoch;
-    planAbort?.abort();
-    planAbort = undefined;
-    planError = null;
-    planLoading = Boolean(client && canAdmin() && agentId);
-    publish();
-    if (!client || !canAdmin() || !agentId) {
-      return;
-    }
-    const abort = new AbortController();
-    planAbort = abort;
-    try {
-      const nextPlan = await client.request<MigrationsMemoryPlanResult>(
+  const planRequest = createPageRequest(publish, {
+    task: async (scope: Omit<NonNullable<typeof lastPlanValue>, "plan">, { signal }) => ({
+      ...scope,
+      plan: await scope.client.request<MigrationsMemoryPlanResult>(
         "migrations.memory.plan",
-        { agentId, overwrite },
-        { signal: abort.signal },
-      );
-      if (epoch !== planEpoch || scopeKey !== gatewayPresentationScope(context.gateway).key) {
+        { agentId: scope.agentId, overwrite: scope.overwrite },
+        { signal },
+      ),
+    }),
+    onComplete: (value) => {
+      if (value.scopeKey !== gatewayPresentationScope(context.gateway).key) {
         return;
       }
-      lastPlanValue = { client, agentId, overwrite, plan: nextPlan };
+      lastPlanValue = value;
       state.selectedByProvider = Object.fromEntries(
-        nextPlan.providers.map((provider) => [
+        value.plan.providers.map((provider) => [
           provider.providerId,
           provider.items
             .filter(
@@ -150,16 +136,22 @@ export function MemoryImportPage() {
             .map((item) => item.id),
         ]),
       );
-    } catch (error) {
-      if (epoch === planEpoch) {
-        planError = formatUiError(error, "request failed");
-      }
-    } finally {
-      if (epoch === planEpoch) {
-        planLoading = false;
-        publish();
-      }
+    },
+    onError: (error) => {
+      planError = formatUiError(error, "request failed");
+    },
+  });
+  async function loadPlan() {
+    const snapshot = context.gateway.snapshot;
+    const client = snapshot.phase === "connected" ? snapshot.client : null;
+    const agentId = currentAgentId();
+    const overwrite = state.replaceExisting;
+    planError = null;
+    if (!client || !canAdmin() || !agentId) {
+      planRequest.reset();
+      return;
     }
+    await planRequest.run({ client, agentId, overwrite, scopeKey: presentationScopeKey });
   }
   // Retire import attempts on target changes and request a new plan from the Gateway.
   createEffect(planArgs, ([client, connected, allowed, agentId, overwrite, scopeKey], previous) => {
@@ -198,10 +190,9 @@ export function MemoryImportPage() {
     void loadPlan();
   });
   onCleanup(() => {
-    planEpoch += 1;
     applyEpoch += 1;
     backfillEpoch += 1;
-    planAbort?.abort();
+    planRequest.cancel();
   });
   function currentAgentId(): string | null {
     agents.read();
@@ -237,7 +228,7 @@ export function MemoryImportPage() {
 
   function loading(): boolean {
     revision();
-    return planLoading;
+    return planRequest.pending;
   }
   function planFailure(): string | null {
     revision();

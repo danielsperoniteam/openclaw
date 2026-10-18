@@ -2,11 +2,7 @@ import { asNullableRecord as asRecord } from "@openclaw/normalization-core/recor
 import type { RouteLocation } from "@openclaw/uirouter";
 import { onCleanup } from "solid-js";
 import type { AuditRunInspectResult } from "../../../../packages/gateway-protocol/src/schema/audit-run.js";
-import {
-  GatewayRequestError,
-  type GatewayBrowserClient,
-  type GatewayEventFrame,
-} from "../../api/gateway.ts";
+import type { GatewayBrowserClient, GatewayEventFrame } from "../../api/gateway.ts";
 import { activityPersonFromPath } from "../../app-route-paths.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
 import { gatewayPresentationScope } from "../../app/gateway-presentation-scope.ts";
@@ -238,15 +234,6 @@ export function createActivityPageState(context: ApplicationContext) {
     );
   }
 
-  function isUnknownInspectMethod(error: unknown): boolean {
-    return (
-      error instanceof GatewayRequestError &&
-      error.gatewayCode === "INVALID_REQUEST" &&
-      (error.message === "unknown method: audit.run.inspect" ||
-        error.message === "missing scope: operator.admin")
-    );
-  }
-
   async function loadRunInspector(
     gateway: ApplicationContext["gateway"],
     client: GatewayBrowserClient,
@@ -344,21 +331,18 @@ export function createActivityPageState(context: ApplicationContext) {
       }
       runInspector = isMissingOperatorReadScopeError(error)
         ? { status: "unauthorized" }
-        : isUnknownInspectMethod(error)
-          ? { status: "unsupported" }
-          : previousState
-            ? pageKind === "refresh"
-              ? {
-                  ...previousState,
-                  refreshError:
-                    decisionCursor && isExpiredDecisionCursorError(error) ? "restart" : "retry",
-                }
-              : { ...previousState, [pageStatus]: "error" }
-            : {
-                status: "error",
-                recovery:
+        : previousState
+          ? pageKind === "refresh"
+            ? {
+                ...previousState,
+                refreshError:
                   decisionCursor && isExpiredDecisionCursorError(error) ? "restart" : "retry",
-              };
+              }
+            : { ...previousState, [pageStatus]: "error" }
+          : {
+              status: "error",
+              recovery: decisionCursor && isExpiredDecisionCursorError(error) ? "restart" : "retry",
+            };
     } finally {
       if (inspectorAbort === abort) {
         inspectorAbort = null;

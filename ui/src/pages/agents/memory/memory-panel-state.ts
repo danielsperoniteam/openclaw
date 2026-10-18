@@ -81,7 +81,13 @@ export function createAgentMemory(context: ApplicationContext) {
   const gateway = new GatewayPageBinding(notify, {
     getGateway: () => context.gateway,
     invalidateRequests: ({ identityChanged }) => {
-      dreaming.resourceRequests = {};
+      // Retain published data in a new owner; retired reads can only mutate the old state.
+      dreaming = {
+        ...dreaming,
+        get configSnapshot() {
+          return context.runtimeConfig.state.configSnapshot;
+        },
+      };
       dreaming.dreamingStatusLoading = false;
       dreaming.dreamDiaryLoading = false;
       dreaming.wikiImportInsightsLoading = false;

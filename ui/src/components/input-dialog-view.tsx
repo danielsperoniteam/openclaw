@@ -24,6 +24,7 @@ export function InputDialogView(props: {
   const submitBlocked = (raw: string) => {
     const value = entryValue(raw);
     return (
+      options.canSubmit?.() === false ||
       (gateway !== undefined && gateway.read().snapshot.phase !== "connected") ||
       (options.requireValue === true && !value.length) ||
       (options.requireChange === true && value === (options.defaultValue ?? ""))
