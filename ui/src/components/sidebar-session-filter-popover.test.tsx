@@ -60,10 +60,11 @@ it.each([false, true])(
 
 it("wraps mobile filter focus through a nested picker sheet", async () => {
   const matchMedia = globalThis.matchMedia.bind(globalThis);
-  vi.spyOn(globalThis, "matchMedia").mockImplementation((query) => ({
-    ...matchMedia(query),
-    matches: true,
-  }));
+  vi.spyOn(globalThis, "matchMedia").mockImplementation((query) => {
+    const media = matchMedia(query);
+    Object.defineProperty(media, "matches", { configurable: true, value: true });
+    return media;
+  });
   const container = document.createElement("div");
   const anchor = document.createElement("button");
   document.body.append(container);
