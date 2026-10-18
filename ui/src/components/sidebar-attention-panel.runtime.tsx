@@ -198,15 +198,17 @@ function inboxEntryIdentity(
 
 export function SidebarAttentionPanel(props: SidebarAttentionPanelParams) {
   onCleanup(() => props.listRef?.(null));
-  const context = untrack(() => props.context);
-  const mentions = projectMentions(untrack(() => props.mentions));
-  const gateway = projectGateway(context.gateway);
-  const overlays = context.overlays && projectOverlays(context.overlays);
-  const agents = context.agents && projectAgents(context.agents);
-  const sessions = context.sessions && projectSessions(context.sessions);
+  // These capability owners belong to this panel's lifetime; a new panel binds new owners.
+  const initialContext = untrack(() => props.context);
+  const initialMentions = untrack(() => props.mentions);
+  const mentions = projectMentions(initialMentions);
+  const gateway = projectGateway(initialContext.gateway);
+  const overlays = initialContext.overlays && projectOverlays(initialContext.overlays);
+  const agents = initialContext.agents && projectAgents(initialContext.agents);
+  const sessions = initialContext.sessions && projectSessions(initialContext.sessions);
   const identities =
-    context.agentIdentity &&
-    projectAgentIdentity({ identities: context.agentIdentity, agentId: null });
+    initialContext.agentIdentity &&
+    projectAgentIdentity({ identities: initialContext.agentIdentity, agentId: null });
   const visibleEntries = createMemo(() =>
     props.entries.filter((entry) => sidebarInboxEntryMatchesTab(entry, props.selectedTab)),
   );
@@ -246,7 +248,7 @@ export function SidebarAttentionPanel(props: SidebarAttentionPanelParams) {
     agents?.revision();
     sessions?.revision();
     identities?.revision();
-    return context;
+    return initialContext;
   };
   const renderedEntries = createMemo(() => {
     const currentGateway = gateway.read();

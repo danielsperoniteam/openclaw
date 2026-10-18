@@ -1,9 +1,10 @@
 import type { JSX } from "@solidjs/web";
-import { createMemo } from "solid-js";
+import { createMemo, onCleanup } from "solid-js";
 import { writeSidebarSectionDragData } from "../lib/sessions/drag.ts";
 import { renderSidebarReorderMenu } from "./sidebar-reorder.tsx";
 export function renderSidebarSessionSectionHeader(params: {
   sectionId: string;
+  sectionHeaders: Map<string, HTMLElement>;
   content: JSX.Element;
   status?: {
     content: JSX.Element;
@@ -23,8 +24,19 @@ export function renderSidebarSessionSectionHeader(params: {
   };
 }) {
   const draggable = createMemo(() => params.draggable !== false && !params.disabledReason);
+  const sectionId = params.sectionId;
+  let header: HTMLElement | undefined;
+  onCleanup(() => {
+    if (params.sectionHeaders.get(sectionId) === header) {
+      params.sectionHeaders.delete(sectionId);
+    }
+  });
   return (
     <div
+      ref={(element) => {
+        header = element;
+        params.sectionHeaders.set(sectionId, element);
+      }}
       class={[
         "sidebar-recent-sessions__head",
         draggable() && "sidebar-recent-sessions__head--draggable",
@@ -68,7 +80,13 @@ export function renderSidebarSessionSectionHeader(params: {
     >
       <span class="sidebar-session-group-drag-handle" aria-hidden="true" />
       {params.content}
-      {draggable() && params.reorder ? renderSidebarReorderMenu(params.reorder) : undefined}
+      {draggable() && params.reorder
+        ? renderSidebarReorderMenu({
+            ...params.reorder,
+            sectionId,
+            sections: params.sectionHeaders,
+          })
+        : undefined}
       {params.status ? (
         <button
           type="button"

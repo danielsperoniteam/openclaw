@@ -1,4 +1,4 @@
-import { createMemo, For, Show, untrack } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import type {
   SessionCatalog,
   SessionCatalogHost,
@@ -44,7 +44,7 @@ function renderCatalogHostGroup(
   readLiveRowsByKey: () => ReadonlyMap<string, GatewaySessionRow>,
   params: SessionCatalogGroupsParams,
 ) {
-  const identity = untrack(() => ({ catalogId: readCatalog().id, hostId: readHost().hostId }));
+  const identity = { catalogId: readCatalog().id, hostId: readHost().hostId };
   const errorHelp = createMemo(() => {
     const readHostValue = readHost();
     return readHostValue.error
@@ -64,7 +64,7 @@ function renderCatalogHostGroup(
     sectionId: string;
     projectChild?: boolean;
   }) {
-    const projectChild = untrack(() => rowProps.projectChild === true);
+    const projectChild = rowProps.projectChild === true;
     const expanded = () =>
       (params.visibleSessionLimits.get(rowProps.sectionId) ?? CATALOG_SESSION_GROUP_LIMIT) >
       CATALOG_SESSION_GROUP_LIMIT;
@@ -163,10 +163,7 @@ function renderCatalogHostGroup(
         {projectGroups() ? (
           <For each={projectGroups()!.groups} keyed={(group) => group.key}>
             {(group) => {
-              const sectionId = untrack(
-                () =>
-                  `catalog-${group().kind}:${identity.catalogId}:${identity.hostId}:${group().key}`,
-              );
+              const sectionId = `catalog-${group().kind}:${identity.catalogId}:${identity.hostId}:${group().key}`;
               const legacySectionId = createMemo(() =>
                 group().legacySectionKey
                   ? `catalog-project:${readCatalog().id}:${readHost().hostId}:${group().legacySectionKey}`
@@ -231,7 +228,7 @@ function renderCatalogGroup(
   readLiveRowsByKey: () => ReadonlyMap<string, GatewaySessionRow>,
   params: SessionCatalogGroupsParams,
 ) {
-  const sectionId = untrack(() => `catalog:${readCatalog().id}`);
+  const sectionId = `catalog:${readCatalog().id}`;
   const collapsed = createMemo(() => params.collapsedSections.has(sectionId));
   const rows = createMemo(() => readCatalog().visibleHosts.flatMap((host) => host.sessions));
   const activity = createMemo(() =>
@@ -282,6 +279,7 @@ function renderCatalogGroup(
     >
       <SessionSectionHeader
         sectionId={sectionId}
+        sectionHeaders={params.sectionHeaders}
         status={
           hasError() || (collapsed() && rows().length > 0)
             ? {

@@ -1,5 +1,5 @@
 import type { JSX } from "@solidjs/web";
-import { createMemo, For, Show, untrack } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import type { GatewaySessionRow } from "../api/types.ts";
 import type { CatalogOpenTarget } from "../app/settings.ts";
 import { readPresenceEntries, resolveCurrentSelfUser } from "../app/user-profile.ts";
@@ -109,7 +109,7 @@ function renderSessionCatalog(params: {
     }),
   );
   // One lazy module owns this catalog renderer for the mounted section's lifetime.
-  const Render = untrack(renderer);
+  const Render = renderer();
   return (
     <Render
       catalogs={[catalog()]}
@@ -147,6 +147,7 @@ function renderSessionCatalog(params: {
       onReorderSection={(source, target, position) =>
         host().sessionOrganizer.reorderSidebarSection(source, target, position)
       }
+      sectionHeaders={host().sessionOrganizer.sectionHeaders}
       viewMenuOpenCatalogId={host().sidebarMenus.catalogViewMenuPosition?.catalogId ?? null}
       ownerFilterActive={host().sessionOwnerFilterActive}
       onOpenViewMenu={(catalogId, trigger, position) => {
@@ -222,7 +223,7 @@ function renderSessionListBody(params: {
     <For each={params.sections} keyed={(section) => section.id}>
       {(section) => {
         // The key fixes the section kind; its row facts remain reactive below.
-        if (untrack(section).id.startsWith("catalog:")) {
+        if (section().id.startsWith("catalog:")) {
           return (
             <Show when={params.catalogRenderer && catalogsBySectionId().get(section().id)}>
               {(catalog) => (
@@ -269,7 +270,7 @@ export function renderSessionList(params: {
 }) {
   const host = createMemo(() => params.host);
   return renderSessionListFrame(
-    untrack(host),
+    host(),
     <div class="sidebar-recent-sessions">
       {renderPendingSessionCreateRow(host)}
       {renderSessionListBody(params)}

@@ -1,5 +1,5 @@
 import type { JSX } from "@solidjs/web";
-import { createEffect, createMemo, For, Show, untrack } from "solid-js";
+import { createEffect, createMemo, For, Show } from "solid-js";
 import { normalizeSessionColorValue } from "../../../packages/gateway-protocol/src/session-agent-status.js";
 import { handleContextMenuEvent } from "../lib/keyboard-shortcuts.ts";
 import { t } from "../lib/reactive/i18n.ts";
@@ -90,7 +90,7 @@ function renderRecentSessionRow(params: RecentSessionParams) {
   const subtitle = createMemo(() => subtitleState().subtitle),
     narration = createMemo(() => subtitleState().narration),
     toolName = createMemo(() => subtitleState().toolName);
-  const indicators = renderSidebarSessionIndicators(untrack(host), session, display, icon);
+  const indicators = renderSidebarSessionIndicators(host(), session, display, icon);
   const running = createMemo(() => indicators.running),
     stateId = createMemo(() => indicators.stateId),
     metaId = createMemo(() => indicators.metaId),
@@ -168,7 +168,7 @@ function renderRecentSessionRow(params: RecentSessionParams) {
   // Ref retargeting deliberately samples the current host without render dependencies.
   createEffect(
     () => display()?.rowRef,
-    (callback) => untrack(() => callback?.(rowElement, controls)),
+    (callback) => callback?.(rowElement, controls),
   );
   const row = (
     <div

@@ -69,13 +69,13 @@ export function hidePersonalSidebarCatalog(
   recoveryLink.className = "session-link";
   recoveryLink.href = recoveryHref;
   recoveryLink.textContent = t("chat.sidebar.sectionHiddenRecovery");
-  recoveryLink.addEventListener("click", (event) => {
+  recoveryLink.onclick = (event) => {
     if (!shouldHandleNavigationClick(event)) {
       return;
     }
     event.preventDefault();
     host.onNavigate?.(recovery.routeId, { search: recovery.search, hash: recovery.hash });
-  });
+  };
   message.append(t("chat.sidebar.sectionHidden", { section: label }), " ", recoveryLink);
   showToast({
     message,

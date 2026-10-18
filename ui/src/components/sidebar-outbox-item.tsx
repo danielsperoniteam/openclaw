@@ -19,8 +19,8 @@ export function renderSidebarOutboxItem(params: {
   onNavigate: ApplicationContext["navigate"];
 }) {
   // Keep the mounted row and Gateway authority for retained click handlers.
-  const captured = untrack(() => ({ entry: params.entry, context: params.context }));
-  const context = captured.context;
+  const initialRow = untrack(() => ({ entry: params.entry, context: params.context }));
+  const context = initialRow.context;
   const connectionRevision = context.gateway.connectionRevision;
   const recoveryScope = context.gateway.snapshot.client?.recoveryScope;
   const view = createMemo(() => {
@@ -119,9 +119,9 @@ export function renderSidebarOutboxItem(params: {
                 !context.sidebarAttention.entries.some(
                   (current) =>
                     current.type === "outbox" &&
-                    current.id === captured.entry.id &&
-                    current.sessionKey === captured.entry.sessionKey &&
-                    current.agentId === captured.entry.agentId,
+                    current.id === initialRow.entry.id &&
+                    current.sessionKey === initialRow.entry.sessionKey &&
+                    current.agentId === initialRow.entry.agentId,
                 )
               ) {
                 return;

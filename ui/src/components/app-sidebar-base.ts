@@ -163,16 +163,15 @@ export abstract class AppSidebarBase {
   sidebarPluginSnapshot: Pick<SidebarSnapshotModel, "entries" | "plugins"> | null = null;
 
   constructor(
-    private props: AppSidebarProps,
     protected context: ApplicationContext,
-    readonly hostElement: HTMLElement,
+    readonly hostElement: HTMLElement & AppSidebarProps,
   ) {
     for (const key of Object.keys(appSidebarProperties)) {
       Object.defineProperty(this, key, {
         get: () =>
           key === "sidebarAgentsMode"
-            ? (this.sidebarSnapshot?.mode ?? Reflect.get(this.props, key))
-            : Reflect.get(this.props, key),
+            ? (this.sidebarSnapshot?.mode ?? Reflect.get(hostElement, key))
+            : Reflect.get(hostElement, key),
         set: (value: unknown) => {
           Reflect.set(hostElement, key, value);
         },
@@ -194,8 +193,7 @@ export abstract class AppSidebarBase {
     }
   }
 
-  bindInputs(props: AppSidebarProps, context: ApplicationContext): void {
-    this.props = props;
+  bindContext(context: ApplicationContext): void {
     this.context = context;
     this.invalidate();
   }

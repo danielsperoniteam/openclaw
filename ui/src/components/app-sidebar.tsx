@@ -9,7 +9,6 @@ import {
   onSettled,
   runWithOwner,
   Show,
-  untrack,
 } from "solid-js";
 import { rosterActivityStore } from "../lib/agents/roster-activity-store.ts";
 import { useApplication, useOptionalApplication } from "../lib/reactive/context.ts";
@@ -60,14 +59,17 @@ function disconnectSidebarOwner(host: HTMLElement): void {
   }
 }
 
-function AppSidebarContent(props: AppSidebarProps, host: HTMLElement): JSX.Element {
+function AppSidebarContent(
+  props: AppSidebarProps,
+  host: HTMLElement & AppSidebarProps,
+): JSX.Element {
   host.style.display = "contents";
   const context = useApplication();
   const catalog = createSidebarNavigationCatalog(context, () => props.navigationView, host);
-  const owner = sidebarOwners.get(host) ?? new AppSidebarOwner(catalog, props, context, host);
+  const owner = sidebarOwners.get(host) ?? new AppSidebarOwner(catalog, context, host);
   sidebarOwners.set(host, owner);
   owner.navigationCatalog = catalog;
-  owner.bindInputs(props, context);
+  owner.bindContext(context);
   owner.attention = createSessionAttention(
     context,
     owner.attentionQuestions,
@@ -254,30 +256,29 @@ function AppSidebarContent(props: AppSidebarProps, host: HTMLElement): JSX.Eleme
       owner.readNarration();
       scroll.capture();
     },
-    () =>
-      untrack(() => {
-        owner.sessionData.refreshPresentation();
-        owner.commitRender();
-        if (owner.isConnected) {
-          owner.narration?.sync(owner.narrationSyncInput());
-        }
-        snapshot.capture();
-        people.syncRendered();
-        scroll.restore();
-        // The projection owns the display deadline; this mounted view owns its timer.
-        const deadline = owner.sessionProjection.subtitleDeadline;
-        if (owner.isConnected && Number.isFinite(deadline)) {
-          const timer = globalThis.setTimeout(
-            () => {
-              owner.sessionProjection.invalidate();
-              owner.invalidate();
-            },
-            Math.max(0, deadline - Date.now()),
-          );
-          return () => globalThis.clearTimeout(timer);
-        }
-        return undefined;
-      }),
+    () => {
+      owner.sessionData.refreshPresentation();
+      owner.commitRender();
+      if (owner.isConnected) {
+        owner.narration?.sync(owner.narrationSyncInput());
+      }
+      snapshot.capture();
+      people.syncRendered();
+      scroll.restore();
+      // The projection owns the display deadline; this mounted view owns its timer.
+      const deadline = owner.sessionProjection.subtitleDeadline;
+      if (owner.isConnected && Number.isFinite(deadline)) {
+        const timer = globalThis.setTimeout(
+          () => {
+            owner.sessionProjection.invalidate();
+            owner.invalidate();
+          },
+          Math.max(0, deadline - Date.now()),
+        );
+        return () => globalThis.clearTimeout(timer);
+      }
+      return undefined;
+    },
   );
   onSettled(() => {
     if (host.isConnected && !owner.isConnected) {
@@ -309,9 +310,7 @@ export type AppSidebarElement = SolidBridgeElement<AppSidebarProps, AppSidebarMe
 
 export const AppSidebar = defineSolidBridge<AppSidebarProps, AppSidebarMethods>(
   "openclaw-app-sidebar",
-  // Component setup must not subscribe the bridge's provider to this owner's revision.
-  (props, host) =>
-    untrack(() => (useOptionalApplication() ? AppSidebarContent(props, host) : props.children)),
+  (props, host) => (useOptionalApplication() ? AppSidebarContent(props, host) : props.children),
   {
     properties: appSidebarProperties,
     connected: (host) => sidebarOwners.get(host)?.attach(),

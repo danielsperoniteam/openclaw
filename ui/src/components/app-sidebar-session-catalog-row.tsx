@@ -1,5 +1,5 @@
 import type { JSX } from "@solidjs/web";
-import { createMemo, createEffect, Show, untrack } from "solid-js";
+import { createMemo, createEffect, Show } from "solid-js";
 import type {
   SessionCatalog,
   SessionCatalogHost,
@@ -161,7 +161,7 @@ export function renderCatalogSessionRow(
   );
   let element: HTMLDivElement | undefined;
   // Ref retargeting deliberately samples the current host without render dependencies.
-  createEffect(rowRef, (callback) => untrack(() => callback?.(element, controls)));
+  createEffect(rowRef, (callback) => callback?.(element, controls));
   const row = (
     <div
       ref={(node) => {
