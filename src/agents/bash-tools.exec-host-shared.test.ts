@@ -17,6 +17,9 @@ import {
 } from "./bash-tools.exec-host-shared.js";
 import { getTextContent } from "./test-helpers/agent-tools-fs-helpers.js";
 
+const sendFinished = (target: Parameters<typeof sendExecApprovalFollowupResult>[0]) =>
+  sendExecApprovalFollowupResult(target, "Exec finished");
+
 const mocks = vi.hoisted(() => {
   function approvals(security = "allowlist", ask = "off", askFallback = "deny") {
     return { agent: { security, ask, askFallback } };
@@ -69,8 +72,8 @@ describe("sendExecApprovalFollowupResult", () => {
     });
     vi.doMock("./bash-tools.exec-approval-followup.js", loadDelivery);
     const target = { approvalId: "approval-import-failure" };
-    await sendExecApprovalFollowupResult(target, "Exec finished");
-    await sendExecApprovalFollowupResult(target, "Exec finished");
+    await sendFinished(target);
+    await sendFinished(target);
     expect(loadDelivery).toHaveBeenCalled();
     expect(logWarn).toHaveBeenCalledExactlyOnceWith(
       expect.stringContaining(
@@ -83,25 +86,19 @@ describe("sendExecApprovalFollowupResult", () => {
     sendExecApprovalFollowup.mockRejectedValue(
       Object.assign(new Error("approval not found"), { gatewayCode: "APPROVAL_NOT_FOUND" }),
     );
-    await sendExecApprovalFollowupResult(
-      { approvalId: "approval-expired", sessionKey },
-      "Exec finished",
-    );
+    await sendFinished({ approvalId: "approval-expired", sessionKey });
     expect(logWarn).not.toHaveBeenCalled();
   });
 
   it("authenticates a result handoff to one session and claimant", async () => {
     const approvalId = "approval-authenticated-false";
-    await sendExecApprovalFollowupResult(
-      {
-        approvalId,
-        agentId: "research",
-        sessionKey,
-        expectedSessionId: "session-original",
-        turnSourceChannel: "telegram",
-      },
-      "Exec finished",
-    );
+    await sendFinished({
+      approvalId,
+      agentId: "research",
+      sessionKey,
+      expectedSessionId: "session-original",
+      turnSourceChannel: "telegram",
+    });
     const call = sendExecApprovalFollowup.mock.calls[0]?.[0];
     assert.isDefined(call);
     expect(call).toMatchObject({
@@ -264,62 +261,55 @@ describe("createExecApprovalRequestRoute", () => {
     });
   });
 
-  it.each(["webchat"])("keeps waiting without a terminal decision on %s", async (channel) => {
-    await expect(createRoute(channel)).resolves.toMatchObject({ kind: "wait" });
+  it("keeps waiting without a terminal decision on webchat", async () => {
+    await expect(createRoute("webchat")).resolves.toMatchObject({ kind: "wait" });
   });
 });
 
-describe("buildExecApprovalPendingToolResult", () => {
-  const buildResult = (
-    overrides: Partial<Parameters<typeof buildExecApprovalPendingToolResult>[0]> = {},
-  ) =>
-    buildExecApprovalPendingToolResult({
-      host: "gateway",
-      command: "uname -a",
-      cwd: "/tmp",
-      warningText: "",
-      approvalId: "approval-id",
-      approvalSlug: "approval-slug",
-      expiresAtMs: 60_000,
-      initiatingSurface: {
-        kind: "disabled",
-        channel: "discord",
-        channelLabel: "Discord",
-        accountId: "default",
-      },
-      sentApproverDms: false,
-      unavailableReason: null,
-      ...overrides,
-    });
-
-  it("keeps a local /approve prompt when the initiating Discord surface is disabled", () => {
-    const result = buildResult({ allowedDecisions: ["allow-once", "deny"] });
-    expect(result.details.status).toBe("approval-pending");
-    const text = getTextContent(result);
-    expect(text).toContain("/approve approval-slug allow-once");
-    expect(text).not.toContain("native chat exec approvals are not configured on Discord");
+const buildResult = (
+  overrides: Partial<Parameters<typeof buildExecApprovalPendingToolResult>[0]> = {},
+) =>
+  buildExecApprovalPendingToolResult({
+    host: "gateway",
+    command: "uname -a",
+    cwd: "/tmp",
+    warningText: "",
+    approvalId: "approval-id",
+    approvalSlug: "approval-slug",
+    expiresAtMs: 60_000,
+    initiatingSurface: { kind: "disabled", channel: "discord", channelLabel: "Discord" },
+    sentApproverDms: false,
+    unavailableReason: null,
+    ...overrides,
   });
 
-  it("preserves node metadata in unavailable recovery guidance", () => {
-    const result = buildResult({
-      host: "node",
-      nodeId: "node-mac-1",
-      initiatingSurface: { kind: "enabled", channel: undefined, channelLabel: "Web UI" },
-      unavailableReason: "no-approval-route",
-    });
-    expect(result.details).toMatchObject({
-      status: "approval-unavailable",
-      host: "node",
-      nodeId: "node-mac-1",
-    });
-    const text = getTextContent(result);
-    expect(text).toContain(
-      "Print the Control UI URL with `openclaw dashboard --no-open`, open it in a browser, then use the approval inbox.",
-    );
-    expect(text).toContain(
-      "Inspect the node's effective exec policy with `openclaw approvals get --node node-mac-1`.",
-    );
+it("keeps a local /approve prompt when the initiating Discord surface is disabled", () => {
+  const result = buildResult({ allowedDecisions: ["allow-once", "deny"] });
+  expect(result.details.status).toBe("approval-pending");
+  const text = getTextContent(result);
+  expect(text).toContain("/approve approval-slug allow-once");
+  expect(text).not.toContain("native chat exec approvals are not configured on Discord");
+});
+
+it("preserves node metadata in unavailable recovery guidance", () => {
+  const result = buildResult({
+    host: "node",
+    nodeId: "node-mac-1",
+    initiatingSurface: { kind: "enabled", channel: undefined, channelLabel: "Web UI" },
+    unavailableReason: "no-approval-route",
   });
+  expect(result.details).toMatchObject({
+    status: "approval-unavailable",
+    host: "node",
+    nodeId: "node-mac-1",
+  });
+  const text = getTextContent(result);
+  expect(text).toContain(
+    "Print the Control UI URL with `openclaw dashboard --no-open`, open it in a browser, then use the approval inbox.",
+  );
+  expect(text).toContain(
+    "Inspect the node's effective exec policy with `openclaw approvals get --node node-mac-1`.",
+  );
 });
 
 it.each([

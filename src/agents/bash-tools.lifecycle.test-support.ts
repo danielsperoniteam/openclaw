@@ -1,5 +1,5 @@
 import { expectDefined } from "@openclaw/normalization-core/expect";
-import { assert } from "vitest";
+import { assert, expect } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { ExecToolDetails } from "./bash-tools.exec-types.js";
 import type { RunEmbeddedAgentParams } from "./embedded-agent-runner/run/params.js";
@@ -9,6 +9,10 @@ export const fullGatewayExec = { host: "gateway", security: "full", ask: "off" }
 export function runningSession(details: ExecToolDetails) {
   assert(details.status === "running", "Expected a background process handle");
   return details;
+}
+
+export function expectCompleted(details: unknown, aggregated: string, exitCode = 0) {
+  expect(details).toMatchObject({ status: "completed", aggregated, exitCode });
 }
 
 export function nodeCommand(source: string): string {

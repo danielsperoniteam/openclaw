@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { saveExecApprovals } from "../infra/exec-approvals-store.test-support.js";
 import { loadExecApprovalsReadOnly } from "../infra/exec-approvals.js";
@@ -13,6 +13,7 @@ import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js
 import { resetProcessRegistryForTests } from "./bash-process-registry.test-support.js";
 import { createExecTool } from "./bash-tools.exec-run.js";
 import type { ExecToolDetails } from "./bash-tools.exec-types.js";
+import { expectCompleted } from "./bash-tools.lifecycle.test-support.js";
 import { callGatewayTool } from "./tools/gateway.js";
 
 // Execution spy arguments contain inherited environment; assert only scalar projections.
@@ -49,9 +50,7 @@ const allowedReview = {
 } as const;
 
 function completed(details: ExecToolDetails) {
-  if (details.status !== "completed") {
-    throw new Error(`Unexpected exec status: ${details.status}`);
-  }
+  assert(details.status === "completed", `Unexpected exec status: ${details.status}`);
   return details;
 }
 
@@ -114,13 +113,12 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
     });
   }
 
-  function approve(decision: "allow-once" | "allow-always", beforeDecision?: () => void) {
+  function approve(decision: "allow-once" | "allow-always") {
     vi.mocked(callGatewayTool).mockImplementation(async (method) => {
       if (method === "exec.approval.request") {
         return { status: "accepted", id: "fixture-approval" };
       }
       if (method === "exec.approval.waitDecision") {
-        beforeDecision?.();
         return { decision };
       }
       return { ok: true };
@@ -221,10 +219,7 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
         expect(boundary.spawn.mock.calls.length).toBe(0);
         return;
       }
-      expect(completed(result.details)).toMatchObject({
-        exitCode: 0,
-        aggregated: "venv-package-loaded approved.txt",
-      });
+      expectCompleted(result.details, "venv-package-loaded approved.txt");
     },
   );
 
@@ -251,10 +246,7 @@ describe.skipIf(process.platform === "win32")("gateway execution authorization b
 
     expect(review.mock.calls.length).toBe(0);
     expect(vi.mocked(callGatewayTool).mock.calls.length).toBe(0);
-    expect(completed(result.details)).toMatchObject({
-      exitCode: 0,
-      aggregated: "approved-content",
-    });
+    expectCompleted(result.details, "approved-content");
   });
 
   it("preserves startup customization for ordinary full-mode execution", async () => {

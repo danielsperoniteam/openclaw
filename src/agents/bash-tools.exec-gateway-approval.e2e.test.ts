@@ -28,6 +28,7 @@ import { getFinishedSession } from "./bash-process-registry.js";
 import { resetProcessRegistryForTests } from "./bash-process-registry.test-support.js";
 import type { ExecApprovalFollowupOutcome } from "./bash-tools.exec-types.js";
 import { createExecTool } from "./bash-tools.js";
+import { expectCompleted } from "./bash-tools.lifecycle.test-support.js";
 
 const GATEWAY_CONNECT_TIMEOUT_MS = 120_000;
 const EXEC_APPROVAL_E2E_TIMEOUT_MS = 180_000;
@@ -201,7 +202,7 @@ it(
     const outcome = await withTimeout(completion.promise, 15_000, {
       message: "timed out waiting for approved exec outcome",
     });
-    expect(outcome).toMatchObject({ status: "completed", exitCode: 0, aggregated: "smoke" });
+    expectCompleted(outcome, "smoke");
     const finished = expectDefined(
       getFinishedSession(expectDefined(approvedProcessId, "approved process identity")),
       "retained approved process output",
@@ -247,11 +248,7 @@ it(
     const routedOutcome = await withTimeout(routedCompletion.promise, 15_000, {
       message: "timed out waiting for device-bound exec outcome",
     });
-    expect(routedOutcome).toMatchObject({
-      status: "completed",
-      exitCode: 0,
-      aggregated: "device-bound-smoke",
-    });
+    expectCompleted(routedOutcome, "device-bound-smoke");
   },
   EXEC_APPROVAL_E2E_TIMEOUT_MS,
 );

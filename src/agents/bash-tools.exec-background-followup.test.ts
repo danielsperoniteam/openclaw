@@ -25,6 +25,7 @@ import type { ExecToolDefaults } from "./bash-tools.exec-types.js";
 import {
   admitModelTurn,
   completionConfig,
+  expectCompleted,
   fullGatewayExec,
   nodeCommand,
   runningSession,
@@ -82,9 +83,7 @@ afterEach(async () => {
   resetSystemEventsForTest();
 });
 
-afterAll(async () => {
-  await state?.cleanup();
-});
+afterAll(() => state?.cleanup());
 
 async function seedOrigin(sessionKey: string, spawnedBy?: string) {
   await replaceSessionEntry(
@@ -227,11 +226,7 @@ test("starts and notifies when identity enrichment fails, then resolves child id
       action: "poll",
       sessionId,
     });
-    expect(result.details).toMatchObject({
-      status: "completed",
-      aggregated: "EXEC_STARTED",
-      exitCode: 1,
-    });
+    expectCompleted(result.details, "EXEC_STARTED", 1);
   }
 });
 
@@ -307,11 +302,7 @@ test("reports manual collection after destination capture fails, then recovers o
         action: "poll",
         sessionId: handle.sessionId,
       });
-      expect(collected.details).toMatchObject({
-        status: "completed",
-        aggregated: "EXEC_COLLECTED",
-        exitCode: 0,
-      });
+      expectCompleted(collected.details, "EXEC_COLLECTED");
     } finally {
       await fs.writeFile(release, "release");
       await withinTest(waitForExecScope(sessionKey), signal);
