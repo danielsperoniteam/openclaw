@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { registerPluginCliCommandsFromValidatedConfig } from "./cli.js";
 
 export const writeJson = (file: string, value: unknown) =>
@@ -10,6 +11,26 @@ export const cliEnv = (root: string) => ({
   OPENCLAW_STATE_DIR: path.join(root, "state"),
   OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
 });
+
+export const stringConfigSchema = (field: string, extra: Record<string, unknown> = {}) => ({
+  type: "object",
+  properties: { [field]: { type: "string" } },
+  ...extra,
+});
+
+export function pluginConfig(
+  plugin: { id: string; dir: string },
+  entry: { enabled?: boolean; config?: Record<string, unknown> },
+): OpenClawConfig {
+  return {
+    plugins: { load: { paths: [plugin.dir] }, allow: [plugin.id], entries: { [plugin.id]: entry } },
+  };
+}
+
+export function patchManifest(dir: string, fields: Record<string, unknown>) {
+  const file = path.join(dir, "openclaw.plugin.json");
+  writeJson(file, { ...JSON.parse(fs.readFileSync(file, "utf8")), ...fields });
+}
 
 export function registerCli(
   program: Parameters<typeof registerPluginCliCommandsFromValidatedConfig>[0],

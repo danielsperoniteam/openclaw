@@ -1,4 +1,3 @@
-// Pins one plugin register execution per CLI invocation across independent bootstrap stages.
 import fs from "node:fs";
 import path from "node:path";
 import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
@@ -41,19 +40,11 @@ function setupCountingCliPlugin(): { config: OpenClawConfig; markerPath: string 
     id: "counting-cli",
     dir: pluginDir,
     filename: "index.cjs",
-    body: `const fs = require("node:fs");
-module.exports = {
-  id: "counting-cli",
-  register(api) {
-    fs.appendFileSync(${JSON.stringify(markerPath)}, "register\\n");
+    registration: `    require("node:fs").appendFileSync(${JSON.stringify(markerPath)}, "register\\n");
     api.registerCli(() => {}, {
       commands: ["counting-cli"],
-      descriptors: [
-        { name: "counting-cli", description: "Counting CLI", hasSubcommands: false },
-      ],
-    });
-  },
-};`,
+      descriptors: [{ name: "counting-cli", description: "Counting CLI", hasSubcommands: false }],
+    });`,
   });
   return {
     config: {
@@ -97,18 +88,15 @@ describe("plugin CLI metadata registration", () => {
       filename: "index.cjs",
       body: 'throw new Error("Full runtime must not load for metadata help");',
     });
-    fs.writeFileSync(
-      path.join(pluginDir, "cli-metadata.cjs"),
-      `module.exports = {
-  id: "owned-cli-metadata",
-  register(api) {
-    api.registerCli(() => {}, {
+    writePlugin({
+      id: "owned-cli-metadata",
+      dir: pluginDir,
+      filename: "cli-metadata.cjs",
+      registration: `    api.registerCli(() => {}, {
       parentPath: ["nodes"],
       descriptors: [{ name: "owned-metadata", description: "Synthetic metadata", hasSubcommands: false }],
+    });`,
     });
-  },
-};`,
-    );
     const cache = createPluginCache();
     const resources = new CliPluginInvocationResources();
     const session = createPluginCliLoadSession(cache, { resources });
@@ -124,16 +112,15 @@ describe("plugin CLI metadata registration", () => {
     let siblingDisposals = 0;
     try {
       const entries = await loadPluginCliRegistrationEntriesWithDefaults(params, "metadata");
-      expect(entries.map((entry) => entry.parentPath)).toEqual([["nodes"]]);
-      expect(entries.flatMap((entry) => entry.placeholders.map((item) => item.name))).toEqual([
-        "owned-metadata",
+      expect(entries).toMatchObject([
+        {
+          parentPath: ["nodes"],
+          placeholders: [{ name: "owned-metadata" }],
+        },
       ]);
       const registry = await session.resolve(params).metadataRegistry;
       const record = registry?.plugins.find((entry) => entry.id === "owned-cli-metadata");
-      if (!record) {
-        throw new Error("Expected the real source metadata registration");
-      }
-      instance = getPluginInstance(record);
+      instance = record && getPluginInstance(record);
       if (!instance) {
         throw new Error("Expected the registered metadata instance");
       }
@@ -153,15 +140,13 @@ describe("plugin CLI metadata registration", () => {
       let released = false;
       releasing = resources.release();
       expect(resources.release()).toBe(releasing);
+      const markReleased = <T>(result: T) => {
+        released = true;
+        return result;
+      };
       const outcome = releasing.then(
-        () => {
-          released = true;
-          return { ok: true as const };
-        },
-        (error: unknown) => {
-          released = true;
-          return { ok: false as const, error };
-        },
+        () => markReleased({ ok: true as const }),
+        (error: unknown) => markReleased({ ok: false as const, error }),
       );
       await Promise.race([
         removalStarted.promise,
@@ -173,19 +158,15 @@ describe("plugin CLI metadata registration", () => {
       expect([disposals, siblingDisposals]).toEqual([1, 0]);
       finishRemoval.resolve();
       const result = await outcome;
-      if (failure) {
-        expect(result.ok).toBe(false);
-        if (!result.ok) {
-          expect(hasRetainedPluginRuntimeCloseError(result.error)).toBe(false);
-          expect(
-            collectNestedErrorCandidates(result.error).some(
-              (candidate) =>
-                candidate instanceof AggregateError && candidate.errors.includes(failure.reason),
-            ),
-          ).toBe(true);
-        }
-      } else {
-        expect(result).toEqual({ ok: true });
+      expect(result.ok).toBe(!failure);
+      if (!result.ok && failure) {
+        expect(hasRetainedPluginRuntimeCloseError(result.error)).toBe(false);
+        expect(
+          collectNestedErrorCandidates(result.error).some(
+            (candidate) =>
+              candidate instanceof AggregateError && candidate.errors.includes(failure.reason),
+          ),
+        ).toBe(true);
       }
       expect(resources.release()).toBe(releasing);
       expect([disposals, siblingDisposals]).toEqual([1, 1]);
@@ -203,9 +184,7 @@ describe("plugin CLI metadata registration", () => {
     const { config, markerPath } = setupCountingCliPlugin();
     const session = createPluginCliLoadSession();
     onTestFinished(() => session.close());
-    // Stage order mirrors one `openclaw counting-cli --help` invocation: the unowned-primary
-    // guard resolves plugin CLI root ownership, then command registration resolves descriptors
-    // for the same primary. The CLI carries one preparation session through both stages.
+    // Ownership and descriptor stages share one invocation's preparation.
     const params = { cfg: config, env: process.env, primaryCommand: "counting-cli", session };
     const ownerIds = await resolvePluginCliRootOwnerIds(params);
     const descriptors = await loadPluginCliDescriptors(params);
@@ -216,8 +195,7 @@ describe("plugin CLI metadata registration", () => {
 
   it("keeps distinct load scopes on separate register passes", async () => {
     const { config, markerPath } = setupCountingCliPlugin();
-    // Root help executes only the legacy external plugins it could not read from manifests, so
-    // its narrower scope must not be served the full-scope registry (or vice versa).
+    // Root help must not borrow the full-scope registry.
     await loadPluginCliDescriptors({ cfg: config, env: process.env });
     await getPluginCliCommandDescriptors(config, process.env);
     expect(countRegisterRuns(markerPath)).toBe(2);

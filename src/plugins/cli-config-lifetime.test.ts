@@ -7,7 +7,14 @@ import { createConfigIoContext } from "../config/io.context.js";
 import { readConfigFileSnapshotFromContext } from "../config/io.snapshot.js";
 import { clearRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import { withEnvAsync } from "../test-utils/env.js";
-import { cliEnv, registerCli, writeJson } from "./cli-lifetime.test-support.js";
+import {
+  cliEnv,
+  registerCli,
+  writeJson,
+  stringConfigSchema,
+  pluginConfig,
+  patchManifest,
+} from "./cli-lifetime.test-support.js";
 import {
   createPluginCliLoadSession,
   loadPluginCliDescriptors,
@@ -53,10 +60,7 @@ describe("CLI config producer lifetime", () => {
         api.registerCli(() => {}, { descriptors: [{ ...${descriptor}, machineOutput: () => true }] });
       } };`,
       );
-      const manifestPath = path.join(plugin.dir, "openclaw.plugin.json");
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-      writeJson(manifestPath, {
-        ...manifest,
+      patchManifest(plugin.dir, {
         enabledByDefault: true,
         cliCommands: [{ name: "prepared", description: "Prepared command", hasSubcommands: false }],
       });
@@ -97,25 +101,18 @@ describe("CLI config producer lifetime", () => {
           const discover = vi.spyOn(discovery, "discoverOpenClawPlugins");
           const session = createPluginCliLoadSession();
           const read = await session.readConfig(() =>
-            readBestEffortConfigSnapshot({
-              observe: false,
-              skipPluginValidation: true,
-            }),
+            readBestEffortConfigSnapshot({ observe: false, skipPluginValidation: true }),
           );
           expect(read.configDiagnostics).toBeNull();
           expect(read.sourceConfig.agents?.defaults?.compaction).toBeUndefined();
           expect(read.config.agents?.defaults?.compaction?.mode).toBe("safeguard");
-          if (kind === "missing") {
+          if (kind === "missing" || kind === "missing-direct-provider") {
             expect(discover).not.toHaveBeenCalled();
           }
           if (kind.includes("provider")) {
             expect(read.config.agents?.defaults?.contextPruning?.ttl).toBe("7m");
-            if (kind === "missing-direct-provider") {
-              expect(discover).not.toHaveBeenCalled();
-            }
           }
-          // The normal test harness disables unspecified plugins. Select this generated
-          // plugin explicitly after proving missing/empty defaults, without changing the env.
+          // Enable the fixture only after proving missing/empty defaults.
           const enabledConfig = { ...read.config, plugins: { enabled: true, allow: [plugin.id] } };
           writeJson(configPath, { plugins: enabledConfig.plugins });
           const params = { cfg: enabledConfig, session, primaryCommand: "prepared" };
@@ -127,7 +124,7 @@ describe("CLI config producer lifetime", () => {
           expect(await registerCli(program, { primary: "prepared", session })).not.toBeNull();
           expect(program.commands.map((command) => command.name())).toEqual(["prepared"]);
           session.close();
-          program.hook("preAction", () => clearPluginMetadataLifecycleCaches());
+          program.hook("preAction", clearPluginMetadataLifecycleCaches);
           await session.withCache(() => program.parseAsync(["prepared"], { from: "user" }));
           expect(fs.readFileSync(actionPath, "utf8")).toBe("discovery");
           expect(getCurrentPluginMetadataSnapshot()).toBeUndefined();
@@ -155,11 +152,7 @@ describe("CLI config producer lifetime", () => {
       id: "invalid-cli",
       dir: path.join(root, "plugin"),
       filename: "index.cjs",
-      configSchema: {
-        type: "object",
-        properties: { label: { type: "string" } },
-        additionalProperties: false,
-      },
+      configSchema: stringConfigSchema("label", { additionalProperties: false }),
       body: 'throw new Error("invalid plugin must not execute");',
     });
     const rule = {
@@ -171,13 +164,7 @@ describe("CLI config producer lifetime", () => {
       `module.exports = { legacyConfigRules: [${JSON.stringify(rule)}] };`,
     );
     const configPath = path.join(root, "openclaw.json");
-    writeJson(configPath, {
-      plugins: {
-        load: { paths: [plugin.dir] },
-        allow: [plugin.id],
-        entries: { [plugin.id]: { config: { label: 17 } } },
-      },
-    });
+    writeJson(configPath, pluginConfig(plugin, { config: { label: 17 } }));
     await withEnvAsync({ ...cliEnv(root), OPENCLAW_HOME: root }, async () => {
       const discover = vi.spyOn(discovery, "discoverOpenClawPlugins");
       const session = createPluginCliLoadSession();
@@ -208,33 +195,20 @@ describe("CLI config producer lifetime", () => {
       id,
       dir: path.join(root, "plugin"),
       filename: "index.cjs",
-      configSchema: {
-        type: "object",
-        properties: { command: { type: "string" } },
-        additionalProperties: false,
-      },
+      configSchema: stringConfigSchema("command", { additionalProperties: false }),
       body: `module.exports = { id: "${id}", register(api) {
         const name = api.runtime.config.current().plugins.entries["${id}"].config.command;
         api.registerCli(({ program }) => program.command(name), { descriptors: [{ name, description: "Live config command", hasSubcommands: false }] });
       } };`,
     });
-    const manifestPath = path.join(plugin.dir, "openclaw.plugin.json");
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    writeJson(manifestPath, {
-      ...manifest,
+    patchManifest(plugin.dir, {
       cliCommands: [
         { name: "live-config", description: "Live config command", hasSubcommands: false },
       ],
     });
     const configPath = path.join(root, "openclaw.json");
-    writeJson(configPath, {
-      plugins: {
-        enabled: true,
-        load: { paths: [plugin.dir] },
-        allow: [id],
-        entries: { [id]: { enabled: true, config: { command: "live-config" } } },
-      },
-    });
+    const cfg = pluginConfig(plugin, { enabled: true, config: { command: "live-config" } });
+    writeJson(configPath, { ...cfg, plugins: { ...cfg.plugins, enabled: true } });
     await withEnvAsync({ ...cliEnv(root), OPENCLAW_HOME: root }, async () => {
       clearRuntimeConfigSnapshot();
       const program = new Command();
