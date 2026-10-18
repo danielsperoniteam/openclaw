@@ -92,6 +92,7 @@ it.each([
       "PRAGMA user_version",
       "PRAGMA integrity_check;",
       "PRAGMA foreign_key_check;",
+      ...(acquisition === "worker" ? ["PRAGMA user_version"] : []),
     ]);
     expect(result).toMatchObject({ path: targetPath, userVersion: 7 });
     using snapshot = new sqlite.DatabaseSync(targetPath, { readOnly: true });
