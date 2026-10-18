@@ -1,9 +1,8 @@
-/** Exercises source UI preparation against the Gateway's loaded build identity. */
 import fs from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 
 const fixture = vi.hoisted(() => ({
@@ -35,8 +34,8 @@ import { makeMockHttpResponse } from "./test-http-response.js";
 
 const buildResult = { code: 0, termination: "exit" };
 const assetId = (buildId: string) => `${buildId}-${"a".repeat(64)}`;
-const macRoot = () =>
-  path.join(fixture.root, "OpenClaw.app", "Contents", "Resources", "control-ui");
+const at = (...parts: string[]) => path.join(fixture.root, ...parts);
+const macRoot = () => at("OpenClaw.app", "Contents", "Resources", "control-ui");
 
 async function requestIndex(root: ControlUiRootState) {
   const response = makeMockHttpResponse();
@@ -68,118 +67,112 @@ function createLifecycle(override?: string) {
   return { lifecycle, warn };
 }
 
-describe("source-selected Control UI identity preparation", () => {
-  beforeEach(async () => {
-    fixture.buildId = "2026.9.1-runtime-b";
-    fixture.root = await fs.realpath(
-      await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-ui-identity-")),
+beforeEach(async () => {
+  fixture.buildId = "2026.9.1-runtime-b";
+  fixture.root = await fs.realpath(
+    await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-ui-identity-")),
+  );
+  fixture.selectedRoot = at("dist", "control-ui");
+  vi.stubEnv("OPENCLAW_STATE_DIR", at("state"));
+  await fs.mkdir(at("ui"));
+  await fs.mkdir(at("scripts"));
+  await fs.writeFile(at("ui", "vite.config.ts"), "export {};");
+  await fs.writeFile(at("scripts", "ui.js"), "");
+  await writeUi(fixture.selectedRoot, "2026.9.1-runtime-a");
+  fixture.build.mockReset();
+});
+
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await fs.rm(fixture.root, { recursive: true, force: true });
+});
+
+test("prepares a complete stale source UI before publishing its shared root", async () => {
+  const { selectedRoot, buildId } = fixture;
+  const provenancePath = at("dist", "build-info.json");
+  const provenance = JSON.stringify({ buildId });
+  await fs.writeFile(provenancePath, provenance);
+  const build = createDeferred<typeof buildResult>();
+  fixture.build.mockReturnValueOnce(build.promise);
+  const { lifecycle, warn } = createLifecycle();
+  const rootReference = lifecycle.state;
+  expect(rootReference).toEqual({ kind: "preparing" });
+  const unavailable = await requestIndex(rootReference);
+  expect(unavailable.res.statusCode).toBe(503);
+  expect(unavailable.setHeader).toHaveBeenCalledWith("Retry-After", "1");
+
+  const preparing = lifecycle.start();
+  expect(lifecycle.start()).toBe(preparing);
+  await vi.waitFor(() => expect(fixture.build).toHaveBeenCalledOnce());
+  expect(rootReference).toEqual({ kind: "preparing" });
+  fixture.selectedRoot = at("other", "control-ui");
+  fixture.buildId = "2026.9.1-runtime-c";
+  await writeUi(fixture.selectedRoot, fixture.buildId);
+  await writeUi(selectedRoot, buildId);
+  build.resolve(buildResult);
+  await preparing;
+
+  expect(lifecycle.state).toBe(rootReference);
+  expect(rootReference).toMatchObject({
+    kind: "bundled",
+    path: selectedRoot,
+    publicAssetBuildId: assetId(buildId),
+  });
+  const ready = await requestIndex(rootReference);
+  expect(ready.res.statusCode).toBe(200);
+  expect(String(ready.end.mock.calls[0]?.[0])).toContain(assetId(buildId));
+  await lifecycle.start();
+  await lifecycle.stop();
+  expect(fixture.build).toHaveBeenCalledOnce();
+  expect(warn).not.toHaveBeenCalled();
+  expect(await fs.readFile(provenancePath, "utf8")).toBe(provenance);
+});
+
+test.each([
+  ["matching", undefined, "source", "bundled"],
+  ["dev", "dev", "source", "bundled"],
+  ["configured", "custom-build", "configured", "resolved"],
+  ["macOS", undefined, "mac", "resolved"],
+  ["unchanged", "2026.9.1-runtime-a", "source", "failed"],
+  ["stale", "2026.9.1-runtime-a", "mac", "failed"],
+  ["incomplete", "2026.9.1-runtime-a", "mac", "failed"],
+] as const)(
+  "prepares the %s root without substituting another identity",
+  async (kind, buildId, location, expected) => {
+    const failed = expected === "failed";
+    const brokenMac = failed && location === "mac";
+    if (brokenMac) {
+      await writeUi(fixture.selectedRoot, fixture.buildId);
+    }
+    if (location === "mac") {
+      fixture.selectedRoot = macRoot();
+    }
+    await writeUi(fixture.selectedRoot, buildId ?? fixture.buildId);
+    if (kind === "incomplete") {
+      await fs.unlink(path.join(fixture.selectedRoot, "assets", "startup.js"));
+    }
+    if (kind === "unchanged") {
+      fixture.build.mockResolvedValueOnce(buildResult);
+    }
+    const { lifecycle, warn } = createLifecycle(
+      location === "configured" ? fixture.selectedRoot : undefined,
     );
-    fixture.selectedRoot = path.join(fixture.root, "dist", "control-ui");
-    vi.stubEnv("OPENCLAW_STATE_DIR", path.join(fixture.root, "state"));
-    await fs.mkdir(path.join(fixture.root, "ui"));
-    await fs.mkdir(path.join(fixture.root, "scripts"));
-    await fs.writeFile(path.join(fixture.root, "ui", "vite.config.ts"), "export {};");
-    await fs.writeFile(path.join(fixture.root, "scripts", "ui.js"), "");
-    await writeUi(fixture.selectedRoot, "2026.9.1-runtime-a");
-    fixture.build.mockReset();
-  });
-
-  afterEach(async () => {
-    vi.unstubAllEnvs();
-    await fs.rm(fixture.root, { recursive: true, force: true });
-  });
-
-  test("prepares a complete stale source UI before publishing its shared root", async () => {
-    const { selectedRoot, buildId } = fixture;
-    const provenancePath = path.join(fixture.root, "dist", "build-info.json");
-    const provenance = JSON.stringify({ buildId });
-    await fs.writeFile(provenancePath, provenance);
-    const build = createDeferred<typeof buildResult>();
-    fixture.build.mockReturnValueOnce(build.promise);
-    const { lifecycle, warn } = createLifecycle();
-    const rootReference = lifecycle.state;
-    expect(rootReference).toEqual({ kind: "preparing" });
-    const unavailable = await requestIndex(rootReference);
-    expect(unavailable.res.statusCode).toBe(503);
-    expect(unavailable.setHeader).toHaveBeenCalledWith("Retry-After", "1");
-
-    const preparing = lifecycle.start();
-    expect(lifecycle.start()).toBe(preparing);
-    await vi.waitFor(() => expect(fixture.build).toHaveBeenCalledOnce());
-    expect(rootReference).toEqual({ kind: "preparing" });
-    fixture.selectedRoot = path.join(fixture.root, "other", "control-ui");
-    fixture.buildId = "2026.9.1-runtime-c";
-    await writeUi(fixture.selectedRoot, fixture.buildId);
-    await writeUi(selectedRoot, buildId);
-    build.resolve(buildResult);
-    await preparing;
-
-    expect(lifecycle.state).toBe(rootReference);
-    expect(rootReference).toMatchObject({
-      kind: "bundled",
-      path: selectedRoot,
-      publicAssetBuildId: assetId(buildId),
+    expect(lifecycle.state).toMatchObject({
+      kind: failed ? "preparing" : expected,
+      ...(!failed && { path: fixture.selectedRoot }),
     });
-    const ready = await requestIndex(rootReference);
-    expect(ready.res.statusCode).toBe(200);
-    expect(String(ready.end.mock.calls[0]?.[0])).toContain(assetId(buildId));
     await lifecycle.start();
     await lifecycle.stop();
-    expect(fixture.build).toHaveBeenCalledOnce();
-    expect(warn).not.toHaveBeenCalled();
-    expect(await fs.readFile(provenancePath, "utf8")).toBe(provenance);
-  });
-
-  test.each([
-    ["matching", undefined, "source", "bundled"],
-    ["dev", "dev", "source", "bundled"],
-    ["configured", "custom-build", "configured", "resolved"],
-    ["macOS", undefined, "mac", "resolved"],
-    ["unchanged", "2026.9.1-runtime-a", "source", "failed"],
-    ["stale", "2026.9.1-runtime-a", "mac", "failed"],
-    ["incomplete", "2026.9.1-runtime-a", "mac", "failed"],
-  ] as const)(
-    "prepares the %s root without substituting another identity",
-    async (kind, buildId, location, expected) => {
-      const failed = expected === "failed";
-      const brokenMac = failed && location === "mac";
-      if (brokenMac) {
-        await writeUi(fixture.selectedRoot, fixture.buildId);
+    expect(fixture.build).toHaveBeenCalledTimes(kind === "unchanged" ? 1 : 0);
+    if (failed) {
+      expect(lifecycle.state).toEqual({ kind: "failed" });
+      for (const message of brokenMac
+        ? [fixture.selectedRoot, "Reinstall OpenClaw"]
+        : ["expected 2026.9.1-runtime-b"]) {
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining(message));
       }
-      if (location === "mac") {
-        fixture.selectedRoot = macRoot();
-      }
-      await writeUi(fixture.selectedRoot, buildId ?? fixture.buildId);
-      if (kind === "incomplete") {
-        await fs.unlink(path.join(fixture.selectedRoot, "assets", "startup.js"));
-      }
-      if (kind === "unchanged") {
-        fixture.build.mockResolvedValueOnce(buildResult);
-      }
-      const { lifecycle, warn } = createLifecycle(
-        location === "configured" ? fixture.selectedRoot : undefined,
-      );
-      expect(lifecycle.state).toMatchObject(
-        failed
-          ? { kind: "preparing" }
-          : {
-              kind: expected,
-              path: fixture.selectedRoot,
-            },
-      );
-      await lifecycle.start();
-      await lifecycle.stop();
-      expect(fixture.build).toHaveBeenCalledTimes(kind === "unchanged" ? 1 : 0);
-      if (failed) {
-        expect(lifecycle.state).toEqual({ kind: "failed" });
-        for (const message of brokenMac
-          ? [fixture.selectedRoot, "Reinstall OpenClaw"]
-          : ["expected 2026.9.1-runtime-b"]) {
-          expect(warn).toHaveBeenCalledWith(expect.stringContaining(message));
-        }
-      } else {
-        expect(warn).not.toHaveBeenCalled();
-      }
-    },
-  );
-});
+    } else {
+      expect(warn).not.toHaveBeenCalled();
+    }
+  },
+);

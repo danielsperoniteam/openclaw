@@ -2,7 +2,6 @@ import { expectDefined } from "@openclaw/normalization-core/expect";
 import { expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import type { CronJobCreate } from "../cron/types.js";
 import type { GatewayScheduler } from "../infra/gateway-scheduler.js";
 import {
   beginAgentDeletionJournal,
@@ -13,9 +12,7 @@ import {
   createTestGatewayScheduler,
 } from "../test-utils/gateway-scheduler-clock.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import type { buildGatewayCronService } from "./server-cron.js";
-
-type CronFixture = ReturnType<typeof buildGatewayCronService>;
+import type { AddCronJob, CronFixture } from "./server-cron.context.test-support.js";
 
 function holdInventory(state: CronFixture) {
   const entered = createDeferred();
@@ -26,7 +23,7 @@ function holdInventory(state: CronFixture) {
     await release.promise;
     return listJobs(options);
   });
-  return { entered, release, listJobs };
+  return { entered, release, listJobs, [Symbol.dispose]: () => release.resolve() };
 }
 
 export function registerGatewayCronSystemJobTests({
@@ -43,72 +40,48 @@ export function registerGatewayCronSystemJobTests({
     run: (state: CronFixture) => Promise<void>,
   ) => Promise<void>;
   setRuntimeConfig: (cfg: OpenClawConfig) => void;
-  addAgentTurnJob: (
-    state: CronFixture,
-    name: string,
-    message: string,
-    overrides?: Partial<Omit<CronJobCreate, "name" | "payload">>,
-  ) => ReturnType<CronFixture["cron"]["add"]>;
+  addAgentTurnJob: AddCronJob;
 }) {
   const heartbeatDefaults = (every: string) => ({ defaults: { heartbeat: { every } } });
-  it("finishes an accepted config replacement without a second reconciliation request", async () => {
-    const cfg = {
-      ...createCronConfig("server-cron-accepted-replacement"),
-      agents: { entries: { main: { heartbeat: { every: "1h" } } } },
-    } satisfies OpenClawConfig;
-    const state = loadCronService(cfg);
-    let held: ReturnType<typeof holdInventory> | undefined;
-    try {
-      await state.reconcileSystemJobs();
-      held = holdInventory(state);
-      const reconcile = state.reconcileSystemJobs();
-      await held.entered.promise;
-      setRuntimeConfig({
-        ...cfg,
-        agents: { entries: { main: { heartbeat: { every: "2h" } } } },
+  it.each(["accepted replacement", "superseding request"] as const)(
+    "converges an in-flight heartbeat inventory after %s",
+    async (mode) => {
+      const superseding = mode === "superseding request";
+      const agents = (every: string) =>
+        superseding ? heartbeatDefaults(every) : { entries: { main: { heartbeat: { every } } } };
+      const cfg = { ...createCronConfig(`server-cron-${mode}`), agents: agents("1h") };
+      await withCronService(cfg, async (state) => {
+        await expect(state.reconcileSystemJobs()).resolves.toBe("converged");
+        using held = holdInventory(state);
+        const addJob = vi.spyOn(state.cron, "add");
+        const removeJob = vi.spyOn(state.cron, "remove");
+        if (superseding) {
+          setRuntimeConfig({ ...cfg, agents: agents("0m") });
+        }
+        const pending = state.reconcileSystemJobs();
+        await held.entered.promise;
+        setRuntimeConfig(superseding ? cfg : { ...cfg, agents: agents("2h") });
+        const next = superseding ? state.reconcileSystemJobs() : undefined;
+        held.release.resolve();
+        await expect(pending).resolves.toBe(superseding ? "superseded" : "converged");
+        if (next) {
+          await expect(next).resolves.toBe("converged");
+          expect(addJob).not.toHaveBeenCalledWith(
+            expect.objectContaining({ enabled: false }),
+            expect.anything(),
+          );
+          expect(removeJob).not.toHaveBeenCalled();
+        } else {
+          expect(await held.listJobs({ includeDisabled: true })).toContainEqual(
+            expect.objectContaining({
+              payload: { kind: "heartbeat" },
+              schedule: expect.objectContaining({ everyMs: 7_200_000 }),
+            }),
+          );
+        }
       });
-      held.release.resolve();
-      await expect(reconcile).resolves.toBe("converged");
-      expect(await held.listJobs({ includeDisabled: true })).toContainEqual(
-        expect.objectContaining({
-          payload: { kind: "heartbeat" },
-          schedule: expect.objectContaining({ everyMs: 7_200_000 }),
-        }),
-      );
-    } finally {
-      held?.release.resolve();
-      state.cron.stop();
-    }
-  });
-
-  it("supersedes an in-flight heartbeat monitor reconciliation before mutation", async () => {
-    const autoConfig = {
-      ...createCronConfig("server-cron-monitor-reconcile-auto"),
-      agents: heartbeatDefaults("1h"),
-    };
-    const offConfig = { ...autoConfig, agents: heartbeatDefaults("0m") };
-    await withCronService(autoConfig, async (state) => {
-      await expect(state.reconcileSystemJobs()).resolves.toBe("converged");
-      const held = holdInventory(state);
-      const addJob = vi.spyOn(state.cron, "add");
-      const removeJob = vi.spyOn(state.cron, "remove");
-
-      setRuntimeConfig(offConfig);
-      const disable = state.reconcileSystemJobs();
-      await held.entered.promise;
-      setRuntimeConfig(autoConfig);
-      const reenable = state.reconcileSystemJobs();
-      held.release.resolve();
-
-      await expect(disable).resolves.toBe("superseded");
-      await expect(reenable).resolves.toBe("converged");
-      expect(addJob).not.toHaveBeenCalledWith(
-        expect.objectContaining({ enabled: false }),
-        expect.anything(),
-      );
-      expect(removeJob).not.toHaveBeenCalled();
-    });
-  });
+    },
+  );
 
   it.each(["stop", "replace", "supersede"] as const)(
     "observes %s between committed heartbeat monitor mutations",

@@ -27,9 +27,9 @@ import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { normalizeSessionDeliveryState } from "../utils/delivery-context.shared.js";
 import type { buildGatewayCronService } from "./server-cron.js";
 
-type CronFixture = ReturnType<typeof buildGatewayCronService>;
+export type CronFixture = ReturnType<typeof buildGatewayCronService>;
 type CronJobOverrides = Partial<Omit<CronJobCreate, "name" | "payload">>;
-type AddCronJob = (
+export type AddCronJob = (
   service: CronFixture,
   name: string,
   message: string,

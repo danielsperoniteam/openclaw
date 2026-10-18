@@ -1,3 +1,4 @@
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { expectDefined } from "@openclaw/normalization-core/expect";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -12,15 +13,20 @@ type Add = (
   options?: AddOptions & { commitGuard?: () => void },
 ) => Promise<unknown>;
 
-function reconcile(cfg: OpenClawConfig, add: Add, jobs: CronJob[] = [], commitGuard?: () => void) {
+async function reconcile(
+  cfg: OpenClawConfig,
+  add: Add,
+  jobs: CronJob[] = [],
+  commitGuard?: () => void,
+) {
   const remove = vi.fn(async (_id: string) => ({ ok: true }));
-  const result = reconcileHeartbeatMonitorJobs({
+  await reconcileHeartbeatMonitorJobs({
     cron: { add, remove, list: vi.fn(async () => jobs) } as never,
     cfg,
     logger,
     commitGuard,
   });
-  return { result, remove };
+  return remove;
 }
 
 function heartbeatConfig(
@@ -57,11 +63,8 @@ describe("reconcileHeartbeatMonitorJobs", () => {
       const recordAttempt = (id: string) => {
         observed.push({ id, progressed });
         if (observed.length === 1) {
-          checkpoint = new Promise((resolve) => {
-            setImmediate(() => {
-              progressed = true;
-              resolve();
-            });
+          checkpoint = nextTurn().then(() => {
+            progressed = true;
           });
           throw new Error("first mutation failed");
         }
@@ -114,17 +117,14 @@ describe("reconcileHeartbeatMonitorJobs", () => {
     };
     const add = vi.fn(async (input: CronJobCreate, options?: { commitGuard?: () => void }) => {
       options?.commitGuard?.();
-      checkpoint ??= new Promise((resolve) => {
-        setImmediate(() => {
-          current = false;
-          resolve();
-        });
+      checkpoint ??= nextTurn().then(() => {
+        current = false;
       });
       return monitorJob(expectDefined(input.agentId, "heartbeat agent"));
     });
     try {
       await expect(
-        reconcile(heartbeatConfig("30m", { a: {}, b: {} }), add, [], commitGuard).result,
+        reconcile(heartbeatConfig("30m", { a: {}, b: {} }), add, [], commitGuard),
       ).rejects.toBe(revoked);
       expect(add).toHaveBeenCalledTimes(1);
     } finally {
@@ -151,7 +151,7 @@ describe("reconcileHeartbeatMonitorJobs", () => {
         payload: { kind: "systemEvent", text: "not a monitor" },
       } as CronJob,
     ];
-    const { result, remove } = reconcile(
+    const remove = await reconcile(
       {
         agents: {
           defaults: { heartbeat: { every: "15m" } },
@@ -161,7 +161,6 @@ describe("reconcileHeartbeatMonitorJobs", () => {
       add,
       jobs,
     );
-    await result;
 
     const declarationKeys = add.mock.calls.map(([input]) => input.declarationKey);
     expect(declarationKeys.toSorted((a, b) => (a ?? "").localeCompare(b ?? ""))).toEqual([
@@ -199,12 +198,9 @@ describe("reconcileHeartbeatMonitorJobs", () => {
 
   it("keeps a stable disabled monitor when heartbeat cadence is disabled", async () => {
     const add = vi.fn(async (_input: { declarationKey?: string }, _options?: AddOptions) => ({}));
-    const { result, remove } = reconcile(
-      { agents: { defaults: { heartbeat: { every: "0m" } } } },
-      add,
-      [monitorJob("main")],
-    );
-    await result;
+    const remove = await reconcile({ agents: { defaults: { heartbeat: { every: "0m" } } } }, add, [
+      monitorJob("main"),
+    ]);
 
     expect(add).toHaveBeenCalledTimes(1);
     expect(add.mock.calls[0]?.[0]).toEqual(

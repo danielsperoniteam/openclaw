@@ -17,7 +17,10 @@ import { waitForActiveCronTaskRuns } from "../cron/service/active-run-cancellati
 import { captureCronSchedulerWakeForTest } from "../cron/service/scheduler-actor.test-support.js";
 import * as cronServiceState from "../cron/service/state.js";
 import * as cronRunFinalization from "../cron/service/timer-outcome-finalization.js";
-import * as cronStore from "../cron/store.js";
+import {
+  loadCronJobsStoreWithConfigJobs as loadJobs,
+  resolveCronJobsStorePathFromConfigAsync,
+} from "../cron/store.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
 import {
   createGatewaySchedulerClock,
@@ -64,10 +67,9 @@ import { sessionChanges } from "../sessions/session-row-changes.js";
 import { buildGatewayCronService } from "./server-cron.js";
 import { sessionHasAutomation } from "./session-automation-index.js";
 
-type StartedGatewayCron = {
+type StartedGatewayCron = ReturnType<typeof buildGatewayCronService> & {
   clock: ReturnType<typeof createGatewaySchedulerClock>;
   scheduler: ReturnType<typeof createTestGatewayScheduler>;
-  state: ReturnType<typeof buildGatewayCronService>;
   cfg: OpenClawConfig;
   stateDir: string;
   cleanupError?: Error;
@@ -88,7 +90,7 @@ async function startGatewayCron(
   const clock = createGatewaySchedulerClock(Date.now());
   const scheduler = createTestGatewayScheduler(clock.clock);
   const state = buildGatewayCronService({
-    storePath: await cronStore.resolveCronJobsStorePathFromConfigAsync(cfg, {
+    storePath: await resolveCronJobsStorePathFromConfigAsync(cfg, {
       ...process.env,
       OPENCLAW_STATE_DIR: stateDir,
     }),
@@ -98,7 +100,7 @@ async function startGatewayCron(
     broadcast,
     env: { ...process.env, OPENCLAW_SKIP_CRON: "0", OPENCLAW_STATE_DIR: stateDir },
   });
-  const fixture: StartedGatewayCron = { state, cfg, stateDir, clock, scheduler };
+  const fixture: StartedGatewayCron = { ...state, cfg, stateDir, clock, scheduler };
   fixtures.push(fixture);
   await state.cron.start();
   await state.cron.add({
@@ -112,9 +114,9 @@ async function startGatewayCron(
   return fixture;
 }
 
-async function cleanGatewayCron({ state, stateDir }: StartedGatewayCron): Promise<void> {
+async function cleanGatewayCron({ cron, stateDir }: StartedGatewayCron): Promise<void> {
   try {
-    await state.cron.stopAndDrain?.();
+    await cron.stopAndDrain?.();
   } finally {
     await rm(stateDir, { recursive: true, force: true });
   }
@@ -168,7 +170,7 @@ async function withExitWatcher(
 }
 
 async function addCommand(original: StartedGatewayCron, name: string, deleteAfterRun: boolean) {
-  return original.state.cron.add({
+  return original.cron.add({
     name,
     enabled: true,
     schedule: { kind: "at", at: new Date(original.clock.clock.now() - 1_000).toISOString() },
@@ -214,7 +216,7 @@ describe("gateway cron stop-and-drain automation ownership", () => {
     async (stopMode, { signal }) => {
       const original = await startGatewayCron(`system-jobs-${stopMode}`, false);
       // Disabled startup cancels watchers; join that setup before observing the handoff.
-      await original.state.reconcileExitWatchers();
+      await original.reconcileExitWatchers();
       cancelAllMock.mockClear();
       const cfg: OpenClawConfig = {
         ...original.cfg,
@@ -223,20 +225,18 @@ describe("gateway cron stop-and-drain automation ownership", () => {
       getRuntimeConfigMock.mockReturnValue(cfg);
       const entered = createDeferred();
       const release = createDeferred();
-      const listJobs = original.state.cron.list.bind(original.state.cron);
-      const inventory = vi
-        .spyOn(original.state.cron, "list")
-        .mockImplementationOnce(async (options) => {
-          const snapshot = await listJobs(options);
-          entered.resolve();
-          await release.promise;
-          return snapshot;
-        });
-      const add = vi.spyOn(original.state.cron, "add");
+      const listJobs = original.cron.list.bind(original.cron);
+      const inventory = vi.spyOn(original.cron, "list").mockImplementationOnce(async (options) => {
+        const snapshot = await listJobs(options);
+        entered.resolve();
+        await release.promise;
+        return snapshot;
+      });
+      const add = vi.spyOn(original.cron, "add");
       const stopError = new Error("stream drain failed");
-      const reconcile = original.state.reconcileSystemJobs();
+      const reconcile = original.reconcileSystemJobs();
       let drain: Promise<void> | undefined;
-      let lateReconcile: ReturnType<typeof original.state.reconcileSystemJobs> | undefined;
+      let lateReconcile: ReturnType<typeof original.reconcileSystemJobs> | undefined;
       try {
         await enteredBeforeSettled(entered.promise, reconcile, signal, "System-job inventory gate");
         if (stopMode === "watcher-failure") {
@@ -245,14 +245,14 @@ describe("gateway cron stop-and-drain automation ownership", () => {
         const stopped =
           stopMode === "handoff"
             ? expectDefined(
-                await original.state.prepareExitWatcherHandoff?.(),
+                await original.prepareExitWatcherHandoff?.(),
                 "exit handoff",
               ).stopOwner()
-            : expectDefined(original.state.cron.stopAndDrain?.(), "cron drain");
+            : expectDefined(original.cron.stopAndDrain?.(), "cron drain");
         const observed = observe(stopped);
         drain = observed.settled;
-        lateReconcile = original.state.reconcileSystemJobs();
-        await cronStore.loadCronJobsStoreWithConfigJobs(original.state.storePath);
+        lateReconcile = original.reconcileSystemJobs();
+        await loadJobs(original.storePath);
         expect(observed.outcome).toBeUndefined();
         expect(add).not.toHaveBeenCalled();
         if (stopMode === "handoff") {
@@ -268,7 +268,7 @@ describe("gateway cron stop-and-drain automation ownership", () => {
         );
         expect(add).not.toHaveBeenCalled();
 
-        await withinTest(original.state.cron.start(), signal);
+        await withinTest(original.cron.start(), signal);
         expect(await listJobs({ includeDisabled: true })).toEqual(
           expect.arrayContaining([
             expect.objectContaining({
@@ -280,7 +280,7 @@ describe("gateway cron stop-and-drain automation ownership", () => {
         );
       } finally {
         release.resolve();
-        original.state.cron.stop();
+        original.cron.stop();
         original.scheduler.beginClose();
         inventory.mockRestore();
         add.mockRestore();
@@ -295,14 +295,14 @@ describe("gateway cron stop-and-drain automation ownership", () => {
     const original = await startGatewayCron("system-job-retry", false);
     const entered = createDeferred();
     const releaseChild = createDeferred();
-    const listJobs = original.state.cron.list.bind(original.state.cron);
+    const listJobs = original.cron.list.bind(original.cron);
     const inventory = vi
-      .spyOn(original.state.cron, "list")
+      .spyOn(original.cron, "list")
       .mockRejectedValueOnce(new Error("inventory failed"));
     let retry: ReturnType<typeof original.clock.advanceBy> = undefined;
     let drain: Promise<void> | undefined;
     try {
-      await expect(withinTest(original.state.reconcileSystemJobs(), signal)).resolves.toBe(
+      await expect(withinTest(original.reconcileSystemJobs(), signal)).resolves.toBe(
         "retry-scheduled",
       );
       inventory.mockImplementationOnce(async (options) => {
@@ -319,15 +319,13 @@ describe("gateway cron stop-and-drain automation ownership", () => {
         "Retry inventory gate",
       );
       // A newer pass can finish while the retired callback still owns a descendant.
-      await expect(withinTest(original.state.reconcileSystemJobs(), signal)).resolves.toBe(
-        "converged",
-      );
-      const observed = observe(expectDefined(original.state.cron.stopAndDrain?.(), "cron drain"));
+      await expect(withinTest(original.reconcileSystemJobs(), signal)).resolves.toBe("converged");
+      const observed = observe(expectDefined(original.cron.stopAndDrain?.(), "cron drain"));
       drain = observed.settled;
       const sibling = vi.fn();
       original.scheduler.schedule({ id: "system-job-retry-sibling", delayMs: 0, run: sibling });
       await withinTest(Promise.resolve(original.clock.advanceBy(0)), signal);
-      await cronStore.loadCronJobsStoreWithConfigJobs(original.state.storePath);
+      await loadJobs(original.storePath);
       expect(sibling).toHaveBeenCalledOnce();
       expect(original.scheduler.signal.aborted).toBe(false);
       expect(observed.outcome).toBeUndefined();
@@ -340,7 +338,7 @@ describe("gateway cron stop-and-drain automation ownership", () => {
       expect(inventory).toHaveBeenCalledTimes(callsAfterStop);
     } finally {
       releaseChild.resolve();
-      original.state.cron.stop();
+      original.cron.stop();
       original.scheduler.beginClose();
       inventory.mockRestore();
       await finishPending([retry, drain], signal);
@@ -363,7 +361,7 @@ describe("gateway cron stop-and-drain automation ownership", () => {
     const entered = createDeferred();
     const release = createDeferred();
     const sibling = vi.fn();
-    await original.state.cron.add({
+    await original.cron.add({
       name: "stopped before reservation",
       enabled: true,
       schedule: { kind: "at", at: new Date(original.clock.clock.now() + 1_000).toISOString() },
@@ -374,7 +372,7 @@ describe("gateway cron stop-and-drain automation ownership", () => {
     const sessionAgents = vi
       .spyOn(cronState.deps, "resolveSessionStoreAgentIds")
       .mockImplementationOnce(async () => {
-        original.state.cron.stop();
+        original.cron.stop();
         entered.resolve();
         await release.promise;
         return [];
@@ -389,11 +387,11 @@ describe("gateway cron stop-and-drain automation ownership", () => {
         signal,
         "Worker maintenance gate",
       );
-      const observed = observe(expectDefined(original.state.cron.stopAndDrain?.(), "cron drain"));
+      const observed = observe(expectDefined(original.cron.stopAndDrain?.(), "cron drain"));
       drain = observed.settled;
       original.scheduler.schedule({ id: "cron-drain-sibling", delayMs: 0, run: sibling });
       await withinTest(Promise.resolve(original.clock.advanceBy(0)), signal);
-      await cronStore.loadCronJobsStoreWithConfigJobs(original.state.storePath);
+      await loadJobs(original.storePath);
       expect(sibling).toHaveBeenCalledOnce();
       expect(original.scheduler.signal.aborted).toBe(false);
       expect(observed.outcome).toBeUndefined();
@@ -403,7 +401,7 @@ describe("gateway cron stop-and-drain automation ownership", () => {
       expect(observed.outcome).toEqual({ ok: true });
     } finally {
       release.resolve();
-      original.state.cron.stop();
+      original.cron.stop();
       original.scheduler.beginClose();
       sessionAgents.mockRestore();
       await finishPending([tick, drain], signal);
@@ -433,7 +431,7 @@ describe("gateway cron stop-and-drain automation ownership", () => {
       try {
         const job = await addCommand(original, "finalization drain", false);
         jobId = job.id;
-        run = original.state.cron.run(job.id, "force");
+        run = original.cron.run(job.id, "force");
         await awaitGateBeforeSettlement(
           finalizationEntered.promise,
           run,
@@ -445,11 +443,11 @@ describe("gateway cron stop-and-drain automation ownership", () => {
           cancelAllMock.mockRejectedValueOnce(stopError);
           original.cleanupError = stopError;
         }
-        const observed = observe(expectDefined(original.state.cron.stopAndDrain?.(), "cron drain"));
+        const observed = observe(expectDefined(original.cron.stopAndDrain?.(), "cron drain"));
         drain = observed.settled;
-        const pending = (
-          await cronStore.loadCronJobsStoreWithConfigJobs(original.state.storePath)
-        ).store.jobs.find((entry) => entry.id === job.id);
+        const pending = (await loadJobs(original.storePath)).store.jobs.find(
+          (entry) => entry.id === job.id,
+        );
         expect(pending?.state.runningAtMs).toEqual(expect.any(Number));
         expect(pending?.state.lastRunStatus).toBeUndefined();
         expect(observed.outcome).toBeUndefined();
@@ -460,9 +458,9 @@ describe("gateway cron stop-and-drain automation ownership", () => {
         expect(observed.outcome).toEqual(
           stopResult === "success" ? { ok: true } : { ok: false, error: stopError },
         );
-        const completed = (
-          await cronStore.loadCronJobsStoreWithConfigJobs(original.state.storePath)
-        ).store.jobs.find((entry) => entry.id === job.id);
+        const completed = (await loadJobs(original.storePath)).store.jobs.find(
+          (entry) => entry.id === job.id,
+        );
         expect(completed).toMatchObject({ enabled: false, state: { lastRunStatus: "ok" } });
         expect(completed?.state.runningAtMs).toBeUndefined();
         expect(isCronJobActive(job.id)).toBe(false);
@@ -485,43 +483,45 @@ describe("gateway cron stop-and-drain automation ownership", () => {
         const key = `agent:main:cron:${job.id}`;
         expect(sessionHasAutomation(key, original.cfg)).toBe(true);
         stop = sessionChanges.subscribe(changed);
-        expect(await original.state.cron.run(job.id, "force")).toMatchObject({
+        expect(await original.cron.run(job.id, "force")).toMatchObject({
           ok: true,
           ran: true,
         });
-        expect(original.state.cron.getJob(job.id)?.state.lastError).toBeUndefined();
+        expect(original.cron.getJob(job.id)?.state.lastError).toBeUndefined();
         expect(sessionHasAutomation(key, original.cfg)).toBe(false);
         const automation = changed.mock.calls
           .map(([change]) => change)
           .filter((change) => change.scope === "automation");
         expect(automation).toEqual([{ sessionKey: key, scope: "automation" }]);
-        expect(original.state.cron.getJob(job.id)?.enabled).toBe(
-          deleteAfterRun ? undefined : false,
-        );
+        expect(original.cron.getJob(job.id)?.enabled).toBe(deleteAfterRun ? undefined : false);
       } finally {
         stop();
       }
     },
   );
 
-  it.each(["drain", "restart"] as const)(
+  it.each(["drain", "restart", "superseded restart"] as const)(
     "waits for cancelled exit watchers before completing %s",
     async (action) => {
-      await withExitWatcher(`exit-watcher-${action}`, async ({ state }, release) => {
-        if (action === "restart") {
-          state.cron.stop();
+      await withExitWatcher(`exit-watcher-${action}`, async ({ cron, cfg }, release) => {
+        if (action !== "drain") {
+          cron.stop();
         }
         const observed = observe(
-          action === "restart"
-            ? state.cron.start()
-            : expectDefined(state.cron.stopAndDrain?.(), "cron drain"),
+          action !== "drain" ? cron.start() : expectDefined(cron.stopAndDrain?.(), "cron drain"),
         );
         await vi.waitFor(() => expect(cancelAllMock).toHaveBeenCalledOnce());
         await nextTurn();
         expect(observed.outcome).toBeUndefined();
+        if (action === "superseded restart") {
+          cron.stop();
+        }
         release.resolve();
         await observed.settled;
         expect(observed.outcome).toEqual({ ok: true });
+        if (action === "superseded restart") {
+          expect(sessionHasAutomation("agent:main:main", cfg)).toBe(false);
+        }
       });
     },
   );
@@ -533,21 +533,21 @@ describe("gateway cron stop-and-drain automation ownership", () => {
       const start = vi.spyOn(CronService.prototype, "start");
       const original = await startGatewayCron(`paused-start-${action}`, true, broadcast);
       try {
-        await original.state.cron.stopAndDrain?.();
+        await original.cron.stopAndDrain?.();
         start.mockClear();
         broadcast.mockClear();
-        original.state.cron.pauseScheduling();
-        const starts = [original.state.cron.start(), original.state.cron.start()];
+        original.cron.pauseScheduling();
+        const starts = [original.cron.start(), original.cron.start()];
         await nextTurn();
         expect(start).not.toHaveBeenCalled();
-        expect(original.state.cron.getSuspensionBlockerCount?.()).toBeGreaterThan(0);
+        expect(original.cron.getSuspensionBlockerCount?.()).toBeGreaterThan(0);
         expect(sessionHasAutomation("agent:main:main", original.cfg)).toBe(false);
         expect(broadcast).not.toHaveBeenCalled();
 
         if (action === "resume") {
-          original.state.cron.resumeScheduling();
+          original.cron.resumeScheduling();
           await Promise.all(starts);
-          await original.state.cron.start();
+          await original.cron.start();
           expect(start).toHaveBeenCalledOnce();
           expect(sessionHasAutomation("agent:main:main", original.cfg)).toBe(true);
           expect(broadcast).toHaveBeenCalledExactlyOnceWith(
@@ -556,31 +556,17 @@ describe("gateway cron stop-and-drain automation ownership", () => {
             { dropIfSlow: true },
           );
         } else {
-          await original.state.cron.stopAndDrain?.();
+          await original.cron.stopAndDrain?.();
           await Promise.all(starts);
           expect(sessionHasAutomation("agent:main:main", original.cfg)).toBe(false);
           expect(broadcast).not.toHaveBeenCalled();
         }
-        expect(original.state.cron.getSuspensionBlockerCount?.()).toBe(0);
+        expect(original.cron.getSuspensionBlockerCount?.()).toBe(0);
       } finally {
         start.mockRestore();
       }
     },
   );
-
-  it("does not reopen the scheduler when a later stop wins a pending restart", async () => {
-    await withExitWatcher("exit-watcher-restart-cancelled", async (original, release) => {
-      original.state.cron.stop();
-      const restart = original.state.cron.start();
-      await vi.waitFor(() => expect(cancelAllMock).toHaveBeenCalledOnce());
-
-      original.state.cron.stop();
-      release.resolve();
-      await restart;
-
-      expect(sessionHasAutomation("agent:main:main", original.cfg)).toBe(false);
-    });
-  });
 
   it("observes asynchronous exit cleanup failure and preserves it across drain and restart", async () => {
     const exitWatcherDrain = createDeferred();
@@ -589,14 +575,14 @@ describe("gateway cron stop-and-drain automation ownership", () => {
     const error = new Error("cleanup could not be confirmed");
     original.cleanupError = error;
     try {
-      original.state.cron.stop();
+      original.cron.stop();
       exitWatcherDrain.reject(error);
       // cron.stop has no returned promise; its owner must observe rejection itself.
       await nextTurn();
       expect(sessionHasAutomation("agent:main:main", original.cfg)).toBe(false);
-      await expect(original.state.cron.stopAndDrain?.()).rejects.toBe(error);
-      await expect(original.state.cron.start()).rejects.toBe(error);
-      await expect(original.state.cron.stopAndDrain?.()).rejects.toBe(error);
+      await expect(original.cron.stopAndDrain?.()).rejects.toBe(error);
+      await expect(original.cron.start()).rejects.toBe(error);
+      await expect(original.cron.stopAndDrain?.()).rejects.toBe(error);
       expect(cancelAllMock).toHaveBeenCalledOnce();
     } finally {
       exitWatcherDrain.reject(error);
@@ -607,9 +593,9 @@ describe("gateway cron stop-and-drain automation ownership", () => {
     const original = await startGatewayCron("disabled-exit-cleanup-failure", false);
     const error = new Error("cleanup could not be confirmed");
     original.cleanupError = error;
-    await original.state.reconcileExitWatchers();
+    await original.reconcileExitWatchers();
     cancelAllMock.mockRejectedValue(error);
-    await expect(original.state.reconcileExitWatchers()).resolves.toBeUndefined();
+    await expect(original.reconcileExitWatchers()).resolves.toBeUndefined();
     await nextTurn();
   });
 
@@ -619,9 +605,9 @@ describe("gateway cron stop-and-drain automation ownership", () => {
     const original = await startGatewayCron("failed");
 
     expect(sessionHasAutomation("agent:main:main", original.cfg)).toBe(true);
-    await expect(original.state.cron.stopAndDrain?.()).rejects.toThrow("stream drain failed");
+    await expect(original.cron.stopAndDrain?.()).rejects.toThrow("stream drain failed");
     expect(sessionHasAutomation("agent:main:main", original.cfg)).toBe(false);
-    await expect(original.state.cron.stopAndDrain?.()).resolves.toBeUndefined();
+    await expect(original.cron.stopAndDrain?.()).resolves.toBeUndefined();
     expect(stopAllMock).toHaveBeenCalledTimes(2);
     expect(sessionHasAutomation("agent:main:main", original.cfg)).toBe(false);
   });
@@ -632,14 +618,14 @@ describe("gateway cron stop-and-drain automation ownership", () => {
     stopAllMock.mockResolvedValue(undefined);
     const original = await startGatewayCron("stale");
     expect(sessionHasAutomation("agent:main:main", original.cfg)).toBe(true);
-    const staleDrain = expectDefined(original.state.cron.stopAndDrain?.(), "cron drain");
+    const staleDrain = expectDefined(original.cron.stopAndDrain?.(), "cron drain");
     const replacement = await startGatewayCron("replacement");
     expect(sessionHasAutomation("agent:main:main", replacement.cfg)).toBe(true);
     const failedDrain = expect(staleDrain).rejects.toThrow("stream drain failed");
     pendingDrain.reject(new Error("stream drain failed"));
     await failedDrain;
     expect(sessionHasAutomation("agent:main:main", replacement.cfg)).toBe(true);
-    await expect(original.state.cron.stopAndDrain?.()).resolves.toBeUndefined();
+    await expect(original.cron.stopAndDrain?.()).resolves.toBeUndefined();
     expect(sessionHasAutomation("agent:main:main", replacement.cfg)).toBe(true);
   });
 });
