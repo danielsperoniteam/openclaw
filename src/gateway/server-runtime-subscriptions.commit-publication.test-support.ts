@@ -1,4 +1,4 @@
-import { expect, it, vi } from "vitest";
+import { expect, it, vi, type Mock } from "vitest";
 import {
   awaitGateBeforeSettlement,
   createDeferred,
@@ -10,14 +10,19 @@ import {
 } from "../process/gateway-work-admission.js";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { AsyncWorkScope, getAsyncWorkSignal } from "../shared/async-work-scope.js";
-import type { registerSessionPublicationTests } from "./server-runtime-subscriptions.publication.test-support.js";
+import type { startGatewayEventSubscriptions } from "./server-runtime-subscriptions.js";
+import type { createSubscriptionTestFixture } from "./server-runtime-subscriptions.test-support.js";
 import { createSessionRowProjectionFixture } from "./session-row-projection.test-support.js";
+import type { readSessionMessageByIdAsync } from "./session-transcript-readers.js";
 
 export function registerCommittedTranscriptPublicationTests(
-  fixture: Pick<
-    Parameters<typeof registerSessionPublicationTests>[0],
-    "createParams" | "start" | "transcriptBroadcastMocks" | "warn"
-  >,
+  fixture: Pick<ReturnType<typeof createSubscriptionTestFixture>, "createParams" | "warn"> & {
+    start: typeof startGatewayEventSubscriptions;
+    transcriptBroadcastMocks: {
+      useActualHandler: boolean;
+      readMessageById: Mock<typeof readSessionMessageByIdAsync>;
+    };
+  },
 ) {
   const { createParams, start, transcriptBroadcastMocks, warn } = fixture;
   it.for([1, 3])(
