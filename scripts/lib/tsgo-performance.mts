@@ -194,7 +194,7 @@ function provenance(cwd: string, env: NodeJS.ProcessEnv) {
   let compilerVersion: string | null = null;
   try {
     const require = createRequire(path.join(root, "package.json"));
-    const manifest = `${NATIVE_COMPILER_PACKAGES.get(resolveTypeCheckTool())}/package.json`;
+    const manifest = `${NATIVE_COMPILER_PACKAGES.get(resolveTypeCheckTool(process.platform, process.arch, env))}/package.json`;
     compilerVersion =
       JSON.parse(fs.readFileSync(require.resolve(manifest), "utf8")).version ?? null;
   } catch {

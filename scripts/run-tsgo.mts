@@ -69,9 +69,12 @@ export function prepareTsgoCommand(
   }
 
   // Subdirectories share checkout ownership, but another checkout's install never does.
-  const compilerPath = resolveRepoToolBinPath(resolveTypeCheckTool(), {
-    cwd: findRepoRoot(cwd) ?? cwd,
-  });
+  const compilerPath = resolveRepoToolBinPath(
+    resolveTypeCheckTool(process.platform, process.arch, env),
+    {
+      cwd: findRepoRoot(cwd) ?? cwd,
+    },
+  );
   let timeoutMs: number | undefined;
   try {
     timeoutMs = resolveTsgoTimeoutMs(env);
