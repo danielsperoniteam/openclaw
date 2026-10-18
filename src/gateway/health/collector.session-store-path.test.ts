@@ -379,6 +379,9 @@ describe("health session store paths", () => {
                 expect(fallbackOutput).toContain("Session store (survivor):");
                 expect(fallbackOutput).not.toContain("Session store (deleting):");
                 expect(health.defaultAgentId).toBe("survivor");
+                expect(health.agents.find((agent) => agent.agentId === "survivor")?.isDefault).toBe(
+                  true,
+                );
                 expect(resolveHealthAgentOrder(cfg).defaultAgentId).toBe("deleting");
                 expect(preparedLocal?.defaultId).toBe("deleting");
                 expect(preparedLocal?.publish()).toMatchObject({
