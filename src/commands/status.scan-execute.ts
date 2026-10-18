@@ -1,4 +1,3 @@
-// Converts a shared status overview scan into the full status scan result.
 // Memory and summary collection run in parallel after the common gateway/config scan has completed.
 
 import type { PluginCompatibilityNotice } from "../plugins/status.js";
@@ -7,7 +6,6 @@ import type { StatusScanOverviewResult } from "./status.scan-overview.ts";
 import { prepareStatusSummaryFromOverview } from "./status.scan-overview.ts";
 import { buildStatusScanResult } from "./status.scan-result.ts";
 
-/** Builds a full status scan result from an overview scan plus channel/plugin compatibility data. */
 export async function executeStatusScanFromOverview(params: {
   overview: StatusScanOverviewResult;
   includeMemory?: boolean;
@@ -39,16 +37,19 @@ export async function executeStatusScanFromOverview(params: {
     prepareStatusSummaryFromOverview({ overview: params.overview }),
   ]);
 
-  const { summary, sessionStores } = prepared.publish();
-  const agentStatus =
-    "publish" in overview.agentStatus
-      ? overview.agentStatus.publish(sessionStores)
-      : overview.agentStatus;
+  const publish = () => {
+    const { summary, sessionStores } = prepared.publish();
+    const agentStatus =
+      "publish" in overview.agentStatus
+        ? overview.agentStatus.publish(sessionStores)
+        : overview.agentStatus;
+    return { summary, agentStatus };
+  };
   return buildStatusScanResult({
     ...overview,
-    agentStatus,
+    ...publish(),
+    publish,
     env: overview.env ?? {},
-    summary,
     memory,
     memoryPlugin,
     pluginCompatibility: params.pluginCompatibility,

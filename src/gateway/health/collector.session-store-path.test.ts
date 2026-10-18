@@ -7,6 +7,13 @@ import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers
 import * as diagnosticReadiness from "../../commands/gateway-diagnostic-readiness.js";
 import { healthCommand } from "../../commands/health.js";
 import { collectStatusLocalSnapshot } from "../../commands/status.agent-local.js";
+import type { StatusScanOverviewResult } from "../../commands/status.scan-overview.ts";
+import {
+  baseStatusGatewaySnapshot,
+  baseStatusOverviewSurface,
+  createStatusCommandReportDataParams,
+  createStatusScanResultFixture,
+} from "../../commands/status.test-support.ts";
 import { createTestRuntime } from "../../commands/test-runtime-config-helpers.js";
 import * as configRuntime from "../../config/config.js";
 import { setRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
@@ -40,6 +47,20 @@ vi.mock("../../channels/plugins/read-only.js", () => ({
   listReadOnlyChannelPluginsForConfig: () => [],
 }));
 
+const fixtureService = {
+  label: "fixture",
+  installed: false,
+  loadState: { status: "unknown", detail: "fixture" },
+  managedByOpenClaw: false,
+  externallyManaged: false,
+  loadedText: "unknown",
+  loaded: false,
+  runtime: undefined,
+  runtimeShort: "not running",
+} satisfies Awaited<
+  ReturnType<typeof import("../../commands/status.daemon.js").getDaemonStatusSummary>
+>;
+
 async function summarizeStore(storePath: string, agentId: string) {
   const cfg: OpenClawConfig = {
     agents: { ownership: "explicit", entries: { [agentId]: {} } },
@@ -51,6 +72,23 @@ async function summarizeStore(storePath: string, agentId: string) {
 
 async function readStatusSessionStores(...args: Parameters<typeof prepareStatusSessionStores>) {
   return (await prepareStatusSessionStores(...args)).publish();
+}
+
+async function prepareDeletionStatusOverview(
+  cfg: OpenClawConfig,
+): Promise<StatusScanOverviewResult> {
+  const local = await collectStatusLocalSnapshot(cfg);
+  return {
+    ...createStatusScanResultFixture({ cfg, sourceConfig: cfg, env: process.env }),
+    coldStart: false,
+    hasConfiguredChannels: false,
+    skipColdStartNetworkChecks: false,
+    runtimeDegradation: null,
+    channelsStatus: null,
+    gatewaySnapshot: { ...baseStatusGatewaySnapshot, gatewayReachable: false },
+    agentStatus: local,
+    sessionStores: local.sessionStores,
+  };
 }
 
 describe("health session store paths", () => {
@@ -326,6 +364,20 @@ describe("health session store paths", () => {
                 const output = stripAnsi(runtime.log.mock.calls.flat().join("\n"));
                 expect(output).toContain("Heartbeat interval: 1m (survivor)");
                 expect(output).toContain("Session store (survivor):");
+                vi.spyOn(gatewayCall, "callGateway").mockResolvedValueOnce({
+                  ...health,
+                  agents: [],
+                  defaultAgentId: "deleting",
+                });
+                vi.spyOn(diagnosticReadiness, "waitForGatewayDiagnostic").mockResolvedValueOnce(
+                  1000,
+                );
+                const fallbackRuntime = createTestRuntime();
+                await healthCommand({ config: cfg }, fallbackRuntime);
+                const fallbackOutput = stripAnsi(fallbackRuntime.log.mock.calls.flat().join("\n"));
+                expect(fallbackOutput).toContain("Heartbeat interval: 1m (survivor)");
+                expect(fallbackOutput).toContain("Session store (survivor):");
+                expect(fallbackOutput).not.toContain("Session store (deleting):");
                 expect(health.defaultAgentId).toBe("survivor");
                 expect(resolveHealthAgentOrder(cfg).defaultAgentId).toBe("deleting");
                 expect(preparedLocal?.defaultId).toBe("deleting");
@@ -428,6 +480,208 @@ describe("health session store paths", () => {
           expect(cfg.agents?.defaults?.systemAgent?.agentId).toBe(
             phase === "desktop" ? "deleting" : undefined,
           );
+        } finally {
+          release.resolve();
+          await pending.catch(() => {});
+        }
+      });
+    },
+  );
+
+  it.each(["text", "json"] as const)(
+    "publishes local %s status after final backup preparation",
+    async (format) => {
+      await withOpenClawTestState({ label: `status-${format}-publication` }, async (state) => {
+        const cfg: OpenClawConfig = {
+          agents: {
+            ownership: "explicit",
+            entries: { deleting: {}, survivor: {} },
+            defaults: { systemAgent: { agentId: "deleting" } },
+          },
+        };
+        setRuntimeConfigSnapshot(cfg);
+        for (const agentId of ["deleting", "survivor"]) {
+          await sessionAccessor.upsertSessionEntryCore(
+            { agentId, sessionKey: `agent:${agentId}:main` },
+            { sessionId: `${agentId}-session`, updatedAt: 1 },
+          );
+        }
+        const { executeStatusScanFromOverview } =
+          await import("../../commands/status.scan-execute.ts");
+        const scan = await executeStatusScanFromOverview({
+          overview: await prepareDeletionStatusOverview(cfg),
+          pluginCompatibility: [],
+        });
+        const backup = await import("../../state/backup-run-records.js");
+        const engines = await import("../../commands/status-database-engines.js");
+        const runtime = await import("../../commands/status-runtime-shared.ts");
+        const { buildStatusCommandReportLines } =
+          await import("../../commands/status.command-report.ts");
+        const { resolveStatusJsonOutput } = await import("../../commands/status-json-runtime.ts");
+        const entered = createDeferred();
+        const release = createDeferred();
+        const readBackup = backup.readBackupRunFreshness;
+        vi.spyOn(backup, "readBackupRunFreshness").mockImplementation(async (env) => {
+          const result = await readBackup(env);
+          entered.resolve();
+          await release.promise;
+          return result;
+        });
+        // The regression owns session publication; unrelated service/engine I/O stays synthetic.
+        vi.spyOn(engines, "resolveStatusDatabaseEngines").mockResolvedValue({
+          source: "admitted",
+          stores: [],
+        });
+        vi.spyOn(runtime, "resolveStatusRuntimeSnapshot").mockResolvedValue({
+          securityAudit: undefined,
+          usage: undefined,
+          health: undefined,
+          lastHeartbeat: null,
+          gatewayService: fixtureService,
+          nodeService: fixtureService,
+        });
+        const pending =
+          format === "text"
+            ? buildStatusCommandReportLines(
+                createStatusCommandReportDataParams({
+                  ...scan,
+                  surface: { ...baseStatusOverviewSurface, ...scan },
+                  opts: {},
+                  health: undefined,
+                  lastHeartbeat: null,
+                  securityAudit: undefined,
+                  usageLines: undefined,
+                  pairingRecovery: null,
+                }),
+              )
+            : resolveStatusJsonOutput({
+                scan,
+                opts: { gatewayProbeDeadlineMs: 0 },
+                includeSecurityAudit: false,
+              });
+        try {
+          await awaitGateBeforeSettlement(entered.promise, pending, "Status skipped backup read");
+          beginAgentDeletionJournal({
+            agentId: "deleting",
+            operationId: `status-${format}-publication`,
+            agentDir: state.agentDir("deleting"),
+            sessionsDir: state.sessionsDir("deleting"),
+            workspaceDir: state.workspaceDir,
+            deleteFiles: true,
+          });
+          release.resolve();
+          const result = await pending;
+          if (Array.isArray(result)) {
+            const output = stripAnsi(result.join("\n"));
+            expect(output).toContain("agent:survivor:main");
+            expect(output).not.toContain("agent:deleting:main");
+            expect(output).toContain("1 stored");
+          } else {
+            expect(result.sessions.count).toBe(1);
+            expect(result.sessions.byAgent.map(({ agentId }) => agentId)).toEqual(["survivor"]);
+            expect(result.agents.totalSessions).toBe(1);
+            expect(result.agents.agents.map(({ id }) => id)).toEqual(["survivor"]);
+          }
+        } finally {
+          release.resolve();
+          await pending.catch(() => {});
+        }
+      });
+    },
+  );
+
+  it.each(["engines", "logs", "usage"] as const)(
+    "publishes status --all after deletion during %s preparation",
+    async (phase) => {
+      await withOpenClawTestState({ label: `status-all-${phase}-publication` }, async (state) => {
+        const cfg: OpenClawConfig = {
+          agents: { ownership: "explicit", entries: { deleting: {}, survivor: {} } },
+        };
+        setRuntimeConfigSnapshot(cfg);
+        for (const agentId of ["deleting", "survivor"]) {
+          await sessionAccessor.upsertSessionEntryCore(
+            { agentId, sessionKey: `agent:${agentId}:main` },
+            { sessionId: `${agentId}-session`, updatedAt: 1 },
+          );
+        }
+        const overview = await prepareDeletionStatusOverview(cfg);
+        const scan = await import("../../commands/status.scan-overview.ts");
+        const runtime = await import("../../commands/status-runtime-shared.ts");
+        const nodeMode = await import("../../commands/status.node-mode.js");
+        const ports = await import("../../infra/ports-inspect.js");
+        const diagnostics = await import("../../daemon/diagnostics.js");
+        const logs = await import("../../commands/status-all/gateway.js");
+        const rows = await import("../../commands/status-overview-rows.ts");
+        const { statusAllCommand } = await import("../../commands/status-all.js");
+        const entered = createDeferred();
+        const release = createDeferred();
+        const pause = async (current: typeof phase) => {
+          if (current === phase) {
+            entered.resolve();
+            await release.promise;
+          }
+        };
+        // Keep external diagnostics fixed while the real local summary/report owners run.
+        vi.spyOn(scan, "collectStatusScanOverview").mockResolvedValue(overview);
+        vi.spyOn(runtime, "resolveStatusServiceSummaries").mockResolvedValue([
+          fixtureService,
+          fixtureService,
+        ]);
+        vi.spyOn(nodeMode, "resolveNodeOnlyGatewayInfo").mockResolvedValue({
+          gatewayTarget: "fixture.invalid",
+          gatewayValue: "fixture node",
+          connectionDetails: "Fixture node-only Gateway",
+        });
+        vi.spyOn(ports, "inspectPortUsage").mockResolvedValue({
+          port: 19443,
+          status: "free",
+          listeners: [],
+          hints: [],
+        });
+        vi.spyOn(diagnostics, "readLastGatewayErrorLine").mockResolvedValue(null);
+        vi.spyOn(gatewayCall, "isImplicitLocalGatewayTarget").mockImplementation(async () => {
+          await pause("engines");
+          return false;
+        });
+        vi.spyOn(logs, "readFileTailLines").mockImplementation(async () => {
+          await pause("logs");
+          return [];
+        });
+        vi.spyOn(runtime, "resolveStatusUsageSummary").mockImplementation(async () => {
+          await pause("usage");
+          return { updatedAt: 1, providers: [] };
+        });
+        const renderedRows = vi.spyOn(rows, "buildStatusAllOverviewRows");
+        const output = createTestRuntime();
+        const pending = statusAllCommand(output, {
+          gatewayProbeDeadlineMs: 0,
+          usage: phase === "usage",
+        });
+        try {
+          await awaitGateBeforeSettlement(
+            entered.promise,
+            pending,
+            `Status --all skipped ${phase} preparation`,
+          );
+          beginAgentDeletionJournal({
+            agentId: "deleting",
+            operationId: `status-all-${phase}-publication`,
+            agentDir: state.agentDir("deleting"),
+            sessionsDir: state.sessionsDir("deleting"),
+            workspaceDir: state.workspaceDir,
+            deleteFiles: true,
+          });
+          release.resolve();
+          await pending;
+          const published = expectDefined(renderedRows.mock.calls[0], "rendered overview")[0];
+          expect(published.summary).toMatchObject({
+            sessions: { count: 1, byAgent: [{ agentId: "survivor" }] },
+          });
+          expect(published.agentStatus.totalSessions).toBe(1);
+          expect(published.agentStatus.agents.map(({ id }) => id)).toEqual(["survivor"]);
+          const text = stripAnsi(output.log.mock.calls.flat().join("\n"));
+          expect(text).toContain("survivor");
+          expect(text).not.toContain("deleting");
         } finally {
           release.resolve();
           await pending.catch(() => {});

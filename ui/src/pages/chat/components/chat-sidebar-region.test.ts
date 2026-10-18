@@ -435,7 +435,7 @@ describe("chat sidebar region", () => {
     const context = createInitializationContext();
     const state = createPageState(
       context,
-      { afterCommit: () => () => {}, invalidate: vi.fn() },
+      { afterCommit: () => () => {} },
       document.createElement("div"),
     );
     state.sessionKey = "agent:main:main";
@@ -501,7 +501,7 @@ describe("chat sidebar region", () => {
       onDesktopFocusTargetChange: vi.fn(),
       dashboard: null,
       workspace: undefined,
-      detail: { chat: createChatProps(), host: state, requestUpdate: vi.fn() },
+      detail: { chat: createChatProps(), host: state },
       digest: null,
       activeRunId: null,
       pullRequests: [],

@@ -101,6 +101,8 @@ SQLite snapshot, including committed WAL changes. They do not copy the entire
 agent database unless its journal state requires private recovery. Startup and
 migration readiness checks retain their full validation.
 
+Local reports apply committed agent deletions after their final diagnostics, database-engine, backup, log, and usage reads. Deleted namespaces are omitted while undeleted namespaces in shared stores remain visible. Online JSON keeps the snapshot published by the Gateway.
+
 The CLI runs in a separate process and contacts the Gateway over WebSocket, even
 for a local loopback target. `--timeout` bounds checks, not the entire status
 command. Cold device-token worker initialization happens during request preparation,
