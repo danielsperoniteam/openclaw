@@ -65,15 +65,12 @@ function SessionProgressWidgetContent(
         options: {
           // Read live admission facts even before the scope effect catches up.
           admitAutomaticRead: () =>
-            untrack(
-              () =>
-                host.isConnected &&
-                props.active &&
-                target().sessionKey === staticTarget.sessionKey &&
-                target().agentId === staticTarget.agentId &&
-                context?.gateway.snapshot.client === snapshot?.client &&
-                context?.gateway.snapshot.hello === snapshot?.hello,
-            ),
+            host.isConnected &&
+            props.active &&
+            target().sessionKey === staticTarget.sessionKey &&
+            target().agentId === staticTarget.agentId &&
+            context?.gateway.snapshot.client === snapshot?.client &&
+            context?.gateway.snapshot.hello === snapshot?.hello,
         },
       };
     },
@@ -87,7 +84,8 @@ function SessionProgressWidgetContent(
     },
   );
   // Initial source identity is a one-time snapshot; the effect owns replacements.
-  const progress = projectProgressCard(untrack(progressScope));
+  const initialProgressScope = untrack(progressScope);
+  const progress = projectProgressCard(initialProgressScope);
   // Bind the imperative store watch only while the widget is active.
   createEffect(progressScope, (next) => progress.replaceSource(next));
   const [sessionRevision, setSessionRevision] = createSignal(0, { ownedWrite: true });

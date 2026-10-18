@@ -12,11 +12,8 @@ export function ShellLayoutBoundary(props: { traits: ShellLayoutTraits; children
   if (scope) {
     const token = {};
     // Publish before evaluating child getters; the render effect owns later changes.
-    scope.owner.record(
-      token,
-      scope.host,
-      untrack(() => props.traits),
-    );
+    const initialTraits = untrack(() => props.traits);
+    scope.owner.record(token, scope.host, initialTraits);
     createRenderEffect(
       () => props.traits,
       (traits) => scope.owner.record(token, scope.host, traits),

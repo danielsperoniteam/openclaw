@@ -657,9 +657,10 @@ export function OpenClawShell(props: OpenClawShellProps): SolidJSX.Element {
   const componentOwner = getOwner();
   const element = document.createElement("openclaw-app-shell");
   // The mount owns this instance; the effect below handles later runtime changes.
-  const owner = untrack(
-    () => new ShellOwner(element, props.runtime, props.getReadiness?.(), props.onboarding),
+  const initialShell = untrack(
+    () => [props.runtime, props.getReadiness?.(), props.onboarding] as const,
   );
+  const owner = new ShellOwner(element, ...initialShell);
   // Synchronize Gateway subscriptions and browser listeners for this runtime epoch.
   createEffect(
     () => props.runtime,
@@ -683,8 +684,8 @@ export function OpenClawShell(props: OpenClawShellProps): SolidJSX.Element {
     },
   );
   const view = <ApplicationShell host={owner} />;
-  const onShell = untrack(() => props.onShell); // Callback identity belongs to this mount.
   onSettled(() => {
+    const onShell = props.onShell;
     onShell?.(owner);
     return () => onShell?.(undefined);
   });

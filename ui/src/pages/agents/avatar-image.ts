@@ -33,10 +33,9 @@ function readFileAsDataUrl(
   assertUploadsEnabled(config);
   return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.addEventListener("load", () =>
-      resolve(boundAvatarDataUrl(typeof reader.result === "string" ? reader.result : null)),
-    );
-    reader.addEventListener("error", () => resolve(UNUSABLE));
+    reader.onload = () =>
+      resolve(boundAvatarDataUrl(typeof reader.result === "string" ? reader.result : null));
+    reader.onerror = () => resolve(UNUSABLE);
     reader.readAsDataURL(file);
   });
 }

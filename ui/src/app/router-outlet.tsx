@@ -1,5 +1,5 @@
 import { Dynamic, type JSX as SolidJSX } from "@solidjs/web";
-import { createEffect, createMemo, createSignal, onCleanup, Show, untrack } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
 import { isSessionRouteId } from "../app-route-paths.ts";
 import type { SolidRouteProps } from "../app-route-types.ts";
 import type { ApplicationRouter } from "../app-routes.ts";
@@ -468,7 +468,7 @@ export function RouterOutlet(props: RouterOutletProps): SolidJSX.Element {
           settlePresentation: { configurable: true, value: settlePresentation },
         }) as ControlUiReadinessOutlet; // SAFETY: These descriptors define the outlet contract.
         // Publish this mount's element contract once, with its original ref callback.
-        untrack(() => props.ref?.(readinessHost));
+        props.ref?.(readinessHost);
       }}
     >
       <Show when={presentation().retained?.key} keyed>

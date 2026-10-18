@@ -4,6 +4,7 @@ import {
   createEffect,
   createRoot,
   createSignal,
+  For,
   getOwner,
   onCleanup,
   onSettled,
@@ -76,13 +77,16 @@ export function observePluginProperties<P extends object>(
 }
 
 function MountedContent(props: { mount?: (target: HTMLElement) => () => void }) {
-  let container!: HTMLDivElement;
-  // Host-owned content is mounted into the plugin's imperative DOM island.
-  createEffect(
-    () => props.mount,
-    (mount) => mount?.(container),
+  return (
+    <For each={[props.mount]}>
+      {(mount) => {
+        let container!: HTMLDivElement;
+        // Replacing the mount retires its foreign DOM island and its cleanup together.
+        onSettled(() => mount?.(container));
+        return <div style={{ display: "contents" }} ref={(element) => (container = element)} />;
+      }}
+    </For>
   );
-  return <div style={{ display: "contents" }} ref={(element) => (container = element)} />;
 }
 
 const views = new WeakMap<HTMLElement, { focus(options?: FocusOptions): void }>();
