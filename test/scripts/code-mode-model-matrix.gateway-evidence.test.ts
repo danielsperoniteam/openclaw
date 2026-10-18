@@ -32,6 +32,27 @@ import { createNestedGitEnv } from "../helpers/temp-repo.js";
 import { toolingTsEntrypoints } from "./tooling-ts-runtime.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const readJson = async (file: string) => JSON.parse(await fs.readFile(file, "utf8"));
+const writeJson = (file: string, value: unknown) => fs.writeFile(file, JSON.stringify(value));
+function matrixOptions(repoRoot: string, runtimeDir = repoRoot) {
+  return {
+    allowFailures: false,
+    dryRun: false,
+    keepState: false,
+    models: ["fixture/model"],
+    modes: ["code" as const],
+    tasks: ["read" as const],
+    repetitions: 1,
+    repoRoot,
+    runtimeDir,
+    outputDir: "artifacts",
+    thinking: "off" as const,
+    timeoutSeconds: 10,
+  };
+}
+function outcomes(evidence: Parameters<typeof projectQaEvidenceScenarioOutcomes>[0]) {
+  return projectQaEvidenceScenarioOutcomes(evidence).map((outcome) => outcome.status);
+}
 
 function initializeGitFixture(root: string, env = createNestedGitEnv()) {
   const git = (args: string[]) =>
@@ -96,7 +117,7 @@ it("the actual CLI completes a Gateway cell without a live provider or entrypoin
   };
   const { head } = initializeGitFixture(root, env);
   for (const stamp of [BUILD_STAMP_FILE, RUNTIME_POSTBUILD_STAMP_FILE]) {
-    await fs.writeFile(path.join(root, "dist", stamp), JSON.stringify({ head, inputsClean: true }));
+    await writeJson(path.join(root, "dist", stamp), { head, inputsClean: true });
   }
   const run = await runNodeScript(
     (workerArgv) => [
@@ -139,9 +160,7 @@ it("the actual CLI completes a Gateway cell without a live provider or entrypoin
   const streamedResult = run.stdout.split("\n").find((line) => line.startsWith(resultPrefix));
   expect(streamedResult).toBeDefined();
   expect(JSON.parse(streamedResult?.slice(resultPrefix.length) ?? "null")).toEqual(rows[0]);
-  const summary = JSON.parse(
-    await fs.readFile(path.join(root, "artifacts", "summary.json"), "utf8"),
-  );
+  const summary = await readJson(path.join(root, "artifacts", "summary.json"));
   expect(summary.counts).toEqual({ total: 1, passed: 0, failed: 1 });
 });
 
@@ -169,7 +188,7 @@ it.each([
   await fs.writeFile(input, "export const changed = true;\n");
   testCase.write(producer);
   const stampPath = path.join(root, "dist", testCase.stamp);
-  const stamp = JSON.parse(await fs.readFile(stampPath, "utf8"));
+  const stamp = await readJson(stampPath);
   expect(stamp).toMatchObject({ head, inputsClean: false });
   await fs.writeFile(input, "export {};\n");
   expect(git(["status", "--porcelain"])).toBe("");
@@ -180,25 +199,9 @@ it.each([
     throw new Error("unverified frozen runtime reached the cell boundary");
   });
   for (const inputsClean of [false, null, undefined]) {
-    await fs.writeFile(stampPath, JSON.stringify({ ...stamp, inputsClean }));
+    await writeJson(stampPath, { ...stamp, inputsClean });
     await expect(
-      runCodeModeModelMatrix(
-        {
-          allowFailures: false,
-          dryRun: false,
-          keepState: false,
-          models: ["fixture/model"],
-          modes: ["code"],
-          tasks: ["read"],
-          repetitions: 1,
-          repoRoot: root,
-          runtimeDir: root,
-          outputDir: "artifacts",
-          thinking: "off",
-          timeoutSeconds: 10,
-        },
-        { buildCliArtifacts, readBuildSha256, runCell },
-      ),
+      runCodeModeModelMatrix(matrixOptions(root), { buildCliArtifacts, readBuildSha256, runCell }),
     ).rejects.toThrow(`Frozen runtime ${testCase.stamp}`);
     expect(buildCliArtifacts).not.toHaveBeenCalled();
     expect(readBuildSha256).not.toHaveBeenCalled();
@@ -225,10 +228,10 @@ it.each([
       );
     }
     for (const stamp of [".buildstamp", ".runtime-postbuildstamp"]) {
-      await fs.writeFile(
-        path.join(runtimeDir, "dist", stamp),
-        JSON.stringify({ head: runtimeSha, inputsClean: true }),
-      );
+      await writeJson(path.join(runtimeDir, "dist", stamp), {
+        head: runtimeSha,
+        inputsClean: true,
+      });
     }
     const buildSha256 = createHash("sha256").update("runtime").digest("hex");
     const model = "openai/fixture";
@@ -252,20 +255,13 @@ it.each([
     const previousSigtermListeners = process.rawListeners("SIGTERM");
     const run = runCodeModeModelMatrix(
       {
-        allowFailures: false,
-        dryRun: false,
-        keepState: false,
+        ...matrixOptions(repoRoot, runtimeDir),
         models: [model],
         gatewayExecutor: executor,
         modes: ["code"],
         tasks: [task],
         repetitions: 3,
-        repoRoot,
-        runtimeDir,
         baselineResults,
-        outputDir: "artifacts",
-        thinking: "off",
-        timeoutSeconds: 10,
       },
       {
         readSourceIdentity: async (root) => {
@@ -292,11 +288,9 @@ it.each([
             executor,
           });
           const before = validateQaEvidenceSummaryJson(
-            JSON.parse(await fs.readFile(path.join(outputDir, "qa-evidence.json"), "utf8")),
+            await readJson(path.join(outputDir, "qa-evidence.json")),
           );
-          expect(
-            projectQaEvidenceScenarioOutcomes(before).map((outcome) => outcome.status),
-          ).toEqual(
+          expect(outcomes(before)).toEqual(
             calls === 1
               ? [null, null, null]
               : calls === 2
@@ -350,9 +344,7 @@ it.each([
       await expect(run).rejects.toThrow("Code Mode matrix interrupted");
     } else {
       expect((await run).exitCode).toBe(1);
-      const comparison = JSON.parse(
-        await fs.readFile(path.join(outputDir, "comparison.json"), "utf8"),
-      );
+      const comparison = await readJson(path.join(outputDir, "comparison.json"));
       expect(comparison).toMatchObject({ total: 3, baselinePassed: 3, candidatePassed: 2 });
       expect(comparison.cells.map((cell: { candidateSha: string }) => cell.candidateSha)).toEqual([
         runtimeSha,
@@ -363,7 +355,7 @@ it.each([
     expect(process.rawListeners("SIGINT")).toEqual(previousSigintListeners);
     expect(process.rawListeners("SIGTERM")).toEqual(previousSigtermListeners);
     expect(calls).toBe(interrupted ? 2 : 3);
-    const manifest = JSON.parse(await fs.readFile(path.join(outputDir, "manifest.json"), "utf8"));
+    const manifest = await readJson(path.join(outputDir, "manifest.json"));
     expect(manifest).toMatchObject({
       gitSha: runtimeSha,
       buildSha256,
@@ -377,16 +369,12 @@ it.each([
       .split("\n")
       .map((line) => JSON.parse(line));
     const evidence = validateQaEvidenceSummaryJson(
-      JSON.parse(await fs.readFile(path.join(outputDir, "qa-evidence.json"), "utf8")),
+      await readJson(path.join(outputDir, "qa-evidence.json")),
     );
     if (evidence.schemaVersion !== 3) {
       throw new Error("expected canonical invocation evidence after comparison");
     }
-    expect(projectQaEvidenceScenarioOutcomes(evidence).map((outcome) => outcome.status)).toEqual([
-      "pass",
-      "fail",
-      interrupted ? null : "pass",
-    ]);
+    expect(outcomes(evidence)).toEqual(["pass", "fail", interrupted ? null : "pass"]);
     expect(getEffectiveQaEvidenceEntries(evidence)).toHaveLength(calls);
     expect(evidence.occurrences).toHaveLength(3 + calls);
     expect(new Set(rows.map((row) => row.evidenceOccurrenceId)).size).toBe(calls);

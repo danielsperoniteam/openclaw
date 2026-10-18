@@ -16,20 +16,24 @@ const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const ROOT = "agent:qa:matrix:root";
 const CHILD = "agent:worker:subagent:child";
 
+function usage(scale = 1) {
+  return {
+    input: 10 * scale,
+    output: 4 * scale,
+    cacheRead: 8 * scale,
+    cacheWrite: 2 * scale,
+    totalTokens: 24 * scale,
+    reasoningTokens: 3 * scale,
+    cost: { total: 0.012 },
+  };
+}
+
 function assistant(overrides: Record<string, unknown> = {}) {
   return {
     role: "assistant",
     provider: "openai",
     model: "fixture-model",
-    usage: {
-      input: 10,
-      output: 4,
-      cacheRead: 8,
-      cacheWrite: 2,
-      totalTokens: 24,
-      reasoningTokens: 3,
-      cost: { total: 0.012 },
-    },
+    usage: usage(),
     ...overrides,
   };
 }
@@ -179,6 +183,13 @@ describe("matrix task billing", () => {
     ]);
   });
 
+  const unavailableTotals = {
+    complete: false,
+    costComplete: false,
+    totalTokens: null,
+    costUsd: null,
+    reasoningTokens: null,
+  };
   const consumptionCases: {
     label: string;
     events?: unknown[];
@@ -189,37 +200,24 @@ describe("matrix task billing", () => {
       label: scale === 0 ? "unavailable zero placeholders" : "unavailable provisional counters",
       events: [
         assistant({
-          usage: {
-            input: 10 * scale,
-            output: 4 * scale,
-            cacheRead: 8 * scale,
-            cacheWrite: 2 * scale,
-            totalTokens: 24 * scale,
-            reasoningTokens: 3 * scale,
-            cost: { total: 0.012 },
-            usageReport: { state: "unavailable" },
-          },
+          usage: { ...usage(scale), usageReport: { state: "unavailable" } },
         }),
       ],
       options: { rootUsage: { usageReport: { state: "unavailable" } } },
       expected: {
-        complete: false,
-        costComplete: false,
-        totalTokens: null,
-        costUsd: null,
+        ...unavailableTotals,
         knownTotalTokens: 0,
         knownCostUsd: 0,
         input: 0,
         output: 0,
         cacheRead: 0,
         cacheWrite: 0,
-        reasoningTokens: null,
         assistantTurns: 1,
       },
     })),
     ...[false, true].map((unavailableFirst) => {
       const unavailable = assistant({
-        usage: { ...assistant().usage, usageReport: { state: "unavailable" } },
+        usage: { ...usage(), usageReport: { state: "unavailable" } },
         stopReason: "error",
       });
       return {
@@ -229,17 +227,13 @@ describe("matrix task billing", () => {
         events: unavailableFirst ? [unavailable, assistant()] : [assistant(), unavailable],
         options: { rootUsage: { usageReport: { state: "unavailable" } } },
         expected: {
-          complete: false,
-          costComplete: false,
-          totalTokens: null,
-          costUsd: null,
+          ...unavailableTotals,
           knownTotalTokens: 24,
           knownCostUsd: 0.012,
           input: 10,
           output: 4,
           cacheRead: 8,
           cacheWrite: 2,
-          reasoningTokens: null,
           reasoningComplete: false,
           assistantTurns: 2,
           modelErrors: 1,
@@ -247,20 +241,15 @@ describe("matrix task billing", () => {
       };
     }),
     ...[false, true].map((measured) => {
-      const usage = {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        reasoningTokens: 0,
+      const zeroUsage = {
+        ...usage(0),
         cost: { total: 0, totalOrigin: "provider-billed" },
         ...(measured ? { usageReport: { state: "available" } } : {}),
       };
       return {
         label: measured ? "genuinely measured zero usage" : "unmeasured zero usage",
-        events: [assistant({ usage })],
-        options: { rootUsage: usage },
+        events: [assistant({ usage: zeroUsage })],
+        options: { rootUsage: zeroUsage },
         expected: {
           complete: measured,
           costComplete: measured,
@@ -280,14 +269,14 @@ describe("matrix task billing", () => {
     },
     {
       label: "placeholder price",
-      events: [assistant({ usage: { ...assistant().usage, cost: { total: 0 } } })],
+      events: [assistant({ usage: { ...usage(), cost: { total: 0 } } })],
       expected: { complete: true, costComplete: false, totalTokens: 24, knownTotalTokens: 24 },
     },
     {
       label: "provider-billed zero",
       events: [
         assistant({
-          usage: { ...assistant().usage, cost: { total: 0, totalOrigin: "provider-billed" } },
+          usage: { ...usage(), cost: { total: 0, totalOrigin: "provider-billed" } },
         }),
       ],
       expected: { complete: true, costComplete: true, totalTokens: 24, knownTotalTokens: 24 },
@@ -346,12 +335,7 @@ describe("matrix task billing", () => {
     },
   ];
   it.each(consumptionCases)("accounts for $label", ({ events, options, expected }) => {
-    expect(
-      accounting({
-        events,
-        ...options,
-      }),
-    ).toMatchObject(expected);
+    expect(accounting({ events, ...options })).toMatchObject(expected);
   });
 
   it.each([
