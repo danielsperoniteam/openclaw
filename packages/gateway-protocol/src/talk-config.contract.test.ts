@@ -47,6 +47,20 @@ const fixturePath = new URL("../../../test/fixtures/talk-config-contract.json", 
 const fixtures = JSON.parse(fs.readFileSync(fixturePath, "utf-8")) as TalkConfigContractFixture;
 
 describe("talk.config contract fixtures", () => {
+  it("accepts the normalized consult profile on the public Talk response", () => {
+    const talk = buildTalkConfigResponse(
+      normalizeTalkSection({
+        consultProfile: { provider: " test-provider ", model: " fast-model ", directTools: true },
+      }),
+    );
+    expect(talk?.consultProfile).toEqual({
+      provider: "test-provider",
+      model: "fast-model",
+      directTools: true,
+    });
+    expect(validateTalkConfigResult({ config: { talk } })).toBe(true);
+  });
+
   for (const fixture of fixtures.selectionCases) {
     it(fixture.id, () => {
       const normalizedTalk = normalizeTalkSection(fixture.talk as TalkConfig);

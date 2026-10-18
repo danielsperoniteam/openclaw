@@ -4,7 +4,6 @@ import type {
   RealtimeVoiceGatewayControl,
 } from "openclaw/plugin-sdk/realtime-voice";
 import {
-  buildRealtimeVoiceAgentControlSpeechMessage,
   extractErrorCode,
   readErrorName,
   rawDataToString,
@@ -96,9 +95,11 @@ function projectWireEventType(
     case "error":
       return "error";
     case "ignored":
-      return event.eventType === "session.updated" ? "session.updated" : undefined;
+      return event.eventType === "session.updated"
+        ? "session.updated"
+        : "realtime.provider.event-ignored";
     case "unknown":
-      return undefined;
+      return "realtime.provider.event-unknown";
   }
   return undefined;
 }
@@ -136,6 +137,7 @@ export class OpenAIQuicksilverDelegationController {
           id,
         );
       },
+      onState: (_id, state) => this.options.onWireEventType?.(`realtime.delegation.${state}`),
       onError: (error) => this.fail(error),
     });
     this.completionClaimsAdopted = options.runAgentConsult.adoptCompletionClaims !== undefined;
@@ -465,20 +467,59 @@ export class OpenAIQuicksilverDelegationController {
   ): Promise<void> {
     let text: string;
     let failed = false;
+    let acceptingChunks = true;
+    const resultSocket = this.options.getSocket();
+    const deliveredChunks: string[] = [];
+    const remainingResult = (value: string): string => {
+      let remaining = value.trim();
+      for (const chunk of deliveredChunks) {
+        if (!remaining.startsWith(chunk)) {
+          break;
+        }
+        remaining = remaining.slice(chunk.length).trimStart();
+      }
+      return remaining;
+    };
     const runner = this.options.runAgentConsult;
     try {
-      // Host-classified sessions disable vendor filler. Receipt is launch-only, not run admission.
-      if (this.options.handleDelegationInput) {
-        this.sendSessionContext(
-          buildRealtimeVoiceAgentControlSpeechMessage("I’ll check that request."),
-          "speakable",
-        );
-      }
       const result = await runner({
         prompt: delegation.prompt,
         signal,
+        onResultChunk: (value) => {
+          const chunk = value.trim();
+          // The host owns authorization; the provider owns this presentation lifetime.
+          // Do not retarget an old block to a steering request whose run is not settled.
+          if (
+            !acceptingChunks ||
+            !chunk ||
+            signal.aborted ||
+            this.stopped ||
+            this.drainDisposition ||
+            this.pendingDelegation ||
+            this.steeringPromise ||
+            this.delegationGeneration !== generation ||
+            this.activeDelegationId !== delegation.id ||
+            !resultSocket ||
+            resultSocket !== this.options.getSocket() ||
+            resultSocket.readyState !== WEBSOCKET_OPEN
+          ) {
+            return false;
+          }
+          if (deliveredChunks.includes(chunk)) {
+            return true;
+          }
+          // Reject oversized blocks instead of claiming delivery of a truncated result.
+          if (boundOpenAIQuicksilverDelegationResult(chunk) !== chunk) {
+            return false;
+          }
+          if (!this.sendAppend(chunk, "speakable", delegation.id, resultSocket)) {
+            return false;
+          }
+          deliveredChunks.push(chunk);
+          return true;
+        },
         requesterFinal: {
-          append: (finalText) => this.appendRequesterFinal(generation, finalText),
+          append: (finalText) => this.appendRequesterFinal(generation, remainingResult(finalText)),
         },
       });
       if (signal.aborted) {
@@ -486,7 +527,7 @@ export class OpenAIQuicksilverDelegationController {
         this.revokeRequesterFinal();
         return;
       }
-      text = boundOpenAIQuicksilverDelegationResult(result.text);
+      text = boundOpenAIQuicksilverDelegationResult(remainingResult(result.text));
     } catch (error) {
       // Browser and relay host cancellation may belong to a different signal.
       // Both consumers must preserve the host's abort outcome, not offer a retry.
@@ -505,6 +546,8 @@ export class OpenAIQuicksilverDelegationController {
       );
       failed = true;
       text = CONSULT_FAILURE_TEXT;
+    } finally {
+      acceptingChunks = false;
     }
     while (this.steeringPromise) {
       await this.steeringPromise;
@@ -536,7 +579,7 @@ export class OpenAIQuicksilverDelegationController {
       this.revokeRequesterFinal();
       return;
     }
-    if (!this.sendAppend(text, "speakable", delegationId)) {
+    if (!text || !this.sendAppend(text, "speakable", delegationId)) {
       this.revokeRequesterFinal();
     }
   }
@@ -547,6 +590,9 @@ export class OpenAIQuicksilverDelegationController {
       return false;
     }
     this.requesterFinalOwner = undefined;
+    if (!text.trim()) {
+      return true;
+    }
     return this.sendAppend(
       boundOpenAIQuicksilverDelegationResult(text),
       "speakable",

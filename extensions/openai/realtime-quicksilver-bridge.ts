@@ -174,6 +174,12 @@ export class OpenAIQuicksilverVoiceBridge implements RealtimeVoiceBridge {
     this.delegations = new OpenAILiveDelegationQueue({
       isActive: () => this.lifecycle.acceptsEvents(connection),
       readInput: () => this.transcript.latestUserInput(),
+      onState: (id, state) =>
+        this.config.onEvent?.({
+          direction: "server",
+          type: `realtime.delegation.${state}`,
+          itemId: id,
+        }),
       dispatch: (id, input) => this.startDelegation(id, input, connection),
       onExpired: (id) =>
         this.sendContext(
@@ -424,6 +430,12 @@ export class OpenAIQuicksilverVoiceBridge implements RealtimeVoiceBridge {
     failStartup: (reason: string) => void,
   ): void {
     if (event.kind === "ignored" || event.kind === "unknown") {
+      if (event.kind !== "ignored" || event.eventType !== "session.updated") {
+        this.config.onEvent?.({
+          direction: "server",
+          type: `realtime.provider.event-${event.kind}`,
+        });
+      }
       return;
     }
     if (event.kind === "session-started") {

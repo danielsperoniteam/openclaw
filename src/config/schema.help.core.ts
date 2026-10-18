@@ -269,8 +269,16 @@ export const CORE_FIELD_HELP: Record<string, string> = {
     "Talk reasoning strategy: agent-consult for Gateway-mediated agent help, direct-tools for local tool calls, or none.",
   "talk.realtime.consultRouting":
     "Gateway relay fallback for final user transcripts when the realtime provider skips openclaw_agent_consult. provider-direct preserves provider replies; force-agent-consult routes through OpenClaw.",
+  "talk.consultProfile":
+    "Opt-in model profile for realtime Talk backing-agent runs. Retains the same agent, workspace, memory, bootstrap instructions, and permissions; leaves text-chat model settings unchanged.",
+  "talk.consultProfile.provider":
+    "Configured model provider for realtime Talk consults. Choose a provider available to the current agent.",
+  "talk.consultProfile.model":
+    "Model ID for realtime Talk consults. Choose an available low-latency model and benchmark tool accuracy before use.",
+  "talk.consultProfile.directTools":
+    "When true, prefer the regular direct-tool path for Talk consults without expanding the agent's tool permissions. Omit or set false to retain normal routing.",
   "talk.consultThinkingLevel":
-    "Use this to override the thinking level for the regular agent run behind Talk realtime consults.",
+    "Override the thinking level for the regular agent run behind Talk realtime consults. With consultProfile enabled, defaults to low; otherwise retains the existing consult default.",
   "talk.consultFastMode":
     "Use this to set true or false fast mode for the regular agent run behind Talk realtime consults.",
   "talk.speechLocale":

@@ -108,6 +108,24 @@ export function normalizeTalkRealtimeConfig(value: unknown): TalkRealtimeConfig 
   });
 }
 
+function normalizeTalkConsultProfile(
+  value: TalkConfig["consultProfile"],
+): TalkConfig["consultProfile"] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const provider = normalizeOptionalString(value.provider);
+  const model = normalizeOptionalString(value.model);
+  if (!provider || !model) {
+    return undefined;
+  }
+  return omitUndefinedTalkFields({
+    provider,
+    model,
+    directTools: typeof value.directTools === "boolean" ? value.directTools : undefined,
+  });
+}
+
 function activeProviderFromTalk(talk: TalkConfig): string | undefined {
   const providerIds = Object.keys(talk.providers ?? {});
   const provider = normalizeOptionalString(
@@ -147,6 +165,7 @@ export function normalizeTalkSection(value: TalkConfig | undefined): TalkConfig 
     speechLocale: normalizeOptionalString(value.speechLocale),
     interruptOnSpeech:
       typeof value.interruptOnSpeech === "boolean" ? value.interruptOnSpeech : undefined,
+    consultProfile: normalizeTalkConsultProfile(value.consultProfile),
     consultThinkingLevel: normalizeThinkLevel(normalizeOptionalString(value.consultThinkingLevel)),
     consultFastMode: parseBoolean(normalizeFastMode(value.consultFastMode)),
     silenceTimeoutMs: normalizeInteger(value.silenceTimeoutMs, 1),
@@ -207,6 +226,7 @@ export function buildTalkConfigResponse(
     agentId: normalized.agentId,
     interruptOnSpeech: normalized.interruptOnSpeech,
     silenceTimeoutMs: normalized.silenceTimeoutMs,
+    consultProfile: normalized.consultProfile,
     consultThinkingLevel: normalized.consultThinkingLevel,
     consultFastMode: normalized.consultFastMode,
     speechLocale: normalized.speechLocale,

@@ -125,29 +125,32 @@ describe("GPT-Live bridge delegation admission", () => {
     await closing;
   });
 
-  it("rechecks delayed delegation authority after an event observer closes the call", async () => {
-    const harness = createHarness({ model: "gpt-live-1" });
-    await harness.bridge.connect();
-    harness.onEvent.mockImplementation((event) => {
-      if (event.type === "session.delegation.created") {
-        void harness.bridge.close();
-      }
-    });
-    harness.socket.serverEvent({
-      type: "session.delegation.created",
-      offset_ms: 0,
-      delegation: { type: "delegation", target: "client", id: "pending" },
-    });
-    harness.socket.serverEvent({
-      type: "session.input_transcript.delta",
-      delta: "Check a flight.",
-      start_ms: 0,
-      end_ms: 100,
-    });
-    expect(harness.onToolCall).not.toHaveBeenCalled();
-    harness.socket.serverEvent({ type: "session.closed", reason: "close_requested" });
-    await harness.bridge.close();
-  });
+  it.each(["session.delegation.created", "realtime.delegation.waiting-input"])(
+    "rechecks delayed delegation authority after a %s observer closes the call",
+    async (eventType) => {
+      const harness = createHarness({ model: "gpt-live-1" });
+      await harness.bridge.connect();
+      harness.onEvent.mockImplementation((event) => {
+        if (event.type === eventType) {
+          void harness.bridge.close();
+        }
+      });
+      harness.socket.serverEvent({
+        type: "session.delegation.created",
+        offset_ms: 0,
+        delegation: { type: "delegation", target: "client", id: "pending" },
+      });
+      harness.socket.serverEvent({
+        type: "session.input_transcript.delta",
+        delta: "Check a flight.",
+        start_ms: 0,
+        end_ms: 100,
+      });
+      expect(harness.onToolCall).not.toHaveBeenCalled();
+      harness.socket.serverEvent({ type: "session.closed", reason: "close_requested" });
+      await harness.bridge.close();
+    },
+  );
 
   it.each(["local-close", "remote-close", "error"] as const)(
     "revokes delayed public delegation on %s before late captions or timeout",
@@ -188,4 +191,130 @@ describe("GPT-Live bridge delegation admission", () => {
       }
     },
   );
+
+  it.each(["gpt-live-1", "gpt-live-1-codex"])(
+    "dispatches identical follow-ups with fresh delegation IDs on %s",
+    async (model) => {
+      const harness = createHarness({ model });
+      await harness.bridge.connect();
+      const publicApi = model === "gpt-live-1";
+      for (const id of ["first", "followup", "repeat-again"]) {
+        harness.socket.serverEvent(
+          publicApi
+            ? {
+                type: "session.input_transcript.delta",
+                delta: "Check my status.",
+                start_ms: 0,
+                end_ms: 100,
+              }
+            : { type: "turn.done", turn: { role: "user", transcript: "Check my status." } },
+        );
+        const notice = publicApi
+          ? {
+              type: "session.delegation.created",
+              offset_ms: 100,
+              delegation: { type: "delegation", target: "client", id },
+            }
+          : {
+              type: "delegation.created",
+              item: {
+                type: "delegation",
+                target: "client",
+                id,
+                content: [{ type: "input_text", text: "Check my status." }],
+              },
+            };
+        harness.socket.serverEvent(notice);
+        expect(harness.onToolCall).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            callId: id,
+            args: { question: expect.stringContaining("Check my status.") },
+          }),
+        );
+        harness.bridge.submitToolResult(id, "Status checked.");
+        // Replay of a completed notice must not repeat its action.
+        harness.socket.serverEvent(notice);
+      }
+      expect(harness.onToolCall).toHaveBeenCalledTimes(3);
+      expect(harness.onError).not.toHaveBeenCalled();
+      const closing = harness.bridge.close();
+      if (publicApi) {
+        harness.socket.serverEvent({ type: "session.closed", reason: "close_requested" });
+      }
+      await closing;
+    },
+  );
+
+  it("reports missing transcript timeout, requests repetition once, then accepts fresh work", async () => {
+    const harness = createHarness({ model: "gpt-live-1" });
+    await harness.bridge.connect();
+    vi.useFakeTimers();
+    try {
+      const notice = (id: string) =>
+        harness.socket.serverEvent({
+          type: "session.delegation.created",
+          offset_ms: 100,
+          delegation: { type: "delegation", target: "client", id },
+        });
+      notice("missing");
+      expect(harness.onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "realtime.delegation.waiting-input",
+          itemId: "missing",
+        }),
+      );
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(harness.onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "realtime.delegation.input-timeout",
+          itemId: "missing",
+        }),
+      );
+      notice("missing");
+      expect(
+        sentEvents(harness.socket).filter((event) => event.type === "session.commentary.append"),
+      ).toHaveLength(1);
+      expect(harness.onToolCall).not.toHaveBeenCalled();
+      notice("fresh");
+      harness.socket.serverEvent({
+        type: "session.input_transcript.delta",
+        delta: "Try again.",
+        start_ms: 200,
+        end_ms: 300,
+      });
+      expect(harness.onToolCall).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ callId: "fresh" }),
+      );
+      expect(harness.onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "realtime.delegation.dispatched",
+          itemId: "fresh",
+        }),
+      );
+      const closing = harness.bridge.close();
+      harness.socket.serverEvent({ type: "session.closed", reason: "close_requested" });
+      await closing;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports malformed and unknown provider events without forwarding their payloads", async () => {
+    const harness = createHarness({ model: "gpt-live-1" });
+    await harness.bridge.connect();
+    harness.onEvent.mockClear();
+    harness.socket.serverEvent({
+      type: "session.input_transcript.delta",
+      delta: "private transcript",
+    });
+    harness.socket.serverEvent({ type: "unrecognized-private-event", content: "private contents" });
+    harness.socket.serverEvent({ type: "session.updated" });
+    expect(harness.onEvent.mock.calls).toEqual([
+      [{ direction: "server", type: "realtime.provider.event-ignored" }],
+      [{ direction: "server", type: "realtime.provider.event-unknown" }],
+    ]);
+    const closing = harness.bridge.close();
+    harness.socket.serverEvent({ type: "session.closed", reason: "close_requested" });
+    await closing;
+  });
 });

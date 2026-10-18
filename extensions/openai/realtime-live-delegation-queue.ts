@@ -14,6 +14,7 @@ export class OpenAILiveDelegationQueue {
       readInput: () => string;
       dispatch: (id: string, input: string) => void;
       onExpired: (id: string) => void;
+      onState?: (id: string, state: "waiting-input" | "input-timeout" | "dispatched") => void;
       onError: (error: Error) => void;
     },
   ) {}
@@ -47,7 +48,10 @@ export class OpenAILiveDelegationQueue {
         return;
       }
       try {
-        this.options.onExpired(id);
+        this.options.onState?.(id, "input-timeout");
+        if (!this.stopped && this.options.isActive()) {
+          this.options.onExpired(id);
+        }
       } catch {
         this.stop();
         this.options.onError(new Error("GPT-Live could not request missing delegation input"));
@@ -56,6 +60,9 @@ export class OpenAILiveDelegationQueue {
     timeout.unref?.();
     this.pending.set(id, timeout);
     this.resume();
+    if (this.pending.has(id) && !this.stopped && this.options.isActive()) {
+      this.options.onState?.(id, "waiting-input");
+    }
   }
 
   resume(): void {
@@ -71,6 +78,9 @@ export class OpenAILiveDelegationQueue {
       clearTimeout(timeout);
       // Dispatch owns consumption; a later notice must reread the remaining context.
       this.options.dispatch(id, input);
+      if (!this.stopped && this.options.isActive()) {
+        this.options.onState?.(id, "dispatched");
+      }
     }
   }
 

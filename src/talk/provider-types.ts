@@ -252,6 +252,10 @@ export type RealtimeVoiceProviderConfiguredContext = {
 export type RealtimeVoiceAgentConsultRunner = (params: {
   prompt: string;
   signal?: AbortSignal;
+  /** Complete user-facing result blocks, after host authorization and confirmation checks.
+   * Never forward raw deltas, reasoning, tool output, or speculative progress.
+   * False means not delivered; retain the block in the final result. */
+  onResultChunk?: (text: string) => boolean;
 }) => Promise<{ text: string }>;
 
 export type RealtimeVoiceBridgeCreateRequest = RealtimeVoiceBridgeCallbacks & {

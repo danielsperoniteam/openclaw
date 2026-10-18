@@ -215,3 +215,105 @@ If the microphone disconnects or its permission is revoked, browser Talk ends
 the call and shows an error. Choose an available **Microphone input**, restore
 permission if needed, and start Talk again. An unexpected GPT-Live connection
 loss also ends the call with an error; automatic reconnection is not supported.
+
+## Voice-specific backing-agent profile
+
+The realtime speech model and backing-agent model are separate choices. An
+optional `talk.consultProfile` selects a faster backing model for voice without
+creating a second identity or changing the text-chat model:
+
+```json5
+// Partial configuration; replace provider/model placeholders before use.
+{
+  talk: {
+    consultProfile: {
+      provider: "your-provider",
+      model: "your-fast-model",
+      directTools: true,
+    },
+  },
+}
+```
+
+A profile defaults consult reasoning to `low` unless `talk.consultThinkingLevel`
+is explicitly set. `directTools: true` prefers the regular direct-tool path;
+permissions and approvals remain unchanged. Omit or disable that field to keep
+normal tool routing. Removing the profile restores normal consult model and
+reasoning selection. Explicit per-call model/provider selections take precedence.
+
+This is still the same agent and session, with the existing session reuse,
+canonical memory, workspace, and full bootstrap instructions. It does not strip
+safety instructions or introduce a minimal-memory persona. Complex work uses the
+agent's existing authorized delegation tools; there is no automatic escalation
+that replays a tool-bearing task on another model. Benchmark tool accuracy as
+well as speed before enabling a faster model. This profile does not change the
+realtime audio transport or claim to reproduce ChatGPT's voice implementation.
+
+## Measure voice turn latency
+
+The opt-in developer probe `scripts/voice-latency-benchmark.ts` exercises the
+real Gateway-relay Talk session, provider, backing agent, and saved history. It
+uses the enrolled CLI device with `operator.read`, `operator.write`, and
+`operator.talk` scopes; it does not read a global Gateway token or change model
+configuration. Run it against an isolated, already configured test Gateway. Real
+provider calls consume the configured account's usage.
+
+Prepare **synthetic**, mono 24 kHz signed little-endian PCM16 recordings without
+a WAV header. Keep the exact same recordings and scenario order for each
+candidate. From the repository root, with dependencies installed:
+
+```sh
+pnpm exec tsx scripts/voice-latency-benchmark.ts \
+  --url ws://127.0.0.1:19089 --agent main \
+  --label baseline --output /tmp/voice-baseline.json \
+  greeting.pcm followup.pcm
+
+pnpm exec tsx scripts/voice-latency-benchmark.ts \
+  --url ws://127.0.0.1:19089 --agent main --require-agent \
+  --label baseline-tools --output /tmp/voice-baseline-tools.json \
+  status-request.pcm status-followup.pcm
+```
+
+Use a fresh output filename each time. The report is a private, mode-0600 JSON
+artifact containing finalized speech, exact agent event stream/phase and run IDs,
+chat terminal events, and canonical `chat.history`. Do not commit or publish raw
+reports. Inspect history for expected tool execution, correct answers, and
+unintended repeated actions: a fast response alone is not a passing task.
+
+The microphone clock sends silence continuously during response waits,
+simulated playback, and inter-turn gaps. Playback marks are acknowledged only
+after the corresponding PCM would have played. Late input acknowledgments are
+recorded as `inputCadenceLate`; do not silently compare a cadence-disrupted run
+with a healthy run. A failed, missing, or timed-out turn is retained, later turns
+are not attempted, and the process exits nonzero. Closing the audio session does
+not cancel already accepted agent work; inspect its canonical history separately
+if it outlives a failed probe.
+
+Metrics distinguish transport from speech:
+
+- `inputEndToPcmMs`: end of the synthetic input to the first received PCM chunk
+  above normalized RMS 0.01. This can be an acknowledgment, not the answer.
+- `inputEndToPostAgentPcmMs`: first non-silent chunk received after the backing
+  agent's terminal event. Inspect transcripts to establish whether it is useful
+  answer content. Streaming answer audio can precede agent completion, so this
+  field alone does not measure the first useful answer.
+- `firstPacketMs`: first audio packet, including silence. It is not speech
+  latency. Neither PCM metric measures physical speaker playback, microphone
+  capture, browser WebRTC, or native-app rendering.
+
+For a comparison, run baseline and candidate **serially**, not concurrently.
+Select backend models/reasoning through the supported agent/voice configuration
+on isolated Gateways, or select an already configured agent with `--agent`.
+The script deliberately has no model override or configuration write. First vary
+only the backend model/reasoning; then compare the lean voice profile separately.
+Record the exact configuration, transport, provider, model, reasoning, scenario
+count, input/cached/output tokens when available, and cold versus warm status
+alongside sanitized results. Keep permissions, tools, fixture audio, network,
+and host load comparable. Repeat both simple dialogue and tool-backed multi-turn
+scenarios, reporting failures as well as median and tail timings.
+
+Set improvement targets before the run, but treat them as targets, not latency
+promises. A Gateway-relay probe does not establish parity with ChatGPT voice:
+that requires a separate matched device, network, task, and audible-output
+measurement. Always perform a physical-device follow-up and interruption check
+before claiming the complete voice experience is fixed.
