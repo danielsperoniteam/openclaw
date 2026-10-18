@@ -39,6 +39,23 @@ const committedInstallation: UpdateImmutableInstall = {
   activationEnabled: true,
 };
 
+function mockPreparation(
+  overrides: Partial<Awaited<ReturnType<typeof immutable.prepareImmutableUpdate>>> = {},
+) {
+  return vi.spyOn(immutable, "prepareImmutableUpdate").mockResolvedValue({
+    status: "prepared",
+    installation: { ...installation, prepared: preparedReceipt },
+    targetSha,
+    steps: [],
+    warnings: [],
+    ...overrides,
+  });
+}
+
+function expectJson(fields: Record<string, unknown>) {
+  expect(defaultRuntime.writeJson).toHaveBeenCalledWith(expect.objectContaining(fields));
+}
+
 beforeEach(() => {
   activation.activate
     .mockReset()
@@ -56,57 +73,30 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-it.each([false])(
-  "dispatches immutable preparation before mutable admission (dry-run=%s)",
-  async (dryRun) => {
-    const prepared = vi.spyOn(immutable, "prepareImmutableUpdate").mockResolvedValue({
-      status: dryRun ? "dry-run" : "prepared",
-      installation: dryRun ? installation : { ...installation, prepared: preparedReceipt },
-      targetSha,
-      steps: [],
-      warnings: [],
-    });
-
-    await updateCommand({ json: true, dryRun, sha: targetSha, timeout: "60" });
-
-    expect(prepared).toHaveBeenCalledWith({
-      root: installation.currentPath,
-      sha: targetSha,
-      dryRun,
-      timeoutMs: 60_000,
-    });
-    expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: dryRun ? "dry-run" : "prepared",
-        installKind: "immutable",
-        activation: "disabled",
-        targetSha,
-      }),
-    );
-    expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
-    expect(activation.activate).not.toHaveBeenCalled();
-  },
-);
+it("dispatches immutable preparation before mutable admission", async () => {
+  const prepared = mockPreparation();
+  await updateCommand({ json: true, dryRun: false, sha: targetSha, timeout: "60" });
+  expect(prepared).toHaveBeenCalledWith({
+    root: installation.currentPath,
+    sha: targetSha,
+    dryRun: false,
+    timeoutMs: 60_000,
+  });
+  expectJson({ status: "prepared", installKind: "immutable", activation: "disabled", targetSha });
+  expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
+  expect(activation.activate).not.toHaveBeenCalled();
+});
 
 it("reports preparation failure without entering the mutable update lifecycle", async () => {
-  vi.spyOn(immutable, "prepareImmutableUpdate").mockResolvedValue({
+  mockPreparation({
     status: "error",
     reason: "candidate-build-failed",
     installation,
-    targetSha,
-    steps: [],
-    warnings: [],
   });
 
   await expect(updateCommand({ json: true })).rejects.toMatchObject({ code: 1 });
 
-  expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-    expect.objectContaining({
-      status: "error",
-      reason: "candidate-build-failed",
-      activation: "disabled",
-    }),
-  );
+  expectJson({ status: "error", reason: "candidate-build-failed", activation: "disabled" });
   expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
 });
 
@@ -115,9 +105,7 @@ it("refuses unsupported immutable channel changes before candidate work", async 
 
   await expect(updateCommand({ json: true, channel: "beta" })).rejects.toBeInstanceOf(ExitError);
 
-  expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-    expect.objectContaining({ status: "error", reason: "immutable-preparation-refused" }),
-  );
+  expectJson({ status: "error", reason: "immutable-preparation-refused" });
   expect(prepare).not.toHaveBeenCalled();
   expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
 });
@@ -130,9 +118,7 @@ it("does not fall back to mutable Git when immutable ownership inspection refuse
 
   await expect(updateCommand({ json: true })).rejects.toBeInstanceOf(ExitError);
 
-  expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-    expect.objectContaining({ status: "error", message: "Unadopted release layout" }),
-  );
+  expectJson({ status: "error", message: "Unadopted release layout" });
   expect(prepare).not.toHaveBeenCalled();
   expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
 });
@@ -148,12 +134,7 @@ it.each([
 
   await expect(command({ json: true })).rejects.toBeInstanceOf(ExitError);
 
-  expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-    expect.objectContaining({
-      status: "error",
-      reason: "immutable-repair-unsupported",
-    }),
-  );
+  expectJson({ status: "error", reason: "immutable-repair-unsupported" });
   expect(admitState).not.toHaveBeenCalled();
 });
 
@@ -164,12 +145,9 @@ it.each([
 ])("activates only under enabled adoption and restart policy: %j", async (entry) => {
   const adopted = { ...installation, activationEnabled: entry.enabled };
   vi.mocked(immutable.inspectImmutableInstall).mockResolvedValue(adopted);
-  vi.spyOn(immutable, "prepareImmutableUpdate").mockResolvedValue({
+  mockPreparation({
     status: entry.dryRun ? "dry-run" : "prepared",
     installation: entry.dryRun ? adopted : { ...adopted, prepared: preparedReceipt },
-    targetSha,
-    steps: [],
-    warnings: [],
   });
   await updateCommand({
     json: true,
@@ -191,11 +169,7 @@ it.each([
     expect(output).toHaveProperty("installation", committedInstallation);
     expect(output).not.toHaveProperty("installation.prepared");
   }
-  expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-    expect.objectContaining({
-      status: entry.activates ? "succeeded" : entry.dryRun ? "dry-run" : "prepared",
-    }),
-  );
+  expectJson({ status: entry.activates ? "succeeded" : entry.dryRun ? "dry-run" : "prepared" });
   expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
 });
 
@@ -227,9 +201,7 @@ it.each([false, true])(
       }),
     );
     if (json) {
-      expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-        expect.objectContaining({ status: "pending", phase: "verifying", recoveryCommand }),
-      );
+      expectJson({ status: "pending", phase: "verifying", recoveryCommand });
     } else {
       expect(defaultRuntime.log).toHaveBeenCalledWith(`Recovery: ${recoveryCommand}`);
     }
@@ -249,24 +221,16 @@ it("refuses a drain budget on a mutable installation before runtime retention", 
 it("refuses activation when preparation returns no generation receipt", async () => {
   const adopted = { ...installation, activationEnabled: true };
   vi.mocked(immutable.inspectImmutableInstall).mockResolvedValue(adopted);
-  vi.spyOn(immutable, "prepareImmutableUpdate").mockResolvedValue({
-    status: "prepared",
-    installation: adopted,
-    targetSha,
-    steps: [],
-    warnings: [],
-  });
+  mockPreparation({ installation: adopted });
 
   await expect(updateCommand({ json: true })).rejects.toMatchObject({ code: 1 });
 
   expect(activation.activate).not.toHaveBeenCalled();
-  expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-    expect.objectContaining({
-      status: "error",
-      reason: "immutable-activation-failed",
-      message: expect.stringContaining("returned no generation receipt"),
-    }),
-  );
+  expectJson({
+    status: "error",
+    reason: "immutable-activation-failed",
+    message: expect.stringContaining("returned no generation receipt"),
+  });
 });
 
 it("rejects an invalid drain budget before immutable preparation", async () => {
@@ -274,9 +238,7 @@ it("rejects an invalid drain budget before immutable preparation", async () => {
   await expect(updateCommand({ json: true, drainTimeout: "invalid" })).rejects.toMatchObject({
     code: 1,
   });
-  expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
-    expect.objectContaining({ message: "--drain-timeout must be a positive integer (seconds)" }),
-  );
+  expectJson({ message: "--drain-timeout must be a positive integer (seconds)" });
   expect(prepare).not.toHaveBeenCalled();
   expect(activation.activate).not.toHaveBeenCalled();
 });

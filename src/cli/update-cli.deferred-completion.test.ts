@@ -214,52 +214,47 @@ describe("update-cli child-owned deferred completion", () => {
   it.each([
     {
       name: "does not restore stale backup channels when current pre-update snapshot has none",
-      prepare: async (configPath: string, preUpdateConfig: OpenClawConfig) => {
-        const updateStartedAtMs = Date.now();
-        await writeJsonFixture(`${configPath}.pre-update`, stableConfig());
-        await writeJsonFixture(`${configPath}.bak`, preUpdateConfig);
-        return { OPENCLAW_UPDATE_POST_CORE_STARTED_AT_MS: String(updateStartedAtMs) };
-      },
+      snapshot: stableConfig(),
+      backup: true,
+      ageMs: 0,
+      startedAgoMs: 0,
     },
     {
       name: "ignores pre-update channel snapshots older than the current update attempt",
-      prepare: async (configPath: string, preUpdateConfig: OpenClawConfig) => {
-        const updateStartedAtMs = Date.now();
-        const staleTime = new Date(updateStartedAtMs - 60_000);
-        for (const suffix of [".pre-update", ".bak"]) {
-          const snapshotPath = `${configPath}${suffix}`;
-          await writeJsonFixture(snapshotPath, preUpdateConfig);
-          await fs.utimes(snapshotPath, staleTime, staleTime);
-        }
-        return { OPENCLAW_UPDATE_POST_CORE_STARTED_AT_MS: String(updateStartedAtMs) };
-      },
+      snapshot: stableWhatsAppConfig(),
+      backup: true,
+      ageMs: 60_000,
+      startedAgoMs: 0,
     },
     {
       name: "ignores stale pre-update channel snapshots during post-core resume",
       preserveParsed: true,
-      prepare: async (configPath: string) => {
-        const staleConfig = {
-          channels: { whatsapp: { enabled: true } },
-        } as OpenClawConfig;
-        const snapshotPath = `${configPath}.pre-update`;
-        await writeJsonFixture(snapshotPath, staleConfig);
-        const staleTime = new Date(Date.now() - 7 * 60 * 60 * 1000);
-        await fs.utimes(snapshotPath, staleTime, staleTime);
-        return { OPENCLAW_UPDATE_POST_CORE_STARTED_AT_MS: String(Date.now() - 8 * 60 * 60 * 1000) };
-      },
+      snapshot: { channels: { whatsapp: { enabled: true } } } satisfies OpenClawConfig,
+      backup: false,
+      ageMs: 7 * 60 * 60 * 1000,
+      startedAgoMs: 8 * 60 * 60 * 1000,
     },
-  ])("$name", async ({ prepare, preserveParsed = false }) => {
+  ])("$name", async ({ snapshot, backup, ageMs, startedAgoMs, preserveParsed = false }) => {
     const tempDir = createCaseDir("openclaw-update");
     const configPath = path.join(tempDir, "openclaw.json");
-    const preUpdateConfig = stableWhatsAppConfig();
     const postDoctorConfig = stableConfig();
     await fs.mkdir(tempDir, { recursive: true });
-    const env = await prepare(configPath, preUpdateConfig);
+    const now = Date.now();
+    for (const suffix of backup ? [".pre-update", ".bak"] : [".pre-update"]) {
+      const snapshotPath = `${configPath}${suffix}`;
+      await writeJsonFixture(snapshotPath, suffix === ".bak" ? stableWhatsAppConfig() : snapshot);
+      if (ageMs) {
+        const staleTime = new Date(now - ageMs);
+        await fs.utimes(snapshotPath, staleTime, staleTime);
+      }
+    }
     await writeJsonFixture(configPath, postDoctorConfig);
     mockPostDoctorSnapshot(configPath, postDoctorConfig, { preserveParsed });
     mockNoopPostUpdatePluginConvergence();
 
-    await runPostCoreUpdate(env);
+    await runPostCoreUpdate({
+      OPENCLAW_UPDATE_POST_CORE_STARTED_AT_MS: String(now - startedAgoMs),
+    });
 
     expect(syncPluginCall()?.config?.channels?.whatsapp).toBeUndefined();
     expect(lastReplaceConfigCall()).toBeUndefined();

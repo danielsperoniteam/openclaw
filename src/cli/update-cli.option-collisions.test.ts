@@ -1,4 +1,3 @@
-// Update CLI option collision tests cover update command flag registration boundaries.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runRegisteredCli } from "../test-utils/command-runner.js";
 import { registerUpdateCli } from "./update-cli.js";
@@ -28,16 +27,13 @@ const {
   defaultRuntime,
 } = mocks;
 
-vi.mock("./update-cli/update-command.js", () => ({
-  updateCommand: (opts: unknown) => mocks.updateCommand(opts),
-}));
-
+vi.mock("./update-cli/update-command.js", () => ({ updateCommand: mocks.updateCommand }));
 vi.mock("./update-cli/update-command-finalize.js", () => ({
-  updateFinalizeCommand: (opts: unknown) => mocks.updateFinalizeCommand(opts),
+  updateFinalizeCommand: mocks.updateFinalizeCommand,
 }));
 
 vi.mock("./update-cli/update-repair-command.js", () => ({
-  updateRepairCommand: (opts: unknown) => mocks.updateFinalizeCommand(opts),
+  updateRepairCommand: mocks.updateFinalizeCommand,
 }));
 
 vi.mock("./update-cli/cleanup.js", () => ({ updateCleanupCommand: mocks.updateCleanupCommand }));
@@ -46,13 +42,8 @@ vi.mock("./update-cli/update-command-immutable.js", () => ({
   updateRecoverImmutableCommand: mocks.updateRecoverImmutableCommand,
 }));
 
-vi.mock("./update-cli/status.js", () => ({
-  updateStatusCommand: (opts: unknown) => mocks.updateStatusCommand(opts),
-}));
-
-vi.mock("./update-cli/wizard.js", () => ({
-  updateWizardCommand: (opts: unknown) => mocks.updateWizardCommand(opts),
-}));
+vi.mock("./update-cli/status.js", () => ({ updateStatusCommand: mocks.updateStatusCommand }));
+vi.mock("./update-cli/wizard.js", () => ({ updateWizardCommand: mocks.updateWizardCommand }));
 
 vi.mock("../runtime.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../runtime.js")>();
@@ -70,6 +61,13 @@ function firstCallOptions(mock: { mock: { calls: unknown[][] } }) {
   return mock.mock.calls[0]?.[0];
 }
 
+function expectRejected(message: string, ...commands: Array<typeof updateCommand>) {
+  expect(defaultRuntime.error).toHaveBeenCalledWith(expect.stringContaining(message));
+  for (const command of commands) {
+    expect(command).not.toHaveBeenCalled();
+  }
+}
+
 describe("update cli option collisions", () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -85,25 +83,18 @@ describe("update cli option collisions", () => {
   const adoptionArgs = [
     "update",
     "adopt-immutable",
-    "--root",
-    "/opt/example",
-    "--service",
-    "example.service",
-    "--account",
-    "openclaw",
-    "--state-dir",
-    "/var/lib/example",
-    "--config",
-    "/etc/example/openclaw.json",
-    "--runtime",
-    "/usr/bin/node",
+    ...Object.entries({
+      root: "/opt/example",
+      service: "example.service",
+      account: "openclaw",
+      "state-dir": "/var/lib/example",
+      config: "/etc/example/openclaw.json",
+      runtime: "/usr/bin/node",
+    }).flatMap(([key, value]) => [`--${key}`, value]),
   ];
   it("requires explicit prior-updater acknowledgement for immutable adoption", async () => {
     await run(adoptionArgs);
-    expect(mocks.updateAdoptImmutableCommand).not.toHaveBeenCalled();
-    expect(defaultRuntime.error).toHaveBeenCalledWith(
-      expect.stringContaining("--previous-updater-stopped"),
-    );
+    expectRejected("--previous-updater-stopped", mocks.updateAdoptImmutableCommand);
     expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
   });
 
@@ -146,10 +137,7 @@ describe("update cli option collisions", () => {
     await run(["update", "--sha", sha]);
     expect(updateCommand).toHaveBeenCalledWith(expect.objectContaining({ sha }));
     await run(["update", "--sha", sha, "status"]);
-    expect(updateStatusCommand).not.toHaveBeenCalled();
-    expect(defaultRuntime.error).toHaveBeenCalledWith(
-      expect.stringContaining("--sha is supported only"),
-    );
+    expectRejected("--sha is supported only", updateStatusCommand);
   });
 
   it("passes a distinct immutable drain budget and refuses it on unrelated leaves", async () => {
@@ -157,61 +145,42 @@ describe("update cli option collisions", () => {
     expect(updateCommand).toHaveBeenCalledWith(
       expect.objectContaining({ drainTimeout: "30", timeout: "600" }),
     );
-    await run([
-      "update",
-      "--drain-timeout",
-      "30",
-      "recover",
-      "--root",
-      "/opt/example",
-      "--timeout",
-      "900",
-    ]);
+    await run("update --drain-timeout 30 recover --root /opt/example --timeout 900".split(" "));
     expect(mocks.updateRecoverImmutableCommand).toHaveBeenCalledWith(
       expect.objectContaining({ drainTimeout: "30", timeout: "900" }),
     );
     await run(["update", "--drain-timeout", "30", "status"]);
-    expect(updateStatusCommand).not.toHaveBeenCalled();
-    expect(defaultRuntime.error).toHaveBeenCalledWith(
-      expect.stringContaining("--drain-timeout is supported only"),
-    );
+    expectRejected("--drain-timeout is supported only", updateStatusCommand);
   });
 
-  it.each([["update", "--dry-run", "--json", "--yes", "cleanup"]])(
-    "supports cleanup options in either position: %j",
-    async (...argv) => {
-      await run(argv);
-      expect(mocks.updateCleanupCommand).toHaveBeenCalledWith({
-        dryRun: true,
-        json: true,
-        yes: true,
-      });
-      expect(updateCommand).not.toHaveBeenCalled();
-    },
-  );
+  it("supports inherited cleanup options", async () => {
+    await run(["update", "--dry-run", "--json", "--yes", "cleanup"]);
+    expect(mocks.updateCleanupCommand).toHaveBeenCalledWith({
+      dryRun: true,
+      json: true,
+      yes: true,
+    });
+    expect(updateCommand).not.toHaveBeenCalled();
+  });
 
   it.each([["--channel", ""], ["--no-restart"], ["--accept-capabilities"]])(
     "rejects unrelated inherited cleanup option %s",
     async (...flags) => {
       await run(["update", ...flags, "cleanup"]);
-      expect(mocks.updateCleanupCommand).not.toHaveBeenCalled();
-      expect(defaultRuntime.error).toHaveBeenCalledWith(
-        expect.stringContaining("is not supported"),
-      );
+      expectRejected("is not supported", mocks.updateCleanupCommand, updateCommand);
       expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
-      expect(updateCommand).not.toHaveBeenCalled();
     },
   );
 
   it("rejects replay consent on update leaves", async () => {
     await run(["update", "--reapply-local-overrides", "status"]);
-    expect(defaultRuntime.error).toHaveBeenCalledWith(
-      expect.stringContaining("--reapply-local-overrides is not supported"),
+    expectRejected(
+      "--reapply-local-overrides is not supported",
+      updateCommand,
+      updateFinalizeCommand,
+      updateWizardCommand,
+      updateStatusCommand,
     );
-    expect(updateCommand).not.toHaveBeenCalled();
-    expect(updateFinalizeCommand).not.toHaveBeenCalled();
-    expect(updateWizardCommand).not.toHaveBeenCalled();
-    expect(updateStatusCommand).not.toHaveBeenCalled();
   });
 
   it("rejects parent --dry-run before running update repair", async () => {
@@ -224,8 +193,8 @@ describe("update cli option collisions", () => {
     expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
   });
 
-  it.each(["finalize"])("forwards all explicitly inherited options to update %s", async (name) => {
-    await run(["update", "--json", "--timeout", "31", "--channel", "beta", "--yes", name]);
+  it("forwards all explicitly inherited options to update finalize", async () => {
+    await run("update --json --timeout 31 --channel beta --yes finalize".split(" "));
     expect(updateFinalizeCommand).toHaveBeenCalledOnce();
     expect(firstCallOptions(updateFinalizeCommand)).toMatchObject({
       channel: "beta",

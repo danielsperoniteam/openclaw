@@ -1,5 +1,4 @@
 import path from "node:path";
-import { expectDefined } from "@openclaw/normalization-core";
 import { expect, vi } from "vitest";
 import type { ConfigFileSnapshot } from "../config/types.openclaw.js";
 import type { UpdateRunResult } from "../infra/update-runner-types.js";
@@ -55,16 +54,12 @@ const stripOpenClawPackageAlias = (spec: string) => {
 
 const isNpmGitPackageSpec = (spec: string) => {
   const target = stripOpenClawPackageAlias(spec);
-  const [repo] = target.split("#", 1);
+  const [repo = ""] = target.split("#", 1);
   const isGitHubShorthand =
     Boolean(repo) &&
-    !expectDefined(repo, "repo test invariant").startsWith(".") &&
-    !expectDefined(repo, "repo test invariant").startsWith("/") &&
-    !expectDefined(repo, "repo test invariant").startsWith("@") &&
-    expectDefined(repo, "repo test invariant").split("/").length === 2 &&
-    expectDefined(repo, "repo test invariant")
-      .split("/")
-      .every((part) => /^[^\s/:@]+$/u.test(part));
+    ![".", "/", "@"].some((prefix) => repo.startsWith(prefix)) &&
+    repo.split("/").length === 2 &&
+    repo.split("/").every((part) => /^[^\s/:@]+$/u.test(part));
   let isHttpGitUrl;
   try {
     const url = new URL(target);
@@ -162,7 +157,8 @@ const pluginOutcome = (result?: UpdateRunResult) => result?.postUpdate?.plugins?
 const expectPackageInstallSpec = (spec: string, staged = true) => {
   expect(updateGitCheckout).not.toHaveBeenCalled();
   let installSpec = spec;
-  if (isNpmGitPackageSpec(spec)) {
+  const isGit = isNpmGitPackageSpec(spec);
+  if (isGit) {
     const packCall = packagePackCommandCall();
     expect(packCall?.[0]).toEqual([
       "npm",
@@ -173,15 +169,12 @@ const expectPackageInstallSpec = (spec: string, staged = true) => {
       "--json",
       "--loglevel=error",
     ]);
-    const packDir = packCall?.[0][4];
-    if (!packDir) {
-      throw new Error("Expected package pack directory");
-    }
+    const packDir = requireValue(packCall?.[0][4] || undefined, "package pack directory");
     installSpec = path.join(packDir, "openclaw-9999.0.0.tgz");
   } else {
     expect(packagePackCommandCall()).toBeUndefined();
   }
-  const allowScriptsIdentity = isNpmGitPackageSpec(spec)
+  const allowScriptsIdentity = isGit
     ? installSpec
     : spec.toLowerCase().startsWith("openclaw@")
       ? "openclaw"
@@ -199,9 +192,7 @@ const expectPackageInstallSpec = (spec: string, staged = true) => {
     "--loglevel=error",
     "--min-release-age=0",
   ]);
-  if (call?.[1] === undefined) {
-    throw new Error("Expected package install command options");
-  }
+  requireValue(call?.[1], "package install command options");
 };
 
 export {

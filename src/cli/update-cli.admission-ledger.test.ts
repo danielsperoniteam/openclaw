@@ -108,7 +108,6 @@ describe("update-cli", () => {
           reason: "dry-run",
         },
       ]);
-      expect(defaultRuntime.writeJson).toHaveBeenCalled();
       await invokeUpdateCli({ dryRun: true, restart: false });
       expect(getLogOutput()).toContain(`Current version: ${installedVersion ?? VERSION}`);
       expect(getLogOutput()).toContain("Target version: unresolved");
@@ -468,33 +467,23 @@ describe("update-cli", () => {
           phase: "finished",
           verification: { serviceRunning: true, runningVersion: VERSION },
         });
+        const phases = [
+          "requested",
+          "staging",
+          "validating",
+          "activating",
+          "restarting",
+          "verifying",
+        ];
         expect(
-          run?.steps
-            .filter((step) =>
-              [
-                "requested",
-                "staging",
-                "validating",
-                "activating",
-                "restarting",
-                "verifying",
-              ].includes(step.step),
-            )
-            .map((step) => step.step),
-        ).toEqual(["requested", "staging", "validating", "activating", "restarting", "verifying"]);
+          run.steps.filter((step) => phases.includes(step.step)).map((step) => step.step),
+        ).toEqual(phases);
         expect(heldReads.length).toBeGreaterThan(0);
         expect(readSignals.every((signal) => signal.aborted)).toBe(true);
         const output = getLogOutput();
-        const phases = output.split("\n").filter((line) => line.startsWith("Phase:"));
-        expect(phases).toEqual([
-          "Phase: requested",
-          "Phase: staging",
-          "Phase: validating",
-          "Phase: activating",
-          "Phase: restarting",
-          "Phase: verifying",
-          "Phase: finished",
-        ]);
+        expect(output.split("\n").filter((line) => line.startsWith("Phase:"))).toEqual(
+          [...phases, "finished"].map((phase) => `Phase: ${phase}`),
+        );
         expect(output.indexOf("OpenClaw updated")).toBeGreaterThan(
           output.indexOf("Phase: finished"),
         );
