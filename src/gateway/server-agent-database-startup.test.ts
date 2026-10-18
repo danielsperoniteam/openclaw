@@ -798,11 +798,6 @@ it("admits an unsealed fleet including reserved system agents while skipping an 
   let server: Awaited<ReturnType<typeof startTestGatewayServer>> | undefined;
   try {
     const started = await withAgentDatabaseStartupAdmission(async (admission) => {
-      const scheduling = admission.scheduling.bind(admission);
-      vi.spyOn(admission, "scheduling").mockImplementation((...args) => ({
-        ...scheduling(...args),
-        canDefer: () => true,
-      }));
       const activate = admission.activate.bind(admission);
       vi.spyOn(admission, "activate").mockImplementation((activation) =>
         activate({
