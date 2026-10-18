@@ -1,4 +1,3 @@
-// Discord tests cover REST error redaction behavior.
 import { createServer, type Server } from "node:http";
 import { describe, expect, it } from "vitest";
 import {
@@ -17,10 +16,28 @@ async function captureError(promise: Promise<unknown>): Promise<unknown> {
   throw new Error("expected request to fail");
 }
 
+const token = ["MTAxMjM0NTY3ODkwMTIzNDU2", "discord", "credential", "fixture"].join(".");
+function expectRedactedDetails(error: DiscordError, safe?: string) {
+  const details = JSON.stringify({
+    message: error.message,
+    rawBody: error.rawBody,
+    rawError: error.rawError,
+  });
+  expect(details).not.toContain(token);
+  expect(details).not.toContain(`Bot ${token}`);
+  expect(details).not.toContain("discord.credential");
+  if (safe) {
+    expect(details).toContain(safe);
+  }
+  return details;
+}
+
+function errorBody(body: unknown) {
+  return new DiscordError(new Response(null, { status: 500 }), body);
+}
+
 describe("Discord REST error redaction", () => {
   it("redacts reflected credentials while preserving Discord error metadata", async () => {
-    const token = ["MTAxMjM0NTY3ODkwMTIzNDU2", "discord", "credential", "fixture"].join(".");
-    const uniqueTokenFragment = "discord.credential";
     const server = await new Promise<Server>((resolve, reject) => {
       const srv = createServer((req, res) => {
         const authorization = req.headers.authorization;
@@ -89,16 +106,8 @@ describe("Discord REST error redaction", () => {
       const voiceError = await captureError(client.get("/voice-state"));
       expect(voiceError).toBeInstanceOf(DiscordError);
       const discordError = voiceError as DiscordError;
-      const voiceDetails = JSON.stringify({
-        message: discordError.message,
-        rawBody: discordError.rawBody,
-        rawError: discordError.rawError,
-      });
-      expect(voiceDetails).not.toContain(token);
-      expect(voiceDetails).not.toContain(`Bot ${token}`);
-      expect(voiceDetails).not.toContain(uniqueTokenFragment);
+      const voiceDetails = expectRedactedDetails(discordError, "voice diagnostic");
       expect(voiceDetails).not.toContain("812345678901234");
-      expect(voiceDetails).toContain("voice diagnostic");
       expect(discordError.discordCode).toBe(10_065);
       expect(isUnknownDiscordVoiceStateError(discordError)).toBe(true);
 
@@ -106,14 +115,7 @@ describe("Discord REST error redaction", () => {
       const rateError = await captureError(client.get(webhookRateLimitPath));
       expect(rateError).toBeInstanceOf(RateLimitError);
       const rateLimitError = rateError as RateLimitError;
-      const rateLimitDetails = JSON.stringify({
-        message: rateLimitError.message,
-        rawBody: rateLimitError.rawBody,
-        rawError: rateLimitError.rawError,
-      });
-      expect(rateLimitDetails).not.toContain(token);
-      expect(rateLimitDetails).not.toContain(`Bot ${token}`);
-      expect(rateLimitDetails).not.toContain(uniqueTokenFragment);
+      expectRedactedDetails(rateLimitError);
       expect(rateLimitError.retryAfter).toBe(0.25);
       expect(rateLimitError.discordCode).toBe(20_028);
       expect(rateLimitError.scope).toBe("user");
@@ -137,19 +139,12 @@ describe("Discord REST error redaction", () => {
         scheduler: [...scheduler.buckets],
       });
       expect(reflectedHeaderDetails).not.toContain(token);
-      expect(reflectedHeaderDetails).not.toContain(uniqueTokenFragment);
+      expect(reflectedHeaderDetails).not.toContain("discord.credential");
       expect(reflectedRateLimitError.scope).toBeNull();
 
       const textError = await captureError(client.get("/plain-text"));
       expect(textError).toBeInstanceOf(DiscordError);
-      const textDetails = JSON.stringify({
-        message: (textError as DiscordError).message,
-        rawBody: (textError as DiscordError).rawBody,
-        rawError: (textError as DiscordError).rawError,
-      });
-      expect(textDetails).not.toContain(token);
-      expect(textDetails).not.toContain(uniqueTokenFragment);
-      expect(textDetails).toContain("Proxy rejected request");
+      expectRedactedDetails(textError as DiscordError, "Proxy rejected request");
 
       await expect(client.get("/success")).resolves.toEqual({
         ok: true,
@@ -165,20 +160,20 @@ describe("Discord REST error redaction", () => {
   it("bounds recursive Discord error-body redaction", () => {
     const circular: { message: string; self?: unknown } = { message: "safe diagnostic" };
     circular.self = circular;
-    const circularError = new DiscordError(new Response(null, { status: 500 }), circular);
+    const circularError = errorBody(circular);
     expect((circularError.rawBody as { self?: unknown }).self).toBe("[Circular]");
 
-    const token = "MTAxMjM0NTY3ODkwMTIzNDU2.deeply.nested.credential";
-    let nested: unknown = { authorization: token };
+    const nestedToken = "MTAxMjM0NTY3ODkwMTIzNDU2.deeply.nested.credential";
+    let nested: unknown = { authorization: nestedToken };
     for (let depth = 0; depth < 70; depth += 1) {
       nested = { child: nested };
     }
-    const deepError = new DiscordError(new Response(null, { status: 500 }), {
+    const deepError = errorBody({
       message: "safe diagnostic",
       nested,
     });
     const deepDetails = JSON.stringify(deepError.rawBody);
-    expect(deepDetails).not.toContain(token);
+    expect(deepDetails).not.toContain(nestedToken);
     expect(deepDetails).toContain("[Discord error body redacted: maximum depth exceeded]");
   });
 
@@ -215,17 +210,14 @@ describe("Discord REST error redaction", () => {
 
     expect(error.rawBody).toEqual({
       message: "Invalid Form Body",
-      authorization: {
-        "***": "***",
-        "*** [2]": "***",
-      },
+      authorization: { "***": "***", "*** [2]": "***" },
     });
   });
 
   it("marks a priority-only object that exhausts the redaction node budget", () => {
     const marker = "[Discord error body redacted: node limit exceeded]";
     const body = [...Array.from({ length: 9_998 }, () => null), { message: "truncated" }];
-    const error = new DiscordError(new Response(null, { status: 500 }), body);
+    const error = errorBody(body);
     const redactedBody = error.rawBody as unknown[];
 
     expect(redactedBody).toHaveLength(9_999);
@@ -236,7 +228,7 @@ describe("Discord REST error redaction", () => {
     const fields = Object.fromEntries(
       Array.from({ length: 10_050 }, (_, index) => [`field-${index}`, index]),
     );
-    const error = new DiscordError(new Response(null, { status: 500 }), {
+    const error = errorBody({
       fields,
       message: "wide diagnostic",
       code: 10_065,

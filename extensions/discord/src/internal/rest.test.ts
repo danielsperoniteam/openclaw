@@ -1,4 +1,3 @@
-// Discord tests cover rest plugin behavior.
 import { gzipSync } from "node:zlib";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +17,48 @@ async function expectRateLimitError(promise: Promise<unknown>, expected: { retry
   const rateLimit = error as RateLimitError;
   expect(rateLimit.name).toBe("RateLimitError");
   expect(rateLimit.retryAfter).toBe(expected.retryAfter);
+}
+
+function queuedResponses(...responses: Response[]) {
+  const pending = responses.map((response) => Promise.resolve(response));
+  return vi.fn(async () => {
+    const response = pending.shift();
+    if (!response) {
+      throw new Error("unexpected request");
+    }
+    return await response;
+  });
+}
+
+function bucketResponse(
+  id: string,
+  bucket: string,
+  remaining = "1",
+  reset?: string,
+  limit?: string,
+) {
+  return createJsonResponse(
+    { id },
+    {
+      headers: {
+        "X-RateLimit-Bucket": bucket,
+        "X-RateLimit-Remaining": remaining,
+        ...(limit ? { "X-RateLimit-Limit": limit } : {}),
+        ...(reset ? { "X-RateLimit-Reset-After": reset } : {}),
+      },
+    },
+  );
+}
+
+function rateLimitResponse(
+  retryAfter: number | string,
+  headers: Record<string, string>,
+  global = false,
+) {
+  return createJsonResponse(
+    { message: "Rate limited", retry_after: retryAfter, global },
+    { status: 429, headers },
+  );
 }
 
 describe("RequestClient", () => {
@@ -75,8 +116,7 @@ describe("RequestClient", () => {
       ["/guilds/g2/roles", Promise.resolve(createJsonResponse({ ok: "background" }))],
     ]);
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
-      const url =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = readRequestUrl(input);
       const path = new URL(url).pathname.replace(/^\/api\/v\d+/, "");
       if (blockers.includes(path)) {
         await releaseWorkers.promise;
@@ -88,9 +128,7 @@ describe("RequestClient", () => {
       }
       return await response;
     });
-    const client = new RequestClient("test-token", {
-      fetch: fetchSpy,
-    });
+    const client = new RequestClient("test-token", { fetch: fetchSpy });
 
     const active = blockers.map((path) => client.get(path));
     const background = client.get("/guilds/g2/roles");
@@ -167,15 +205,9 @@ describe("RequestClient", () => {
     releaseWorkers.resolve();
     await Promise.all(active);
 
-    await expect(Promise.all(requests)).resolves.toEqual([
-      { ok: true },
-      { ok: true },
-      { ok: true },
-      { ok: true },
-      { ok: true },
-      { ok: true },
-      { ok: true },
-    ]);
+    await expect(Promise.all(requests)).resolves.toEqual(
+      Array.from({ length: 7 }, () => ({ ok: true })),
+    );
     expect(fetchSpy).toHaveBeenCalledTimes(requests.length + active.length);
     expect(client.queueSize).toBe(0);
   });
@@ -189,9 +221,7 @@ describe("RequestClient", () => {
         ? await firstResponse.promise
         : createJsonResponse({ id: "second" }),
     );
-    const client = new RequestClient("test-token", {
-      fetch: fetchSpy,
-    });
+    const client = new RequestClient("test-token", { fetch: fetchSpy });
 
     const first = client.get("/channels/c1/messages");
     await Promise.resolve();
@@ -218,35 +248,18 @@ describe("RequestClient", () => {
     const channelResponse = createDeferred<Response>();
     const guildResponse = createDeferred<Response>();
     const fetchSpy = vi.fn(async (input: string | URL | Request) => {
-      const url =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const url = readRequestUrl(input);
       return await (url.includes("/channels/") ? channelResponse.promise : guildResponse.promise);
     });
-    const client = new RequestClient("test-token", {
-      fetch: fetchSpy,
-    });
+    const client = new RequestClient("test-token", { fetch: fetchSpy });
 
     const channel = client.get("/channels/c1/messages");
     const guild = client.get("/guilds/g1/roles");
 
     await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
 
-    channelResponse.resolve(
-      createJsonResponse(
-        { id: "channel" },
-        {
-          headers: { "X-RateLimit-Bucket": "channel-messages", "X-RateLimit-Remaining": "1" },
-        },
-      ),
-    );
-    guildResponse.resolve(
-      createJsonResponse(
-        { id: "guild" },
-        {
-          headers: { "X-RateLimit-Bucket": "guild-roles", "X-RateLimit-Remaining": "1" },
-        },
-      ),
-    );
+    channelResponse.resolve(bucketResponse("channel", "channel-messages"));
+    guildResponse.resolve(bucketResponse("guild", "guild-roles"));
 
     await expect(Promise.all([channel, guild])).resolves.toEqual([
       { id: "channel" },
@@ -257,40 +270,10 @@ describe("RequestClient", () => {
   it("waits for a learned bucket reset before dispatching the next request", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
-    const responses = [
-      Promise.resolve(
-        createJsonResponse(
-          { id: "first" },
-          {
-            headers: {
-              "X-RateLimit-Bucket": "channel-messages",
-              "X-RateLimit-Limit": "1",
-              "X-RateLimit-Remaining": "0",
-              "X-RateLimit-Reset-After": "0.1",
-            },
-          },
-        ),
-      ),
-      Promise.resolve(
-        createJsonResponse(
-          { id: "second" },
-          {
-            headers: {
-              "X-RateLimit-Bucket": "channel-messages",
-              "X-RateLimit-Limit": "1",
-              "X-RateLimit-Remaining": "1",
-            },
-          },
-        ),
-      ),
-    ];
-    const fetchSpy = vi.fn(async () => {
-      const response = responses.shift();
-      if (!response) {
-        throw new Error("unexpected request");
-      }
-      return await response;
-    });
+    const fetchSpy = queuedResponses(
+      bucketResponse("first", "channel-messages", "0", "0.1", "1"),
+      bucketResponse("second", "channel-messages", "1", undefined, "1"),
+    );
     const client = new RequestClient("test-token", { fetch: fetchSpy });
 
     await expect(client.get("/channels/c1/messages")).resolves.toEqual({ id: "first" });
@@ -324,15 +307,7 @@ describe("RequestClient", () => {
     client.clearQueue();
     expect(client.queueSize).toBe(1);
 
-    response.resolve(
-      createJsonResponse(
-        { message: "Rate limited", retry_after: 0, global: false },
-        {
-          status: 429,
-          headers: { "X-RateLimit-Bucket": "channel-messages" },
-        },
-      ),
-    );
+    response.resolve(rateLimitResponse(0, { "X-RateLimit-Bucket": "channel-messages" }));
 
     await expectRateLimitError(request, { retryAfter: 0 });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -342,25 +317,10 @@ describe("RequestClient", () => {
   it("retries queued global rate limits after Retry-After", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
-    const responses = [
-      Promise.resolve(
-        createJsonResponse(
-          { message: "Rate limited", retry_after: 0.1, global: true },
-          {
-            status: 429,
-            headers: { "X-RateLimit-Global": "true" },
-          },
-        ),
-      ),
-      Promise.resolve(createJsonResponse({ id: "after-global" })),
-    ];
-    const fetchSpy = vi.fn(async () => {
-      const response = responses.shift();
-      if (!response) {
-        throw new Error("unexpected request");
-      }
-      return await response;
-    });
+    const fetchSpy = queuedResponses(
+      rateLimitResponse(0.1, { "X-RateLimit-Global": "true" }, true),
+      createJsonResponse({ id: "after-global" }),
+    );
     const client = new RequestClient("test-token", { fetch: fetchSpy });
 
     const request = client.get("/channels/c1/messages");
@@ -378,37 +338,19 @@ describe("RequestClient", () => {
   it("falls back to Retry-After when the rate limit body value is unsafe", async () => {
     const client = new RequestClient("test-token", {
       queueRequests: false,
-      fetch: async () =>
-        new Response(
-          JSON.stringify({ message: "Slow down", retry_after: "9007199254741", global: false }),
-          {
-            status: 429,
-            headers: { "Retry-After": "7" },
-          },
-        ),
+      fetch: async () => rateLimitResponse("9007199254741", { "Retry-After": "7" }),
     });
 
     await expectRateLimitError(client.get("/channels/c1/messages"), { retryAfter: 7 });
   });
 
-  it.each([["unsafe-ms", "9007199254741"]])(
-    "rejects invalid Retry-After numeric strings: %s",
-    async (_label, header) => {
-      const client = new RequestClient("test-token", {
-        queueRequests: false,
-        fetch: async () =>
-          new Response(
-            JSON.stringify({ message: "Slow down", retry_after: "1e3", global: false }),
-            {
-              status: 429,
-              headers: { "Retry-After": header },
-            },
-          ),
-      });
-
-      await expectRateLimitError(client.get("/channels/c1/messages"), { retryAfter: 1 });
-    },
-  );
+  it("rejects invalid Retry-After numeric strings", async () => {
+    const client = new RequestClient("test-token", {
+      queueRequests: false,
+      fetch: async () => rateLimitResponse("1e3", { "Retry-After": "9007199254741" }),
+    });
+    await expectRateLimitError(client.get("/channels/c1/messages"), { retryAfter: 1 });
+  });
 
   it("bounds oversized REST response bodies instead of buffering them unbounded", async () => {
     const encoder = new TextEncoder();

@@ -1,10 +1,10 @@
-// Discord tests cover interaction dispatch plugin behavior.
 import {
   ApplicationCommandOptionType,
   ComponentType,
   InteractionResponseType,
   InteractionType,
 } from "discord-api-types/v10";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { describe, expect, it, vi } from "vitest";
 import { Command, CommandWithSubcommands, type CommandOptions } from "./commands.js";
 import type { AutocompleteInteraction, CommandInteraction } from "./interactions.js";
@@ -15,15 +15,14 @@ import {
   createInternalTestClient,
 } from "./test-builders.test-support.js";
 
-function createThrowingCommandClient(
-  run: (interaction: CommandInteraction) => unknown,
-  defer = true,
-) {
+const identity = { id: "interaction1", token: "token1" };
+
+function createThrowingCommandClient(run: (interaction: CommandInteraction) => unknown) {
   return createInternalTestClient([
     new (class extends Command {
       override name = "boom";
       override description = "Throwing command";
-      override defer = defer;
+      override defer = true;
       run = run;
     })(),
   ]);
@@ -32,8 +31,7 @@ function createThrowingCommandClient(
 function dispatchTestCommand(client: ReturnType<typeof createInternalTestClient>) {
   return client.handleInteraction(
     createInternalInteractionPayload({
-      id: "interaction1",
-      token: "token1",
+      ...identity,
       data: { id: "command1", name: "boom", type: 1 },
     }),
   );
@@ -41,24 +39,18 @@ function dispatchTestCommand(client: ReturnType<typeof createInternalTestClient>
 
 describe("dispatchInteraction", () => {
   it("reports a visible failure when a deferred command handler throws", async () => {
-    // Regression: a throwing handler used to leave the deferred interaction
-    // pending forever, so Discord showed a spinner that never resolved and the
-    // only trace was a Gateway log line. See openclaw#77716.
+    // #77716: resolve the deferred spinner visibly, but keep exception details private.
     const run = vi.fn(async () => {
       throw new Error("prepared model catalog owner config was replaced during the read");
     });
     const client = createThrowingCommandClient(run);
-    const post = vi.fn(async () => undefined);
-    const patch = vi.fn(async () => undefined);
-    attachRestMock(client, { post, patch });
+    const { patch } = attachRestMock(client, {});
 
     await expect(dispatchTestCommand(client)).rejects.toThrow(
       "prepared model catalog owner config was replaced",
     );
 
     expect(run).toHaveBeenCalledTimes(1);
-    // The deferred response must be resolved with a visible message rather than
-    // left hanging; the caller still sees the rejection so it is logged.
     expect(patch).toHaveBeenCalledWith(
       "/webhooks/app1/token1/messages/%40original",
       expect.objectContaining({
@@ -80,10 +72,7 @@ describe("dispatchInteraction", () => {
   });
 
   it("does not touch the original response when a component acknowledgement fails", async () => {
-    // A component acknowledgement is a DeferredMessageUpdate: Discord leaves no
-    // spinner, and the interaction's original response IS the message the button
-    // is attached to. Editing it would overwrite the message the user is still
-    // reading -- destroying live content to report a failure.
+    // DeferredMessageUpdate owns existing channel content, not an unanswered spinner.
     const run = vi.fn(async () => {
       throw new Error("approval resolution exploded");
     });
@@ -96,43 +85,23 @@ describe("dispatchInteraction", () => {
       run,
       customIdParser: (id: string) => ({ data: { id } }),
     } as never);
-    const post = vi.fn(async () => undefined);
-    const patch = vi.fn(async () => undefined);
-    attachRestMock(client, { post, patch });
+    const { patch } = attachRestMock(client, {});
 
     await expect(
-      client.handleInteraction(
-        createInternalComponentInteractionPayload({
-          id: "interaction1",
-          token: "token1",
-        }),
-      ),
+      client.handleInteraction(createInternalComponentInteractionPayload(identity)),
     ).rejects.toThrow("approval resolution exploded");
 
     expect(run).toHaveBeenCalledTimes(1);
-    // The acknowledgement callback is the handler's own. Nothing may edit the
-    // component's message afterwards.
     expect(patch).not.toHaveBeenCalled();
   });
 
   it("does not overwrite a follow-up that was still in flight when the handler threw", async () => {
-    // The handler starts a follow-up without awaiting it, then throws. Read
-    // outside the response queue, hasSentFollowUp is still false at that moment,
-    // because it is only set once the follow-up REST call resolves. The edit
-    // re-reads it inside the queue, after the follow-up has settled.
-    let releaseFollowUp: (() => void) | undefined;
-    // The first post is the deferred callback and must resolve, or the handler
-    // never runs. Only the follow-up that follows it is held open.
-    let posts = 0;
-    const post = vi.fn(async () => {
-      posts += 1;
-      if (posts === 1) {
-        return undefined;
-      }
-      return await new Promise<undefined>((resolve) => {
-        releaseFollowUp = () => resolve(undefined);
-      });
-    });
+    // Hold only the follow-up; the deferred callback must settle before the handler runs.
+    const followUp = createDeferred<undefined>();
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(() => followUp.promise);
     const patch = vi.fn(async () => undefined);
     const run = vi.fn((interaction: CommandInteraction) => {
       void interaction.followUp("progress").catch(() => undefined);
@@ -142,8 +111,8 @@ describe("dispatchInteraction", () => {
     attachRestMock(client, { post, patch });
 
     const handled = dispatchTestCommand(client);
-    await vi.waitFor(() => expect(releaseFollowUp).toBeDefined());
-    releaseFollowUp?.();
+    await vi.waitFor(() => expect(post).toHaveBeenCalledTimes(2));
+    followUp.resolve(undefined);
 
     await expect(handled).rejects.toThrow("failed with a follow-up in flight");
     expect(post).toHaveBeenCalledTimes(2);
@@ -168,13 +137,11 @@ describe("dispatchInteraction", () => {
       run() {}
     }
     const client = createInternalTestClient([new OptionAutocompleteCommand()]);
-    const post = vi.fn(async () => undefined);
-    attachRestMock(client, { post });
+    const { post } = attachRestMock(client, {});
 
     await client.handleInteraction(
       createInternalInteractionPayload({
-        id: "interaction1",
-        token: "token1",
+        ...identity,
         type: InteractionType.ApplicationCommandAutocomplete,
         data: {
           id: "command1",
@@ -218,14 +185,11 @@ describe("dispatchInteraction", () => {
       subcommands = [new JoinCommand()];
     }
     const client = createInternalTestClient([new VoiceCommand()]);
-    const post = vi.fn(async () => undefined);
-    const patch = vi.fn(async () => undefined);
-    attachRestMock(client, { post, patch });
+    const { post, patch } = attachRestMock(client, {});
 
     await client.handleInteraction(
       createInternalInteractionPayload({
-        id: "interaction1",
-        token: "token1",
+        ...identity,
         data: {
           id: "command1",
           name: "vc",

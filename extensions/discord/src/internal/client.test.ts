@@ -1,4 +1,3 @@
-// Discord tests cover client plugin behavior.
 import { ApplicationCommandType, ComponentType, Routes } from "discord-api-types/v10";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -30,9 +29,7 @@ describe("ComponentRegistry", () => {
   it("preserves digit-only custom id values as strings", () => {
     const parsed = parseCustomId("agent:user=123456789012345678;count=42;enabled=true");
 
-    expect(parsed.data.user).toBe("123456789012345678");
-    expect(parsed.data.count).toBe("42");
-    expect(parsed.data.enabled).toBe(true);
+    expect(parsed.data).toEqual({ user: "123456789012345678", count: "42", enabled: true });
   });
 
   it("resolves wildcard parser entries by component type", () => {
@@ -110,10 +107,7 @@ describe("Client.deployCommands", () => {
         version: "1",
       },
     ]);
-    const patch = vi.fn(async () => undefined);
-    const post = vi.fn(async () => undefined);
-    const deleteRequest = vi.fn(async () => undefined);
-    attachRestMock(client, { get, patch, post, delete: deleteRequest });
+    const { patch, post, delete: deleteRequest } = attachRestMock(client, { get });
 
     await client.deployCommands();
 
@@ -157,8 +151,7 @@ describe("Client.deployCommands", () => {
       deployedCount = 100;
       operations.push("put");
     });
-    const deleteRequest = vi.fn(async () => undefined);
-    attachRestMock(client, { get, post, put, delete: deleteRequest });
+    const { delete: deleteRequest } = attachRestMock(client, { get, post, put });
 
     await client.deployCommands();
 
@@ -184,8 +177,7 @@ describe("Client.deployCommands", () => {
     const post = vi.fn(async () => {
       throw new Error("Discord unavailable");
     });
-    const deleteRequest = vi.fn(async () => undefined);
-    attachRestMock(client, { get, post, delete: deleteRequest });
+    const { delete: deleteRequest } = attachRestMock(client, { get, post });
 
     await expect(client.deployCommands()).rejects.toThrow("Discord unavailable");
 
@@ -193,19 +185,15 @@ describe("Client.deployCommands", () => {
   });
 
   it("patches changed option localization maps", async () => {
+    const option = () => ({
+      type: 3 as const,
+      name: "value",
+      description: "Value",
+      name_localizations: { de: "wert" },
+      description_localizations: { de: "Wert" },
+    });
     const client = createInternalTestClient([
-      createTestCommand({
-        name: "one",
-        options: [
-          {
-            type: 3,
-            name: "value",
-            name_localizations: { de: "wert" },
-            description: "Value",
-            description_localizations: { de: "Wert" },
-          },
-        ],
-      }),
+      createTestCommand({ name: "one", options: [option()] }),
     ]);
     const get = vi.fn(async () => [
       {
@@ -225,10 +213,7 @@ describe("Client.deployCommands", () => {
         ],
       },
     ]);
-    const patch = vi.fn(async () => undefined);
-    const post = vi.fn(async () => undefined);
-    const deleteRequest = vi.fn(async () => undefined);
-    attachRestMock(client, { get, patch, post, delete: deleteRequest });
+    const { patch, post, delete: deleteRequest } = attachRestMock(client, { get });
 
     await client.deployCommands();
 
@@ -237,15 +222,7 @@ describe("Client.deployCommands", () => {
         name: "one",
         description: "one command",
         type: ApplicationCommandType.ChatInput,
-        options: [
-          {
-            type: 3,
-            name: "value",
-            name_localizations: { de: "wert" },
-            description: "Value",
-            description_localizations: { de: "Wert" },
-          },
-        ],
+        options: [option()],
         integration_types: [0, 1],
         contexts: [0, 1, 2],
         default_member_permissions: null,
@@ -263,28 +240,20 @@ describe("Client.deployCommands", () => {
         hashes.set(key, value);
       },
     };
-    const first = createInternalTestClient([createTestCommand({ name: "one" })], {
-      commandDeployHashStore,
-    });
-    const firstGet = vi.fn(async () => []);
-    const firstPost = vi.fn(async () => undefined);
-    attachRestMock(first, { get: firstGet, post: firstPost });
-
-    await first.deployCommands();
-
-    const second = createInternalTestClient([createTestCommand({ name: "one" })], {
-      commandDeployHashStore,
-    });
-    const secondGet = vi.fn(async () => []);
-    const secondPost = vi.fn(async () => undefined);
-    attachRestMock(second, { get: secondGet, post: secondPost });
-
-    await second.deployCommands();
-
-    expect(firstGet).toHaveBeenCalledTimes(1);
-    expect(firstPost).toHaveBeenCalledTimes(1);
-    expect(secondGet).not.toHaveBeenCalled();
-    expect(secondPost).not.toHaveBeenCalled();
+    const deploy = async () => {
+      const client = createInternalTestClient([createTestCommand({ name: "one" })], {
+        commandDeployHashStore,
+      });
+      const rest = attachRestMock(client, { get: vi.fn(async () => []) });
+      await client.deployCommands();
+      return rest;
+    };
+    const first = await deploy();
+    const second = await deploy();
+    expect(first.get).toHaveBeenCalledTimes(1);
+    expect(first.post).toHaveBeenCalledTimes(1);
+    expect(second.get).not.toHaveBeenCalled();
+    expect(second.post).not.toHaveBeenCalled();
   });
 
   it("caches REST object fetches briefly and invalidates from gateway updates", async () => {
@@ -303,18 +272,11 @@ describe("Client.deployCommands", () => {
 });
 
 describe("Client gateway event queue", () => {
-  function createQueuedClient(params: {
-    listeners: AnyListener[];
-    eventQueue?: ConstructorParameters<typeof Client>[0]["eventQueue"];
-  }): Client {
-    return new Client(
-      {
-        clientId: "app1",
-        token: "token",
-        eventQueue: params.eventQueue,
-      },
-      { listeners: params.listeners },
-    );
+  function createQueuedClient(
+    listeners: AnyListener[],
+    eventQueue: ConstructorParameters<typeof Client>[0]["eventQueue"],
+  ): Client {
+    return new Client({ clientId: "app1", token: "token", eventQueue }, { listeners });
   }
 
   it("holds a timed-out listener slot until its underlying promise resolves", async () => {
@@ -335,10 +297,7 @@ describe("Client gateway event queue", () => {
         started.push("second");
       }),
     } satisfies AnyListener;
-    const client = createQueuedClient({
-      listeners: [first, second],
-      eventQueue: { listenerTimeout: 10, maxConcurrency: 1 },
-    });
+    const client = createQueuedClient([first, second], { listenerTimeout: 10, maxConcurrency: 1 });
 
     const dispatch = client.dispatchGatewayEvent("READY", {});
     await vi.advanceTimersByTimeAsync(10);
@@ -364,10 +323,7 @@ describe("Client gateway event queue", () => {
       type: "READY",
       handle: vi.fn(async () => await settlement.promise),
     } satisfies AnyListener;
-    const client = createQueuedClient({
-      listeners: [listener],
-      eventQueue: { listenerTimeout: 10, maxConcurrency: 1 },
-    });
+    const client = createQueuedClient([listener], { listenerTimeout: 10, maxConcurrency: 1 });
 
     const dispatch = client.dispatchGatewayEvent("READY", {});
     await vi.advanceTimersByTimeAsync(10);
@@ -398,9 +354,10 @@ describe("Client gateway event queue", () => {
           }),
       ),
     } satisfies AnyListener;
-    const client = createQueuedClient({
-      listeners: [listener],
-      eventQueue: { maxConcurrency: 1, maxQueueSize: 1, listenerTimeout: 1_000 },
+    const client = createQueuedClient([listener], {
+      maxConcurrency: 1,
+      maxQueueSize: 1,
+      listenerTimeout: 1_000,
     });
 
     const first = client.dispatchGatewayEvent("READY", {});
