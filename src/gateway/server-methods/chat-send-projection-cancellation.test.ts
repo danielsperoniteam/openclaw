@@ -9,7 +9,7 @@ import {
   replaceSessionEntry,
   resolveSessionTranscriptDatabasePath,
 } from "../../config/sessions/session-accessor.js";
-import * as transcriptReconcile from "../../config/sessions/session-transcript-reconcile.js";
+import * as reconcile from "../../config/sessions/session-transcript-reconcile.js";
 import { useReconcileWorkerObserver } from "../../config/sessions/session-transcript-reconcile.test-support.js";
 import { withOwnedSessionTranscriptWrites } from "../../config/sessions/transcript-write-context.js";
 import {
@@ -32,8 +32,8 @@ const observer = useReconcileWorkerObserver();
 
 it.each(["reply-observation", "commentary-media"] as const)(
   "cancels %s projection waiting without cancelling the shared rebuild or losing the answer",
-  async (scenario) => {
-    await withOpenClawTestState({ label: "chat-projection-cancel" }, async () => {
+  (scenario) =>
+    withOpenClawTestState({ label: "chat-projection-cancel" }, async () => {
       setRuntimeConfigSnapshot({});
       const runId = "projection-run";
       const scope = {
@@ -67,7 +67,7 @@ it.each(["reply-observation", "commentary-media"] as const)(
         },
         userTurnRecorder: recorder,
       });
-      const transcriptLifecycle = createEmbeddedAttemptTranscriptLifecycle({
+      const lifecycle = createEmbeddedAttemptTranscriptLifecycle({
         runId,
         sessionId: scope.sessionId,
       });
@@ -81,12 +81,12 @@ it.each(["reply-observation", "commentary-media"] as const)(
           .run();
       if (scenario === "commentary-media") {
         markRebuilding();
-        await transcriptReconcile.reconcileSessionTranscriptIndexes(databaseOptions);
+        await reconcile.reconcileSessionTranscriptIndexes(databaseOptions);
       }
       const enteredWait = createDeferred();
-      const waitForProjection = transcriptReconcile.waitForSessionTranscriptProjection;
+      const waitForProjection = reconcile.waitForSessionTranscriptProjection;
       const waiting = vi
-        .spyOn(transcriptReconcile, "waitForSessionTranscriptProjection")
+        .spyOn(reconcile, "waitForSessionTranscriptProjection")
         .mockImplementation((...args) => {
           const result = waitForProjection(...args);
           enteredWait.resolve();
@@ -141,7 +141,7 @@ it.each(["reply-observation", "commentary-media"] as const)(
             {
               sessionTarget: scope,
               assertCommitAllowed: () => controller.signal.throwIfAborted(),
-              withTranscriptWrite: (run) => transcriptLifecycle.withTranscriptWrite(run),
+              withTranscriptWrite: lifecycle.withTranscriptWrite,
             },
             async () => {
               dispatch.captureAgentTranscriptStart();
@@ -149,13 +149,13 @@ it.each(["reply-observation", "commentary-media"] as const)(
                 appendTranscriptMessageSync(scope, { eventId: "answer", message }),
               ).toMatchObject({ ok: true });
               markRebuilding();
-              transcriptReconcile.startSessionTranscriptIndexReconcile(databaseOptions);
+              reconcile.startSessionTranscriptIndexReconcile(databaseOptions);
               if (scenario === "reply-observation") {
                 return await observeReplyDelivery(dispatch.resolveReplyDelivery, 0, warn);
               }
               emitSessionTranscriptUpdate({ target: scope, messageId: "answer", message, runId });
               await enteredWait.promise;
-              await transcriptLifecycle.beginCleanup();
+              await lifecycle.beginCleanup();
               return "finished";
             },
           ),
@@ -172,9 +172,7 @@ it.each(["reply-observation", "commentary-media"] as const)(
         await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
         expect(await operation).toBe(scenario === "reply-observation" ? "pending" : "finished");
         expect(warn).toHaveBeenCalledOnce();
-        expect(transcriptReconcile.isSessionTranscriptIndexReconcileRunning(databaseOptions)).toBe(
-          true,
-        );
+        expect(reconcile.isSessionTranscriptIndexReconcileRunning(databaseOptions)).toBe(true);
         expect(dispatch.hasAppendedWebchatAgentMedia()).toBe(false);
       } finally {
         controller.abort(new Error("Projection cancellation fixture cleanup"));
@@ -182,9 +180,9 @@ it.each(["reply-observation", "commentary-media"] as const)(
         observer.onTask = undefined;
         holdProjection = false;
         resumeProjection();
-        await transcriptReconcile.waitForSessionTranscriptIndexReconcile(databaseOptions);
+        await reconcile.waitForSessionTranscriptIndexReconcile(databaseOptions);
         await operation;
-        await transcriptLifecycle.dispose();
+        await lifecycle.dispose();
       }
       expect(
         openOpenClawAgentDatabase(databaseOptions)
@@ -198,6 +196,5 @@ it.each(["reply-observation", "commentary-media"] as const)(
       );
       const nextInput = inputRecorder("Continue with the next fixture", "successor:user");
       expect(await nextInput.persistApproved()).toMatchObject({ appended: true });
-    });
-  },
+    }),
 );

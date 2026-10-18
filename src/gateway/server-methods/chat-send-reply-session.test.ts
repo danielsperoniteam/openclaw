@@ -215,16 +215,12 @@ it.each(["unchanged", "foreign-lifecycle", "physical-replacement"] as const)(
                 });
                 const databasePath = resolveSessionTranscriptDatabasePath(scope);
                 if (change === "foreign-lifecycle") {
-                  const foreign = new DatabaseSync(databasePath);
-                  try {
-                    foreign
-                      .prepare(
-                        "UPDATE session_nodes SET entry_json = json_set(entry_json, '$.lifecycleRevision', ?) WHERE session_key = ?",
-                      )
-                      .run("foreign-successor", scope.sessionKey);
-                  } finally {
-                    foreign.close();
-                  }
+                  using foreign = new DatabaseSync(databasePath);
+                  foreign
+                    .prepare(
+                      "UPDATE session_nodes SET entry_json = json_set(entry_json, '$.lifecycleRevision', ?) WHERE session_key = ?",
+                    )
+                    .run("foreign-successor", scope.sessionKey);
                 } else if (change === "physical-replacement") {
                   await closeOpenClawAgentDatabaseByPathAsync(databasePath, scope.agentId);
                   const replacement = state.path("terminal-replacement.sqlite");
