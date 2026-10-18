@@ -71,7 +71,12 @@ export type MenuEntry =
   | { kind: "content"; id: string; content: JSX.Element }
   | { kind: "group"; id: string; class?: string; items: readonly MenuEntry[] };
 
-export type MenuHandle = { overlay: Overlay; open(): boolean; close(): boolean };
+export type MenuHandle = {
+  overlay: Overlay;
+  open(): boolean;
+  close(): boolean;
+  focusFirst(): void;
+};
 
 /** Close through the owner even when a menu surface has moved into the top layer. */
 export function closeMenusWithin(
@@ -361,6 +366,7 @@ export function Menu(props: BranchProps): JSX.Element {
           overlay,
           open: () => overlay.request(true, "first"),
           close: () => overlay.request(false, "return"),
+          focusFirst: () => ownItems(overlay.surface)[0]?.focus({ preventScroll: true }),
         }),
       setOpened,
     );
