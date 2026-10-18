@@ -58,10 +58,16 @@ describe("session store target selection", () => {
       const expected = Object.entries(expectedPaths[layout]).flatMap(([agentId, paths]) =>
         paths.map((pathname) => ({ agentId, path: pathname })),
       );
+      for (const agentId of ["openclaw", "crestodian"]) {
+        expected.push({
+          agentId,
+          path: path.join(root, "agents", agentId, "agent", "openclaw-agent.sqlite"),
+        });
+      }
       const all = resolveConfiguredAgentDatabaseTargets(cfg, { env, registeredDatabases: [] });
       expect(all).toHaveLength(expected.length);
       expect(all).toEqual(expect.arrayContaining(expected));
-      for (const agentId of ["first", "second", "acp-only", "missing"]) {
+      for (const agentId of ["first", "second", "acp-only", "openclaw", "crestodian", "missing"]) {
         expect(
           resolveConfiguredAgentDatabaseTargets(cfg, { env, registeredDatabases: [], agentId }),
         ).toEqual(expected.filter((target) => target.agentId === agentId));
