@@ -1,4 +1,4 @@
-import { createMemo, For, Match, onCleanup, Show, Switch, untrack } from "solid-js";
+import { createMemo, For, Match, onCleanup, onSettled, Show, Switch, untrack } from "solid-js";
 import { pathForRoute } from "../app-route-paths.ts";
 import type { ApplicationContext } from "../app/context-types.ts";
 import type { ExecApprovalDecision } from "../app/exec-approval.ts";
@@ -14,6 +14,7 @@ import {
   projectSessions,
 } from "../lib/reactive/domain-capabilities.ts";
 import { registerEnglishCatalog, t } from "../lib/reactive/i18n.ts";
+import { registerModalSurface } from "./overlay-registry.ts";
 import "../styles/sidebar-menus.css";
 import "../styles/sidebar-issues.css";
 import type { SidebarAttentionDismissal } from "./sidebar-attention-dismissals.ts";
@@ -197,6 +198,8 @@ function inboxEntryIdentity(
 }
 
 export function SidebarAttentionPanel(props: SidebarAttentionPanelParams) {
+  let surface!: HTMLElement;
+  onSettled(() => registerModalSurface(surface));
   onCleanup(() => props.listRef?.(null));
   const context = untrack(() => props.context);
   const mentions = projectMentions(untrack(() => props.mentions));
@@ -269,6 +272,7 @@ export function SidebarAttentionPanel(props: SidebarAttentionPanelParams) {
       />
       <openclaw-menu-surface>
         <section
+          ref={(element) => (surface = element)}
           id="sidebar-issues-panel"
           class="sidebar-issues-panel"
           role="dialog"

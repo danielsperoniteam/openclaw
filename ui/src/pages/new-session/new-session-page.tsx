@@ -237,7 +237,12 @@ function PageContent(_props: { data: NewSessionRouteData | undefined }, host: Pa
       listen(
         document,
         "keydown",
-        (event) => focusChatComposerFromPrintableKeydown(host, event),
+        (event) =>
+          focusChatComposerFromPrintableKeydown(
+            host,
+            event,
+            owner.submission.composerTextarea.getTextarea(),
+          ),
         true,
       ),
       listen(document.defaultView!, "beforeunload", owner.flushDraft),

@@ -11,6 +11,7 @@ import {
   merge,
 } from "solid-js";
 import { acquireNativeOverlaySurface } from "../../lib/native-overlay-occlusion.ts";
+import { registerMenuShortcut } from "../menu-shortcuts.ts";
 import { createOverlayAnchor, type OverlayPlacement } from "../overlay-anchor.ts";
 import { createOverlay, findOverlayParent, type Overlay } from "../overlay-lifecycle.ts";
 import { containsComposed, registryFor } from "../overlay-registry.ts";
@@ -24,6 +25,7 @@ export type MenuItemBindings = Pick<
   JSX.HTMLAttributes<HTMLElement>,
   "id" | "role" | "tabindex" | "aria-label" | "aria-disabled" | "aria-checked"
 > & {
+  ref?: (element: HTMLElement) => void;
   [name: `data-${string}`]: string | number | boolean | undefined;
   onClick?: (event: MouseEvent) => void;
   onKeyDown?: (event: KeyboardEvent) => void;
@@ -259,7 +261,16 @@ export function Menu(props: BranchProps): JSX.Element {
       menuRoot.request(false, "return");
     }
   };
-  onSettled(() => overlay.bindSurface(surface));
+  onSettled(() => {
+    overlay.bindSurface(surface);
+    if (identity.parent && trigger) {
+      return registerMenuShortcut(identity.parent.surface, trigger, () => ({
+        key: props.triggerAttributes?.["data-shortcut"],
+        disabled: props.disabled === true,
+      }));
+    }
+    return undefined;
+  });
   const binding = useMenuMachine(overlay, direction, activate, identity.binding?.service, {
     ids: { trigger: identity.triggerId },
     pointerFocus: () => props.pointerFocus ?? "menu",
@@ -394,12 +405,20 @@ export function Menu(props: BranchProps): JSX.Element {
           <Show when={actionable()} fallback={fallback}>
             {(item) => {
               const Leaf = () => {
+                let element!: HTMLElement;
+                onSettled(() =>
+                  registerMenuShortcut(overlay.surface, element, () => ({
+                    key: item().attributes?.["data-shortcut"],
+                    disabled: item().disabled === true,
+                  })),
+                );
                 const Item = dynamic(() =>
                   item().href === undefined ? (item().as ?? "button") : "a",
                 );
                 // The keyed leaf retains its renderer; its live bindings carry item changes.
                 const renderCustom = untrack(() => item().render);
                 const attributes = merge((): MenuItemBindings => ({
+                  ref: (node) => (element = node),
                   ...binding.item(
                     item().id,
                     item().disabled,

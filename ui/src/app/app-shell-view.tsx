@@ -1,7 +1,8 @@
 import "../lib/toast-host.ts";
 import type { JSX as SolidJSX } from "@solidjs/web";
-import { createEffect, createMemo, createSignal, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, Show, onSettled } from "solid-js";
 import type { GatewayStatusProps } from "../components/gateway-status.ts";
+import { registerModalSurface } from "../components/overlay-registry.ts";
 import { LazySettingsSidebar } from "../components/settings-sidebar-lazy.tsx";
 import { GatewayStatus, gatewayStatusLabel } from "../components/solid/gateway-status.tsx";
 import { Icon } from "../components/solid/icon.tsx";
@@ -59,6 +60,8 @@ declare module "@solidjs/web" {
 
 export function ApplicationShell(props: { host: ShellViewHost }): SolidJSX.Element {
   let content!: HTMLElement;
+  let releaseNavDrawer: (() => void) | undefined;
+  onSettled(() => () => releaseNavDrawer?.());
   const [navResizing, setNavResizing] = createSignal(false);
   const view = createMemo(() => {
     props.host.shellRevision();
@@ -287,7 +290,11 @@ export function ApplicationShell(props: { host: ShellViewHost }): SolidJSX.Eleme
             onClick={() => props.host.closeNavDrawer({ restoreFocus: true })}
           />
           <div
-            ref={(element) => (props.host.navDrawerElement = element)}
+            ref={(element) => {
+              releaseNavDrawer?.();
+              releaseNavDrawer = registerModalSurface(element);
+              props.host.navDrawerElement = element;
+            }}
             class={["shell-nav", { "nav-drawer": view().mobileNavLayout }]}
             role={view().mobileNavLayout ? "dialog" : undefined}
             aria-modal={view().mobileNavLayout && view().navDrawerOpen ? "true" : undefined}
