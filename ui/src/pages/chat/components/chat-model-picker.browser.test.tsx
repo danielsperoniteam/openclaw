@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
-import { registerMenuShortcut } from "../../../components/menu-shortcuts.ts";
+import { registerMenuShortcuts } from "../../../components/menu-shortcuts.ts";
 import { mountSolid } from "../../../test-helpers/mount-solid.ts";
 import { flush } from "../../../test-helpers/solid-settle.ts";
 import "../../../styles/base.css";
@@ -161,7 +161,7 @@ it("leaves digit shortcuts to a nested native menu", async () => {
   item.dataset.shortcut = "1";
   item.textContent = "Nested choice";
   menu.append(item);
-  const releaseShortcut = registerMenuShortcut(menu, item, () => ({ key: "1", disabled: false }));
+  const releaseShortcut = registerMenuShortcuts(menu, () => [{ element: item, key: "1" }]);
   picker.querySelector(".chat-controls__model-menu")!.append(menu);
   menu.showPopover();
   item.focus();

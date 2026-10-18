@@ -3,22 +3,16 @@ import { registryFor } from "./overlay-registry.ts";
 
 const shortcutItems = new WeakMap<
   HTMLElement,
-  Map<HTMLElement, () => { key: string | number | boolean | undefined; disabled: boolean }>
+  () => Iterable<{ element: HTMLElement; key: string | undefined }>
 >();
 
 /** Renderers publish the same enabled shortcut elements that receive activation. */
-export function registerMenuShortcut(
+export function registerMenuShortcuts(
   surface: HTMLElement,
-  element: HTMLElement,
-  read: () => { key: string | number | boolean | undefined; disabled: boolean },
+  read: () => Iterable<{ element: HTMLElement; key: string | undefined }>,
 ): () => void {
-  let items = shortcutItems.get(surface);
-  if (!items) {
-    items = new Map();
-    shortcutItems.set(surface, items);
-  }
-  items.set(element, read);
-  return () => items.delete(element);
+  shortcutItems.set(surface, read);
+  return () => shortcutItems.delete(surface);
 }
 
 function shortcutInSurface(surface: HTMLElement, key: string): HTMLElement | undefined {
@@ -28,11 +22,9 @@ function shortcutInSurface(surface: HTMLElement, key: string): HTMLElement | und
   ) {
     return undefined;
   }
-  for (const [element, read] of shortcutItems.get(surface) ?? []) {
-    const item = read();
+  for (const { element, key: advertisedKey } of shortcutItems.get(surface)?.() ?? []) {
     if (
-      String(item.key ?? "") === key &&
-      !item.disabled &&
+      advertisedKey === key &&
       !element.matches(":disabled") &&
       element.getAttribute("aria-disabled") !== "true"
     ) {

@@ -1,4 +1,4 @@
-import { registerMenuShortcut } from "../../../components/menu-shortcuts.ts";
+import { registerMenuShortcuts } from "../../../components/menu-shortcuts.ts";
 import { generateUUID } from "../../../lib/uuid.ts";
 
 const shortcutCleanups = new WeakMap<HTMLElement, () => void>();
@@ -76,9 +76,9 @@ export function handleModelOptionMouseEnter(event: MouseEvent): void {
 // in styles/chat/composer.css hides these keycaps while the search input has focus.
 function updateModelShortcuts(menu: HTMLElement, rows: readonly HTMLButtonElement[]): void {
   shortcutCleanups.get(menu)?.();
+  shortcutCleanups.delete(menu);
   const details = menu.closest<HTMLDetailsElement>(".chat-controls__model-picker");
-  const releases: Array<() => void> = [];
-  shortcutCleanups.set(menu, () => releases.forEach((release) => release()));
+  const shortcuts: Array<{ element: HTMLElement; key: string }> = [];
   menu.querySelectorAll<HTMLElement>("[data-chat-model-shortcut-number]").forEach((shortcut) => {
     shortcut.hidden = true;
     shortcut.removeAttribute("data-shortcut");
@@ -92,15 +92,14 @@ function updateModelShortcuts(menu: HTMLElement, rows: readonly HTMLButtonElemen
     shortcut.hidden = false;
     shortcut.setAttribute("data-shortcut", String(index + 1));
     shortcut.setAttribute("data-chat-model-shortcut-number", String(index + 1));
-    if (details) {
-      releases.push(
-        registerMenuShortcut(details, row, () => ({
-          key: String(index + 1),
-          disabled: !isSelectableModelRow(row),
-        })),
-      );
-    }
+    shortcuts.push({ element: row, key: String(index + 1) });
   });
+  if (details) {
+    shortcutCleanups.set(
+      menu,
+      registerMenuShortcuts(details, () => shortcuts),
+    );
+  }
 }
 
 function modelMatchRank(row: HTMLButtonElement, query: string): number | null {
