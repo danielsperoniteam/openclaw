@@ -39,4 +39,4 @@ Own local tooling, script wrappers, generated-artifact helper rules.
 
 - Fs-safe dependency trouble: follow [on-demand vendoring instructions](vendor-fs-safe.md); vendor contents local, registry dependencies default.
 - Trusted normal checkout missing dependencies: `pnpm install --frozen-lockfile`, retry once before diagnosing code defect.
-- Formatting: installed `oxfmt`; typechecking: repository `tsgo` lanes. Scope: `pnpm changed:lanes --json`; targeted tests/checks. Avoiding worktree reconciliation: `node scripts/run-vitest.mjs` with ready dependencies.
+- Formatting: installed `oxfmt`; typechecking: repository `tsgo` lanes (tsrs by default; `OPENCLAW_TYPECHECKER=tsgo` selects tsgo). Scope: `pnpm changed:lanes --json`; targeted tests/checks. Avoiding worktree reconciliation: `node scripts/run-vitest.mjs` with ready dependencies.

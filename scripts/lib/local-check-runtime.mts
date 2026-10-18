@@ -170,9 +170,30 @@ export function createDeclarationInputBoundary(cwd: string) {
   };
 }
 
-/** Select the native type checker this host can run. */
-export function resolveTypeCheckTool(platform = process.platform, arch = process.arch) {
-  return TSRS_PLATFORMS.has(`${platform}-${arch}`) ? "tsrs" : "tsgo";
+/**
+ * Select the repo type checker: tsrs where it ships a binary, tsgo elsewhere.
+ * OPENCLAW_TYPECHECKER=tsgo forces the tsgo fallback (full release validation
+ * uses it to re-check the release with tsgo).
+ */
+export function resolveTypeCheckTool(
+  platform = process.platform,
+  arch = process.arch,
+  env: NodeJS.ProcessEnv = process.env,
+) {
+  const requested = env.OPENCLAW_TYPECHECKER?.trim() || undefined;
+  const supportsTsrs = TSRS_PLATFORMS.has(`${platform}-${arch}`);
+  if (requested === "tsgo" || (requested === undefined && !supportsTsrs)) {
+    return "tsgo";
+  }
+  if (requested !== undefined && requested !== "tsrs") {
+    throw new Error(`OPENCLAW_TYPECHECKER must be tsrs or tsgo; got ${JSON.stringify(requested)}.`);
+  }
+  if (!supportsTsrs) {
+    throw new Error(
+      `tsrs has no binary for ${platform}-${arch}; unset OPENCLAW_TYPECHECKER to use tsgo.`,
+    );
+  }
+  return "tsrs";
 }
 
 /** Resolve a repo tool from this worktree or the primary checkout's installed toolchain. */

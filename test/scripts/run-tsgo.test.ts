@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { resolveTypeCheckTool } from "../../scripts/lib/local-check-runtime.mts";
 import {
   createSparseTsgoSkipEnv,
   getSparseTsgoGuardError,
@@ -48,7 +49,11 @@ it("refuses a shared install without creating dependency links", () => {
   write(root, "package.json", '{"private":true}\n');
   write(root, "pnpm-workspace.yaml", "packages: []\n");
   const sharedInstall = fs.realpathSync.native(createTempDir("native-shared-install-"));
-  const nativeRoot = path.join(sharedInstall, "node_modules/tsrs");
+  const nativeRoot = path.join(
+    sharedInstall,
+    "node_modules",
+    resolveTypeCheckTool() === "tsrs" ? "tsrs" : "typescript",
+  );
   const resolverExecuted = path.join(primary, "resolver-executed");
   write(nativeRoot, "package.json", '{"type":"module"}\n');
   write(

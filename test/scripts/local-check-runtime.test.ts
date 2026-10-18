@@ -39,10 +39,21 @@ function makeEnv(overrides: NodeJS.ProcessEnv = {}) {
 }
 
 it("keeps tsgo type checking on hosts without a tsrs binary", () => {
-  expect(resolveTypeCheckTool("linux", "x64")).toBe("tsrs");
-  expect(resolveTypeCheckTool("darwin", "arm64")).toBe("tsrs");
-  expect(resolveTypeCheckTool("win32", "x64")).toBe("tsgo");
-  expect(resolveTypeCheckTool("darwin", "x64")).toBe("tsgo");
+  expect(resolveTypeCheckTool("linux", "x64", {})).toBe("tsrs");
+  expect(resolveTypeCheckTool("darwin", "arm64", {})).toBe("tsrs");
+  expect(resolveTypeCheckTool("win32", "x64", {})).toBe("tsgo");
+  expect(resolveTypeCheckTool("darwin", "x64", {})).toBe("tsgo");
+});
+
+it("lets OPENCLAW_TYPECHECKER force the tsgo fallback", () => {
+  expect(resolveTypeCheckTool("linux", "x64", { OPENCLAW_TYPECHECKER: "tsgo" })).toBe("tsgo");
+  expect(resolveTypeCheckTool("linux", "x64", { OPENCLAW_TYPECHECKER: " tsrs " })).toBe("tsrs");
+  expect(() => resolveTypeCheckTool("win32", "x64", { OPENCLAW_TYPECHECKER: "tsrs" })).toThrow(
+    /no binary for win32-x64/,
+  );
+  expect(() => resolveTypeCheckTool("linux", "x64", { OPENCLAW_TYPECHECKER: "tsc" })).toThrow(
+    /must be tsrs or tsgo/,
+  );
 });
 
 it("resolves repo tools from the primary checkout for dependency-less worktrees", () => {
