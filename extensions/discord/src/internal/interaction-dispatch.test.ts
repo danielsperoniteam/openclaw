@@ -7,7 +7,11 @@ import {
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { describe, expect, it, vi } from "vitest";
 import { Command, CommandWithSubcommands, type CommandOptions } from "./commands.js";
-import type { AutocompleteInteraction, CommandInteraction } from "./interactions.js";
+import type {
+  AutocompleteInteraction,
+  CommandInteraction,
+  RawInteraction,
+} from "./interactions.js";
 import {
   attachRestMock,
   createInternalComponentInteractionPayload,
@@ -17,24 +21,40 @@ import {
 
 const identity = { id: "interaction1", token: "token1" };
 
-function createThrowingCommandClient(run: (interaction: CommandInteraction) => unknown) {
-  return createInternalTestClient([
-    new (class extends Command {
-      override name = "boom";
-      override description = "Throwing command";
-      override defer = true;
-      run = run;
-    })(),
-  ]);
+function command(
+  name: string,
+  run: (interaction: CommandInteraction) => unknown,
+  options?: CommandOptions,
+  defer = false,
+  ephemeral = false,
+) {
+  return new (class extends Command {
+    name = name;
+    override description = name;
+    override options = options;
+    override defer = defer;
+    override ephemeral = ephemeral;
+    run = run;
+  })();
 }
 
-function dispatchTestCommand(client: ReturnType<typeof createInternalTestClient>) {
+function dispatch(
+  client: ReturnType<typeof createInternalTestClient>,
+  name = "boom",
+  options?: NonNullable<RawInteraction["data"]>["options"],
+  type = InteractionType.ApplicationCommand,
+) {
   return client.handleInteraction(
     createInternalInteractionPayload({
       ...identity,
-      data: { id: "command1", name: "boom", type: 1 },
+      type,
+      data: { id: "command1", name, type: 1, options },
     }),
   );
+}
+
+function throwingClient(run: (interaction: CommandInteraction) => unknown) {
+  return createInternalTestClient([command("boom", run, undefined, true)]);
 }
 
 describe("dispatchInteraction", () => {
@@ -43,32 +63,21 @@ describe("dispatchInteraction", () => {
     const run = vi.fn(async () => {
       throw new Error("prepared model catalog owner config was replaced during the read");
     });
-    const client = createThrowingCommandClient(run);
+    const client = throwingClient(run);
     const { patch } = attachRestMock(client, {});
 
-    await expect(dispatchTestCommand(client)).rejects.toThrow(
+    await expect(dispatch(client)).rejects.toThrow(
       "prepared model catalog owner config was replaced",
     );
 
     expect(run).toHaveBeenCalledTimes(1);
-    expect(patch).toHaveBeenCalledWith(
-      "/webhooks/app1/token1/messages/%40original",
-      expect.objectContaining({
-        body: expect.objectContaining({
-          content: expect.stringContaining("failed"),
-          allowed_mentions: { parse: [] },
-        }),
-      }),
-    );
-    // The exception text must not reach the channel; it carries the agent dir.
-    expect(patch).not.toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        body: expect.objectContaining({
-          content: expect.stringContaining("prepared model catalog"),
-        }),
-      }),
-    );
+    expect(patch.mock.calls).toMatchObject([
+      [
+        "/webhooks/app1/token1/messages/%40original",
+        { body: { content: expect.stringContaining("failed"), allowed_mentions: { parse: [] } } },
+      ],
+    ]);
+    expect(JSON.stringify(patch.mock.calls)).not.toContain("prepared model catalog");
   });
 
   it("does not touch the original response when a component acknowledgement fails", async () => {
@@ -107,10 +116,10 @@ describe("dispatchInteraction", () => {
       void interaction.followUp("progress").catch(() => undefined);
       return Promise.reject(new Error("failed with a follow-up in flight"));
     });
-    const client = createThrowingCommandClient(run);
+    const client = throwingClient(run);
     attachRestMock(client, { post, patch });
 
-    const handled = dispatchTestCommand(client);
+    const handled = dispatch(client);
     await vi.waitFor(() => expect(post).toHaveBeenCalledTimes(2));
     followUp.resolve(undefined);
 
@@ -123,40 +132,22 @@ describe("dispatchInteraction", () => {
     const optionAutocomplete = vi.fn(async (interaction: AutocompleteInteraction) => {
       await interaction.respond([{ name: "alpha", value: "alpha" }]);
     });
-    class OptionAutocompleteCommand extends Command {
-      override name = "choose";
-      override description = "Choose";
-      override options: CommandOptions = [
+    const client = createInternalTestClient([
+      command("choose", () => {}, [
         {
           name: "model",
           description: "Model",
           type: ApplicationCommandOptionType.String,
           autocomplete: optionAutocomplete,
         },
-      ];
-      run() {}
-    }
-    const client = createInternalTestClient([new OptionAutocompleteCommand()]);
+      ]),
+    ]);
     const { post } = attachRestMock(client, {});
-
-    await client.handleInteraction(
-      createInternalInteractionPayload({
-        ...identity,
-        type: InteractionType.ApplicationCommandAutocomplete,
-        data: {
-          id: "command1",
-          name: "choose",
-          type: 1,
-          options: [
-            {
-              name: "model",
-              type: ApplicationCommandOptionType.String,
-              value: "a",
-              focused: true,
-            },
-          ],
-        },
-      }),
+    await dispatch(
+      client,
+      "choose",
+      [{ name: "model", type: ApplicationCommandOptionType.String, value: "a", focused: true }],
+      InteractionType.ApplicationCommandAutocomplete,
     );
 
     expect(optionAutocomplete).toHaveBeenCalledTimes(1);
@@ -172,32 +163,14 @@ describe("dispatchInteraction", () => {
     const run = vi.fn(async (interaction: CommandInteraction) => {
       await interaction.reply("joined");
     });
-    class JoinCommand extends Command {
-      override name = "join";
-      override description = "Join";
-      override defer = true;
-      override ephemeral = true;
-      run = run;
-    }
     class VoiceCommand extends CommandWithSubcommands {
       override name = "vc";
       override description = "Voice";
-      subcommands = [new JoinCommand()];
+      subcommands = [command("join", run, undefined, true, true)];
     }
     const client = createInternalTestClient([new VoiceCommand()]);
     const { post, patch } = attachRestMock(client, {});
-
-    await client.handleInteraction(
-      createInternalInteractionPayload({
-        ...identity,
-        data: {
-          id: "command1",
-          name: "vc",
-          type: 1,
-          options: [{ name: "join", type: ApplicationCommandOptionType.Subcommand }],
-        },
-      }),
-    );
+    await dispatch(client, "vc", [{ name: "join", type: ApplicationCommandOptionType.Subcommand }]);
 
     expect(post).toHaveBeenNthCalledWith(1, "/interactions/interaction1/token1/callback", {
       body: {

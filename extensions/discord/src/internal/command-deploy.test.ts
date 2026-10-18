@@ -56,10 +56,7 @@ describe("commandsEqual", () => {
     expect(commandsEqual(current, localized)).toBe(true);
   });
 });
-/**
- * Regression for #77359: persisted hashes are scoped by Discord application id.
- * Identical command sets for separate bots must never suppress each other's deploy.
- */
+// #77359: identical command sets must not suppress another application’s deploy.
 describe("DiscordCommandDeployer SQLite cache", () => {
   class StaticCommand extends Command {
     name = "ping";
@@ -120,37 +117,25 @@ describe("DiscordCommandDeployer SQLite cache", () => {
     ]);
   });
 
-  test("treats a SQLite lookup failure as a cache miss and repairs the row", async () => {
-    const register = vi.fn(async () => undefined);
-    const store: DiscordCommandDeployHashStore = {
-      lookup: vi.fn(async () => {
-        throw new Error("database unavailable");
-      }),
-      register,
-    };
-    const rest = createRest();
-
-    await deployer(rest, store).deploy();
-
-    expect(rest.get).toHaveBeenCalledTimes(1);
-    expect(rest.post).toHaveBeenCalledTimes(1);
-    expect(register).toHaveBeenCalledOnce();
-  });
-
-  test("keeps successful deploys successful when SQLite persistence fails", async () => {
-    const store: DiscordCommandDeployHashStore = {
-      lookup: vi.fn(async () => undefined),
-      register: vi.fn(async () => {
-        throw new Error("database unavailable");
-      }),
-    };
-    const rest = createRest();
-    const cached = deployer(rest, store);
-    await cached.deploy();
-    await cached.deploy();
-
-    expect(rest.get).toHaveBeenCalledTimes(1);
-    expect(rest.post).toHaveBeenCalledTimes(1);
-    expect(store.register).toHaveBeenCalledOnce();
-  });
+  test.each([
+    { failure: "lookup", deployments: 1 },
+    { failure: "register", deployments: 2 },
+  ] as const)(
+    "keeps deployments working after SQLite $failure fails",
+    async ({ failure, deployments }) => {
+      const store = {
+        lookup: vi.fn(async () => undefined),
+        register: vi.fn(async () => undefined),
+      };
+      store[failure].mockRejectedValue(new Error("database unavailable"));
+      const rest = createRest();
+      const cached = deployer(rest, store);
+      for (let index = 0; index < deployments; index += 1) {
+        await cached.deploy();
+      }
+      expect(rest.get).toHaveBeenCalledTimes(1);
+      expect(rest.post).toHaveBeenCalledTimes(1);
+      expect(store.register).toHaveBeenCalledOnce();
+    },
+  );
 });

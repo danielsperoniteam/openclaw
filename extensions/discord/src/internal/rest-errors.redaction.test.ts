@@ -1,4 +1,6 @@
-import { createServer, type Server } from "node:http";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   DiscordError,
@@ -7,13 +9,13 @@ import {
   RequestClient,
 } from "./rest.js";
 
-async function captureError(promise: Promise<unknown>): Promise<unknown> {
-  try {
-    await promise;
-  } catch (error) {
-    return error;
-  }
-  throw new Error("expected request to fail");
+async function captureError<T extends DiscordError>(
+  promise: Promise<unknown>,
+  type: abstract new (...args: never[]) => T,
+): Promise<T> {
+  const error = await promise.catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(type);
+  return error as T;
 }
 
 const token = ["MTAxMjM0NTY3ODkwMTIzNDU2", "discord", "credential", "fixture"].join(".");
@@ -38,60 +40,54 @@ function errorBody(body: unknown) {
 
 describe("Discord REST error redaction", () => {
   it("redacts reflected credentials while preserving Discord error metadata", async () => {
-    const server = await new Promise<Server>((resolve, reject) => {
-      const srv = createServer((req, res) => {
-        const authorization = req.headers.authorization;
-        if (!authorization) {
-          res.writeHead(500).end();
-          return;
-        }
-        const isPlainText = req.url?.endsWith("/plain-text") ?? false;
-        if (isPlainText) {
-          res.writeHead(502, { "Content-Type": "text/plain" });
-          res.end(`Proxy rejected request; Authorization: ${authorization}`);
-          return;
-        }
-        const isSuccess = req.url?.endsWith("/success") ?? false;
-        const hasReflectedRateLimitHeaders =
-          req.url?.endsWith("/rate-limit-reflected-headers") ?? false;
-        const isRateLimit =
-          hasReflectedRateLimitHeaders || (req.url?.endsWith("/rate-limit") ?? false);
-        const responseBody = isSuccess
-          ? { ok: true, safe: "success diagnostic" }
-          : isRateLimit
-            ? {
-                message: `Rate limited; Authorization: ${authorization}`,
-                retry_after: 0.25,
-                global: false,
-                code: 20_028,
-              }
-            : {
-                message: `Voice request rejected; Authorization: ${authorization}`,
-                code: 10_065,
-                request: {
-                  headers: { authorization },
-                  numericAuthorization: { authorization: 812_345_678_901_234 },
-                  nestedAuthorization: {
-                    authorization: { value: authorization, [token]: "rejected token key" },
-                  },
-                  reflectedKeys: { [`Authorization: ${authorization}`]: "rejected" },
-                  url: `https://discord.example/callback?token=${token}`,
+    const server = createServer((req, res) => {
+      const authorization = req.headers.authorization;
+      if (!authorization) {
+        res.writeHead(500).end();
+        return;
+      }
+      const endpoint = req.url?.split("/").at(-1);
+      if (endpoint === "plain-text") {
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end(`Proxy rejected request; Authorization: ${authorization}`);
+        return;
+      }
+      const isSuccess = endpoint === "success";
+      const reflected = endpoint === "rate-limit-reflected-headers";
+      const isRateLimit = reflected || endpoint === "rate-limit";
+      const responseBody = isSuccess
+        ? { ok: true, safe: "success diagnostic" }
+        : isRateLimit
+          ? {
+              message: `Rate limited; Authorization: ${authorization}`,
+              retry_after: 0.25,
+              global: false,
+              code: 20_028,
+            }
+          : {
+              message: `Voice request rejected; Authorization: ${authorization}`,
+              code: 10_065,
+              request: {
+                headers: { authorization },
+                numericAuthorization: { authorization: 812_345_678_901_234 },
+                nestedAuthorization: {
+                  authorization: { value: authorization, [token]: "rejected token key" },
                 },
-                safe: "voice diagnostic",
-              };
-        res.writeHead(isSuccess ? 200 : isRateLimit ? 429 : 401, {
-          "Content-Type": "application/json",
-          "X-RateLimit-Bucket": hasReflectedRateLimitHeaders ? authorization : "test-bucket",
-          "X-RateLimit-Scope": hasReflectedRateLimitHeaders ? authorization : "user",
-        });
-        res.end(JSON.stringify(responseBody));
+                reflectedKeys: { [`Authorization: ${authorization}`]: "rejected" },
+                url: `https://discord.example/callback?token=${token}`,
+              },
+              safe: "voice diagnostic",
+            };
+      res.writeHead(isSuccess ? 200 : isRateLimit ? 429 : 401, {
+        "Content-Type": "application/json",
+        "X-RateLimit-Bucket": reflected ? authorization : "test-bucket",
+        "X-RateLimit-Scope": reflected ? authorization : "user",
       });
-      srv.once("error", reject);
-      srv.listen(0, "127.0.0.1", () => {
-        srv.off("error", reject);
-        resolve(srv);
-      });
+      res.end(JSON.stringify(responseBody));
     });
+    const listening = once(server, "listening");
+    server.listen(0, "127.0.0.1");
+    await listening;
 
     try {
       const address = server.address();
@@ -103,36 +99,37 @@ describe("Discord REST error redaction", () => {
         queueRequests: false,
       });
 
-      const voiceError = await captureError(client.get("/voice-state"));
-      expect(voiceError).toBeInstanceOf(DiscordError);
-      const discordError = voiceError as DiscordError;
+      const discordError = await captureError(client.get("/voice-state"), DiscordError);
       const voiceDetails = expectRedactedDetails(discordError, "voice diagnostic");
       expect(voiceDetails).not.toContain("812345678901234");
       expect(discordError.discordCode).toBe(10_065);
       expect(isUnknownDiscordVoiceStateError(discordError)).toBe(true);
 
       const webhookRateLimitPath = `/webhooks/app/${token}/rate-limit`;
-      const rateError = await captureError(client.get(webhookRateLimitPath));
-      expect(rateError).toBeInstanceOf(RateLimitError);
-      const rateLimitError = rateError as RateLimitError;
+      const rateLimitError = await captureError(client.get(webhookRateLimitPath), RateLimitError);
       expectRedactedDetails(rateLimitError);
-      expect(rateLimitError.retryAfter).toBe(0.25);
-      expect(rateLimitError.discordCode).toBe(20_028);
-      expect(rateLimitError.scope).toBe("user");
-      expect(rateLimitError.bucket).toMatch(/^sha256:[a-f0-9]{32}$/);
+      expect(rateLimitError).toMatchObject({
+        retryAfter: 0.25,
+        discordCode: 20_028,
+        scope: "user",
+        bucket: expect.stringMatching(/^sha256:[a-f0-9]{32}$/),
+      });
 
       const { scheduler } = client as unknown as { scheduler: { buckets: Map<string, unknown> } };
       const bucketCount = scheduler.buckets.size;
       expect(bucketCount).toBeGreaterThan(0);
-      const repeatedRateError = await captureError(client.get(webhookRateLimitPath));
-      expect(repeatedRateError).toBeInstanceOf(RateLimitError);
-      expect((repeatedRateError as RateLimitError).bucket).toBe(rateLimitError.bucket);
+      const repeatedRateError = await captureError(
+        client.get(webhookRateLimitPath),
+        RateLimitError,
+      );
+      expect(repeatedRateError.bucket).toBe(rateLimitError.bucket);
       expect(scheduler.buckets.size).toBe(bucketCount);
       expect(JSON.stringify([...scheduler.buckets])).not.toContain(token);
 
-      const reflectedHeaderError = await captureError(client.get("/rate-limit-reflected-headers"));
-      expect(reflectedHeaderError).toBeInstanceOf(RateLimitError);
-      const reflectedRateLimitError = reflectedHeaderError as RateLimitError;
+      const reflectedRateLimitError = await captureError(
+        client.get("/rate-limit-reflected-headers"),
+        RateLimitError,
+      );
       const reflectedHeaderDetails = JSON.stringify({
         bucket: reflectedRateLimitError.bucket,
         scope: reflectedRateLimitError.scope,
@@ -142,18 +139,15 @@ describe("Discord REST error redaction", () => {
       expect(reflectedHeaderDetails).not.toContain("discord.credential");
       expect(reflectedRateLimitError.scope).toBeNull();
 
-      const textError = await captureError(client.get("/plain-text"));
-      expect(textError).toBeInstanceOf(DiscordError);
-      expectRedactedDetails(textError as DiscordError, "Proxy rejected request");
+      const textError = await captureError(client.get("/plain-text"), DiscordError);
+      expectRedactedDetails(textError, "Proxy rejected request");
 
       await expect(client.get("/success")).resolves.toEqual({
         ok: true,
         safe: "success diagnostic",
       });
     } finally {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
+      await promisify(server.close.bind(server))();
     }
   });
 
@@ -238,7 +232,6 @@ describe("Discord REST error redaction", () => {
       "[Discord error body redacted: node limit exceeded]",
     );
     expect(error.rawBody).toMatchObject({ message: "wide diagnostic", code: 10_065 });
-    expect(error.message).toBe("wide diagnostic");
-    expect(error.discordCode).toBe(10_065);
+    expect(error).toMatchObject({ message: "wide diagnostic", discordCode: 10_065 });
   });
 });

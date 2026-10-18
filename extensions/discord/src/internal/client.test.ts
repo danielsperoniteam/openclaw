@@ -16,13 +16,34 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function createTestCommand(params: { name: string; options?: CommandOptions }): DiscordCommand {
+function createTestCommand(name: string, options?: CommandOptions): DiscordCommand {
   return new (class extends Command {
-    name = params.name;
-    override description = `${params.name} command`;
-    override options = params.options;
+    name = name;
+    override description = `${name} command`;
+    override options = options;
     run() {}
   })();
+}
+
+function liveCommand(options: Record<string, unknown>[], extra: Record<string, unknown> = {}) {
+  return {
+    id: "cmd1",
+    application_id: "app1",
+    type: ApplicationCommandType.ChatInput,
+    name: "one",
+    description: "one command",
+    options,
+    ...extra,
+  };
+}
+
+function existingCommand(command: DiscordCommand, id: string) {
+  return { ...command.serialize(), id, application_id: "app1" };
+}
+
+function wildcardParser(customId: string) {
+  return (id: string) =>
+    id === customId || id.startsWith("occomp:") ? { key: "*", data: {} } : parseCustomId(id);
 }
 
 describe("ComponentRegistry", () => {
@@ -37,18 +58,12 @@ describe("ComponentRegistry", () => {
     class WildcardButton extends Button {
       label = "button";
       customId = "__button_wildcard__";
-      override customIdParser = (id: string) =>
-        id === this.customId || id.startsWith("occomp:")
-          ? { key: "*", data: {} }
-          : parseCustomId(id);
+      override customIdParser = wildcardParser(this.customId);
     }
     class WildcardSelect extends StringSelectMenu {
       customId = "__select_wildcard__";
       options = [];
-      override customIdParser = (id: string) =>
-        id === this.customId || id.startsWith("occomp:")
-          ? { key: "*", data: {} }
-          : parseCustomId(id);
+      override customIdParser = wildcardParser(this.customId);
     }
     const button = new WildcardButton();
     const select = new WildcardSelect();
@@ -68,44 +83,38 @@ describe("ComponentRegistry", () => {
 describe("Client.deployCommands", () => {
   it("does not patch live-only command metadata or reordered unordered arrays", async () => {
     const client = createInternalTestClient([
-      createTestCommand({
-        name: "one",
-        options: [
-          {
-            type: 7,
-            name: "value",
-            description: "Value",
-            required: false,
-            channel_types: [1, 0],
-          },
-        ],
-      }),
+      createTestCommand("one", [
+        {
+          type: 7,
+          name: "value",
+          description: "Value",
+          required: false,
+          channel_types: [1, 0],
+        },
+      ]),
     ]);
     const get = vi.fn(async () => [
-      {
-        id: "cmd1",
-        application_id: "app1",
-        type: ApplicationCommandType.ChatInput,
-        name: "one",
-        name_localized: "one",
-        description: "one command",
-        description_localized: "one command",
-        options: [
+      liveCommand(
+        [
           {
-            description: "Value",
-            name: "value",
             type: 7,
+            name: "value",
+            description: "Value",
             description_localized: "Value",
             channel_types: [0, 1],
           },
         ],
-        default_member_permissions: null,
-        dm_permission: true,
-        integration_types: [1, 0],
-        contexts: [2, 1, 0],
-        guild_id: undefined,
-        version: "1",
-      },
+        {
+          name_localized: "one",
+          description_localized: "one command",
+          default_member_permissions: null,
+          dm_permission: true,
+          integration_types: [1, 0],
+          contexts: [2, 1, 0],
+          guild_id: undefined,
+          version: "1",
+        },
+      ),
     ]);
     const { patch, post, delete: deleteRequest } = attachRestMock(client, { get });
 
@@ -118,39 +127,22 @@ describe("Client.deployCommands", () => {
 
   it("bulk overwrites when a capped application cannot create a replacement", async () => {
     const retainedCommands = Array.from({ length: 99 }, (_, index) =>
-      createTestCommand({ name: `retained-${index}` }),
+      createTestCommand(`retained-${index}`),
     );
-    const replacement = createTestCommand({ name: "replacement" });
+    const replacement = createTestCommand("replacement");
     const client = createInternalTestClient([...retainedCommands, replacement]);
     const existing = [
-      ...retainedCommands.map((command, index) =>
-        Object.assign(command.serialize(), {
-          id: `retained-id-${index}`,
-          application_id: "app1",
-        }),
-      ),
-      Object.assign(createTestCommand({ name: "stale" }).serialize(), {
-        id: "stale-id",
-        application_id: "app1",
-      }),
+      ...retainedCommands.map((command, index) => existingCommand(command, `retained-id-${index}`)),
+      existingCommand(createTestCommand("stale"), "stale-id"),
     ];
-    let deployedCount = existing.length;
-    const operations: string[] = [];
     const get = vi.fn(async () => existing);
     const post = vi.fn(async () => {
-      if (deployedCount >= 100) {
-        throw new DiscordError(new Response(null, { status: 400 }), {
-          message: "Maximum number of application commands reached (100).",
-          code: 30032,
-        });
-      }
-      deployedCount += 1;
-      operations.push("post");
+      throw new DiscordError(new Response(null, { status: 400 }), {
+        message: "Maximum number of application commands reached (100).",
+        code: 30032,
+      });
     });
-    const put = vi.fn(async () => {
-      deployedCount = 100;
-      operations.push("put");
-    });
+    const put = vi.fn(async () => undefined);
     const { delete: deleteRequest } = attachRestMock(client, { get, post, put });
 
     await client.deployCommands();
@@ -159,21 +151,14 @@ describe("Client.deployCommands", () => {
     expect(post).toHaveBeenCalledWith(Routes.applicationCommands("app1"), {
       body: replacement.serialize(),
     });
-    expect(put).toHaveBeenCalledWith(Routes.applicationCommands("app1"), {
+    expect(put).toHaveBeenCalledExactlyOnceWith(Routes.applicationCommands("app1"), {
       body: [...retainedCommands, replacement].map((command) => command.serialize()),
     });
-    expect(operations).toEqual(["put"]);
-    expect(deployedCount).toBe(100);
   });
 
   it("keeps stale commands when a replacement create fails below the cap", async () => {
-    const client = createInternalTestClient([createTestCommand({ name: "replacement" })]);
-    const get = vi.fn(async () => [
-      Object.assign(createTestCommand({ name: "stale" }).serialize(), {
-        id: "stale-id",
-        application_id: "app1",
-      }),
-    ]);
+    const client = createInternalTestClient([createTestCommand("replacement")]);
+    const get = vi.fn(async () => [existingCommand(createTestCommand("stale"), "stale-id")]);
     const post = vi.fn(async () => {
       throw new Error("Discord unavailable");
     });
@@ -192,26 +177,15 @@ describe("Client.deployCommands", () => {
       name_localizations: { de: "wert" },
       description_localizations: { de: "Wert" },
     });
-    const client = createInternalTestClient([
-      createTestCommand({ name: "one", options: [option()] }),
-    ]);
+    const client = createInternalTestClient([createTestCommand("one", [option()])]);
     const get = vi.fn(async () => [
-      {
-        id: "cmd1",
-        application_id: "app1",
-        type: ApplicationCommandType.ChatInput,
-        name: "one",
-        description: "one command",
-        options: [
-          {
-            type: 3,
-            name: "value",
-            name_localizations: { de: "alter-wert" },
-            description: "Value",
-            description_localizations: { de: "Alter Wert" },
-          },
-        ],
-      },
+      liveCommand([
+        {
+          ...option(),
+          name_localizations: { de: "alter-wert" },
+          description_localizations: { de: "Alter Wert" },
+        },
+      ]),
     ]);
     const { patch, post, delete: deleteRequest } = attachRestMock(client, { get });
 
@@ -241,7 +215,7 @@ describe("Client.deployCommands", () => {
       },
     };
     const deploy = async () => {
-      const client = createInternalTestClient([createTestCommand({ name: "one" })], {
+      const client = createInternalTestClient([createTestCommand("one")], {
         commandDeployHashStore,
       });
       const rest = attachRestMock(client, { get: vi.fn(async () => []) });
@@ -272,6 +246,10 @@ describe("Client.deployCommands", () => {
 });
 
 describe("Client gateway event queue", () => {
+  function listener(handle: () => Promise<void>): AnyListener {
+    return { type: "READY", handle: vi.fn(handle) };
+  }
+
   function createQueuedClient(
     listeners: AnyListener[],
     eventQueue: ConstructorParameters<typeof Client>[0]["eventQueue"],
@@ -284,19 +262,13 @@ describe("Client gateway event queue", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const firstSettlement = createDeferred<void>();
     const started: string[] = [];
-    const first = {
-      type: "READY",
-      handle: vi.fn(async () => {
-        started.push("first");
-        await firstSettlement.promise;
-      }),
-    } satisfies AnyListener;
-    const second = {
-      type: "READY",
-      handle: vi.fn(async () => {
-        started.push("second");
-      }),
-    } satisfies AnyListener;
+    const first = listener(async () => {
+      started.push("first");
+      await firstSettlement.promise;
+    });
+    const second = listener(async () => {
+      started.push("second");
+    });
     const client = createQueuedClient([first, second], { listenerTimeout: 10, maxConcurrency: 1 });
 
     const dispatch = client.dispatchGatewayEvent("READY", {});
@@ -319,11 +291,8 @@ describe("Client gateway event queue", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const settlement = createDeferred<void>();
     const lateError = new Error("late listener failure");
-    const listener = {
-      type: "READY",
-      handle: vi.fn(async () => await settlement.promise),
-    } satisfies AnyListener;
-    const client = createQueuedClient([listener], { listenerTimeout: 10, maxConcurrency: 1 });
+    const waiting = listener(async () => await settlement.promise);
+    const client = createQueuedClient([waiting], { listenerTimeout: 10, maxConcurrency: 1 });
 
     const dispatch = client.dispatchGatewayEvent("READY", {});
     await vi.advanceTimersByTimeAsync(10);
@@ -345,23 +314,20 @@ describe("Client gateway event queue", () => {
 
   it("rejects when queued listener work exceeds maxQueueSize", async () => {
     const releases: Array<() => void> = [];
-    const listener = {
-      type: "READY",
-      handle: vi.fn(
-        async () =>
-          await new Promise<void>((resolve) => {
-            releases.push(resolve);
-          }),
-      ),
-    } satisfies AnyListener;
-    const client = createQueuedClient([listener], {
+    const waiting = listener(
+      async () =>
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        }),
+    );
+    const client = createQueuedClient([waiting], {
       maxConcurrency: 1,
       maxQueueSize: 1,
       listenerTimeout: 1_000,
     });
 
     const first = client.dispatchGatewayEvent("READY", {});
-    await vi.waitFor(() => expect(listener.handle).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(waiting.handle).toHaveBeenCalledTimes(1));
     const second = client.dispatchGatewayEvent("READY", {});
 
     await expect(client.dispatchGatewayEvent("READY", {})).rejects.toThrow(
@@ -369,7 +335,7 @@ describe("Client gateway event queue", () => {
     );
 
     releases.shift()?.();
-    await vi.waitFor(() => expect(listener.handle).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(waiting.handle).toHaveBeenCalledTimes(2));
     releases.shift()?.();
     await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
   });
