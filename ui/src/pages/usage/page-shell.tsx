@@ -1,6 +1,6 @@
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import type { JSX } from "@solidjs/web";
-import { createMemo, untrack } from "solid-js";
+import { createMemo } from "solid-js";
 import type { SessionsUsageResult } from "../../api/types.ts";
 import { subtitleForRoute, titleForRoute } from "../../app-navigation.ts";
 import type { ApplicationContext } from "../../app/context.ts";
@@ -18,10 +18,8 @@ export function UsagePageShell(props: {
   result: SessionsUsageResult | null;
   children: JSX.Element;
 }) {
-  // The bridge replaces this view when the application provider changes.
-  const context = untrack(() => props.context);
-  const agents = projectAgents(context.agents);
-  const selection = projectAgentSelection(context.agentSelection);
+  const agents = createMemo(() => projectAgents(props.context.agents));
+  const selection = createMemo(() => projectAgentSelection(props.context.agentSelection));
   const header = createMemo(() => {
     getLocale();
     return { title: titleForRoute("usage"), subtitle: subtitleForRoute("usage") };
@@ -39,10 +37,10 @@ export function UsagePageShell(props: {
         subtitle={header().subtitle}
         actions={
           <AgentScopeControl
-            agents={agents.read().agentsList?.agents ?? []}
+            agents={agents().read().agentsList?.agents ?? []}
             additionalAgentIds={additionalAgentIds()}
             selection={props.context.agentSelection}
-            selectedId={selection.read().state.scopeId}
+            selectedId={selection().read().state.scopeId}
           />
         }
       />
