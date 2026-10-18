@@ -12,7 +12,7 @@ import { createComposerContainer } from "../chat-composer.test-support.ts";
 import { createChatProps, renderChatPropsInto } from "../chat-view.test-helpers.ts";
 import type { ChatAttachmentControlsProps } from "./chat-attachment-controls.types.ts";
 import { ChatCommentController } from "./chat-comment-controller.ts";
-import { ChatSelectionAnnotations } from "./chat-selection-annotations.tsx";
+import { ChatSelectionAnnotations, type ChatCommentAction } from "./chat-selection-annotations.tsx";
 import { createChatSelectionAttachment } from "./chat-selection-attachment.ts";
 
 const payloads = new Set<string>();
@@ -103,6 +103,69 @@ async function mountComments(additional: ChatAttachment[] = []) {
 }
 
 describe("comment actions outside the transcript", () => {
+  it("anchors preview edit actions to their owned trigger", async () => {
+    const fixture = await mountComments();
+    const trigger = fixture.composer.querySelector<HTMLButtonElement>(
+      ".chat-selection-annotations__trigger",
+    )!;
+    let action: ChatCommentAction | undefined;
+    fixture.composer.addEventListener("openclaw-comment-action", (event) => {
+      action = (event as CustomEvent<ChatCommentAction>).detail;
+    });
+
+    fixture.edit();
+
+    expect(action).toMatchObject({ id: fixture.attachment.id, action: "edit" });
+    expect(action?.anchor).toBe(trigger);
+    expect(fixture.input()?.value).toBe("Original comment");
+  });
+
+  it.each(["open", "closed", "disconnected"] as const)(
+    "restores focus to the next comment delete button only while its preview remains open (%s)",
+    async (presentation) => {
+      const second: ChatAttachment = {
+        id: "second-comment",
+        mimeType: "text/plain",
+        selectionAnnotation: {
+          text: "Another passage",
+          comment: "Another comment",
+          sessionKey: "agent:main:main",
+          start: 0,
+          end: 15,
+        },
+      };
+      const fixture = await mountComments([second]);
+      const preview = fixture.composer.querySelector<HTMLElement>(".chat-comment-preview")!;
+      const nextDelete = fixture.composer.querySelector<HTMLButtonElement>(
+        '[data-comment-delete="second-comment"]',
+      )!;
+      const focus = vi.spyOn(nextDelete, "focus");
+      const frames: FrameRequestCallback[] = [];
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+        frames.push(callback),
+      );
+      preview.setAttribute("open", "");
+
+      fixture.composer.querySelector<HTMLButtonElement>("[data-comment-delete]")!.click();
+      await fixture.controller.updateComplete;
+      flush();
+      expect(fixture.attachments()).toEqual([second]);
+      if (presentation === "closed") {
+        preview.removeAttribute("open");
+      } else if (presentation === "disconnected") {
+        fixture.composer.remove();
+      }
+      for (const frame of frames.splice(0)) {
+        frame(0);
+      }
+
+      expect(focus).toHaveBeenCalledTimes(presentation === "open" ? 1 : 0);
+      if (presentation === "open") {
+        expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      }
+    },
+  );
+
   it("keeps an editor across draft renders and retires it when composition is disabled", async () => {
     const container = createComposerContainer();
     document.body.append(container);

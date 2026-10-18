@@ -408,6 +408,7 @@ function ChatContent(input: { props: ChatProps }) {
       <Show when={!input.props.suggestionComposer}>
         <ChatCommentController
           paneId={input.props.paneId}
+          onFocusComposer={frame().threadProps.onFocusComposer}
           props={input.props}
           disabled={!input.props.canSend}
           sessionKey={input.props.sessionKey}
