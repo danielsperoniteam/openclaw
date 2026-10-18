@@ -53,6 +53,7 @@ import {
   prepareSubagentSessionCleanupRevocation,
 } from "./subagent-registry.js";
 import { writeSubagentSessionEntry } from "./subagent-registry.persistence.test-support.js";
+import { rowToSubagentRunRecord } from "./subagent-registry.store.codec.js";
 import { testing } from "./subagent-registry.test-helpers.js";
 import { getSubagentRunRuntimeKey } from "./subagent-run-generation.js";
 
@@ -170,7 +171,9 @@ it("retains registered cleanup admission behind a durable write while a successo
         !held &&
         isSubagentRegistryWriteCommand(command) &&
         command.input.values.some(
-          (row) => row.run_id === run.runId && row.label === "queued before cleanup",
+          (row) =>
+            row.run_id === run.runId &&
+            rowToSubagentRunRecord(row)?.label === "queued before cleanup",
         )
       ) {
         held = true;
