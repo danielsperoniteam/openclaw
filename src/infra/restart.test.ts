@@ -96,12 +96,17 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function requireFirstSpawnSyncCall(): [unknown, unknown, unknown] {
-  const [call] = spawnSyncMock.mock.calls;
-  if (!call) {
-    throw new Error("expected spawnSync call");
+function expectLsofCall(port: number, first = false) {
+  const call = [
+    "/usr/sbin/lsof",
+    ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"],
+    expect.objectContaining({ encoding: "utf8", timeout: 5000 }),
+  ];
+  if (first) {
+    expect(spawnSyncMock.mock.calls[0]).toEqual(call);
+  } else {
+    expect(spawnSyncMock.mock.calls).toContainEqual(call);
   }
-  return call as [unknown, unknown, unknown];
 }
 
 describe.runIf(process.platform !== "win32")("findGatewayPidsOnPortSync", () => {
@@ -131,19 +136,7 @@ describe.runIf(process.platform !== "win32")("findGatewayPidsOnPortSync", () => 
     const pids = findGatewayPidsOnPortSync(18789);
 
     expect(pids).toEqual([gatewayPidA, gatewayPidB]);
-    const [command, args, options] =
-      spawnSyncMock.mock.calls.find(
-        ([spawnCommand, spawnArgs]) =>
-          spawnCommand === "/usr/sbin/lsof" &&
-          Array.isArray(spawnArgs) &&
-          spawnArgs.includes("-iTCP:18789"),
-      ) ?? [];
-    expect(command).toBe("/usr/sbin/lsof");
-    expect(args).toEqual(["-nP", "-iTCP:18789", "-sTCP:LISTEN", "-Fpc"]);
-    expect((options as { encoding?: unknown; timeout?: unknown } | undefined)?.encoding).toBe(
-      "utf8",
-    );
-    expect((options as { encoding?: unknown; timeout?: unknown } | undefined)?.timeout).toBe(5000);
+    expectLsofCall(18789);
   });
 });
 
@@ -170,87 +163,69 @@ describe.runIf(process.platform !== "win32")("cleanStaleGatewayProcessesSync", (
     expect(resolveGatewayPortMock).not.toHaveBeenCalled();
     const lsofCalls = spawnSyncMock.mock.calls.filter((call) => call[0] === "/usr/sbin/lsof");
     expect(lsofCalls).toHaveLength(2);
-    const [command, args, options] = requireFirstSpawnSyncCall();
-    expect(command).toBe("/usr/sbin/lsof");
-    expect(args).toEqual(["-nP", "-iTCP:19999", "-sTCP:LISTEN", "-Fpc"]);
-    expect((options as { encoding?: unknown; timeout?: unknown } | undefined)?.encoding).toBe(
-      "utf8",
-    );
-    expect((options as { encoding?: unknown; timeout?: unknown } | undefined)?.timeout).toBe(5000);
+    expectLsofCall(19999, true);
     expect(killSpy).toHaveBeenCalledWith(stalePid, "SIGTERM");
     expect(killSpy).toHaveBeenCalledWith(stalePid, "SIGKILL");
   });
 });
 
 describe("triggerOpenClawRestart", () => {
-  it("does not kickstart after bootstrap registers an unloaded LaunchAgent", () => {
+  function withLaunchAgent(bootstrapStatus: number, run: (uid: number) => void) {
     mockProcessPlatform("darwin");
     withEnv(
       { VITEST: undefined, NODE_ENV: undefined, HOME: "/Users/test", OPENCLAW_PROFILE: "default" },
       () => {
-        const uid = typeof process.getuid === "function" ? process.getuid() : 501;
         spawnSyncMock.mockImplementation((command: string, args: string[]) => {
-          if (command === "/usr/sbin/lsof") {
-            return { error: undefined, status: 1, stdout: "" };
-          }
-          if (command === "launchctl" && args[0] === "kickstart" && args[1] === "-k") {
-            return { error: undefined, status: 113, stderr: "service not loaded" };
-          }
-          if (command === "launchctl" && args[0] === "bootstrap") {
-            return { error: undefined, status: 0, stderr: "" };
+          if (command === "launchctl") {
+            if (args[0] === "kickstart") {
+              return args[1] === "-k"
+                ? { error: undefined, status: 113, stderr: "service not loaded" }
+                : { error: undefined, status: bootstrapStatus === 0 ? 1 : 0, stdout: "" };
+            }
+            if (args[0] === "bootstrap") {
+              return {
+                error: undefined,
+                status: bootstrapStatus,
+                stderr: bootstrapStatus === 0 ? "" : "Operation already in progress",
+              };
+            }
           }
           return { error: undefined, status: 1, stdout: "" };
         });
-
-        const result = triggerOpenClawRestart();
-
-        expect(result).toEqual({
-          ok: true,
-          method: "launchctl",
-          tried: [
-            `launchctl kickstart -k gui/${uid}/ai.openclaw.gateway`,
-            `launchctl bootstrap gui/${uid} /Users/test/Library/LaunchAgents/ai.openclaw.gateway.plist`,
-          ],
-        });
+        run(typeof process.getuid === "function" ? process.getuid() : 501);
       },
     );
+  }
+
+  it("does not kickstart after bootstrap registers an unloaded LaunchAgent", () => {
+    withLaunchAgent(0, (uid) => {
+      const result = triggerOpenClawRestart();
+
+      expect(result).toEqual({
+        ok: true,
+        method: "launchctl",
+        tried: [
+          `launchctl kickstart -k gui/${uid}/ai.openclaw.gateway`,
+          `launchctl bootstrap gui/${uid} /Users/test/Library/LaunchAgents/ai.openclaw.gateway.plist`,
+        ],
+      });
+    });
   });
 
   it("continues when launchctl bootstrap reports the service is already loaded", () => {
-    mockProcessPlatform("darwin");
-    withEnv(
-      { VITEST: undefined, NODE_ENV: undefined, HOME: "/Users/test", OPENCLAW_PROFILE: "default" },
-      () => {
-        const uid = typeof process.getuid === "function" ? process.getuid() : 501;
-        spawnSyncMock.mockImplementation((command: string, args: string[]) => {
-          if (command === "/usr/sbin/lsof") {
-            return { error: undefined, status: 1, stdout: "" };
-          }
-          if (command === "launchctl" && args[0] === "kickstart" && args[1] === "-k") {
-            return { error: undefined, status: 113, stderr: "service not loaded" };
-          }
-          if (command === "launchctl" && args[0] === "bootstrap") {
-            return { error: undefined, status: 37, stderr: "Operation already in progress" };
-          }
-          if (command === "launchctl" && args[0] === "kickstart") {
-            return { error: undefined, status: 0, stdout: "" };
-          }
-          return { error: undefined, status: 1, stdout: "" };
-        });
+    withLaunchAgent(37, (uid) => {
+      const result = triggerOpenClawRestart();
 
-        const result = triggerOpenClawRestart();
-
-        expect(result).toEqual({
-          ok: true,
-          method: "launchctl",
-          tried: [
-            `launchctl kickstart -k gui/${uid}/ai.openclaw.gateway`,
-            `launchctl bootstrap gui/${uid} /Users/test/Library/LaunchAgents/ai.openclaw.gateway.plist`,
-            `launchctl kickstart gui/${uid}/ai.openclaw.gateway`,
-          ],
-        });
-      },
-    );
+      expect(result).toEqual({
+        ok: true,
+        method: "launchctl",
+        tried: [
+          `launchctl kickstart -k gui/${uid}/ai.openclaw.gateway`,
+          `launchctl bootstrap gui/${uid} /Users/test/Library/LaunchAgents/ai.openclaw.gateway.plist`,
+          `launchctl kickstart gui/${uid}/ai.openclaw.gateway`,
+        ],
+      });
+    });
   });
 });
 

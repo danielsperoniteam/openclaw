@@ -30,6 +30,13 @@ function consumeGatewayRestartIntentPayload(
   return prepareGatewayRestartIntentConsumption(...args)();
 }
 
+function expectWrittenIntent(
+  env: NodeJS.ProcessEnv,
+  options: Omit<Parameters<typeof writeGatewayRestartIntentSync>[0], "env"> = {},
+) {
+  expect(writeGatewayRestartIntentSync({ targetPid: process.pid, ...options, env })).toBe(true);
+}
+
 const tempDirs: string[] = [];
 type GatewayRestartIntentDatabase = Pick<OpenClawStateKyselyDatabase, "gateway_restart_intent">;
 
@@ -62,17 +69,7 @@ function readIntentRow(env: NodeJS.ProcessEnv) {
   );
 }
 
-function insertIntentRow(
-  env: NodeJS.ProcessEnv,
-  values: {
-    kind?: string;
-    pid?: number;
-    createdAt?: number;
-    reason?: string | null;
-    force?: number | null;
-    waitMs?: number | null;
-  },
-) {
+function insertIntentRow(env: NodeJS.ProcessEnv, values: { kind?: string; createdAt?: number }) {
   const { db } = openOpenClawStateDatabase({ env });
   const stateDb = getNodeSqliteKysely<GatewayRestartIntentDatabase>(db);
   const now = Date.now();
@@ -81,11 +78,11 @@ function insertIntentRow(
     stateDb.insertInto("gateway_restart_intent").values({
       intent_key: "gateway-restart",
       kind: values.kind ?? "gateway-restart",
-      pid: values.pid ?? process.pid,
+      pid: process.pid,
       created_at: values.createdAt ?? now,
-      reason: values.reason ?? null,
-      force: values.force ?? null,
-      wait_ms: values.waitMs ?? null,
+      reason: null,
+      force: null,
+      wait_ms: null,
       updated_at_ms: now,
     }),
   );
@@ -113,9 +110,7 @@ describe("gateway restart intent", () => {
 
   it("settles a contended consume exactly once without blocking the signal thread", async () => {
     const env = createIntentEnv();
-    expect(
-      writeGatewayRestartIntentSync({ env, targetPid: process.pid, reason: "gateway.restart" }),
-    ).toBe(true);
+    expectWrittenIntent(env, { reason: "gateway.restart" });
     const { path: filename } = openOpenClawStateDatabase({ env });
     const foreign = new DatabaseSync(filename);
     try {
@@ -133,7 +128,7 @@ describe("gateway restart intent", () => {
 
   it("keeps an intent when the captured signal owner retires before admission", async () => {
     const env = createIntentEnv();
-    expect(writeGatewayRestartIntentSync({ env, targetPid: process.pid })).toBe(true);
+    expectWrittenIntent(env);
     let current = true;
     const consuming = consumeGatewayRestartIntentPayload(env, Date.now(), () => {
       if (!current) {
@@ -148,9 +143,7 @@ describe("gateway restart intent", () => {
 
   it("recovers a committed intent after its ordinary reply is lost without consuming again", async () => {
     const env = createIntentEnv();
-    expect(
-      writeGatewayRestartIntentSync({ env, targetPid: process.pid, reason: "gateway.restart" }),
-    ).toBe(true);
+    expectWrittenIntent(env, { reason: "gateway.restart" });
     const execute = stateWorker.runOpenClawStateWorkerOperation;
     vi.spyOn(stateWorker, "runOpenClawStateWorkerOperation").mockImplementationOnce(
       async (...args) => {
@@ -183,13 +176,9 @@ describe("gateway restart intent", () => {
       }),
     });
     try {
-      expect(
-        writeGatewayRestartIntentSync({
-          env,
-          targetPid: process.pid,
-          intent: { reason: "gateway.restart", force: true, waitMs: 12_345 },
-        }),
-      ).toBe(true);
+      expectWrittenIntent(env, {
+        intent: { reason: "gateway.restart", force: true, waitMs: 12_345 },
+      });
       expect(
         db.prepare("SELECT pid, reason, force, wait_ms FROM gateway_restart_intent").get(),
       ).toEqual({
@@ -221,7 +210,7 @@ describe("gateway restart intent", () => {
   it("rejects an intent for a different process", async () => {
     const env = createIntentEnv();
 
-    expect(writeGatewayRestartIntentSync({ env, targetPid: process.pid + 1 })).toBe(true);
+    expectWrittenIntent(env, { targetPid: process.pid + 1 });
 
     expect(await consumeGatewayRestartIntentPayload(env)).toBeNull();
     expect(readIntentRow(env)).toBeUndefined();
@@ -247,22 +236,18 @@ describe("gateway restart intent", () => {
   it("round-trips restart options without persisting process-local successor identity", async () => {
     const env = createIntentEnv();
 
-    expect(
-      writeGatewayRestartIntentSync({
-        env,
-        targetPid: process.pid,
-        reason: "gateway.restart",
-        intent: {
-          force: true,
-          waitMs: 12_345,
-          successorOwner: {
-            kind: "managed-update-handoff",
-            handoffId: "private-handoff",
-            installRoot: "/private/install",
-          },
+    expectWrittenIntent(env, {
+      reason: "gateway.restart",
+      intent: {
+        force: true,
+        waitMs: 12_345,
+        successorOwner: {
+          kind: "managed-update-handoff",
+          handoffId: "private-handoff",
+          installRoot: "/private/install",
         },
-      }),
-    ).toBe(true);
+      },
+    });
 
     expect(await consumeGatewayRestartIntentPayload(env)).toEqual({
       reason: "gateway.restart",
@@ -284,20 +269,11 @@ describe("gateway restart intent", () => {
 
   it("overwrites the previous pending intent row", async () => {
     const env = createIntentEnv();
-    expect(
-      writeGatewayRestartIntentSync({
-        env,
-        targetPid: process.pid + 1,
-        reason: "first",
-      }),
-    ).toBe(true);
-    expect(
-      writeGatewayRestartIntentSync({
-        env,
-        targetPid: process.pid,
-        reason: "second",
-      }),
-    ).toBe(true);
+    expectWrittenIntent(env, {
+      targetPid: process.pid + 1,
+      reason: "first",
+    });
+    expectWrittenIntent(env, { reason: "second" });
 
     expect(readIntentRow(env)).toMatchObject({
       intent_key: "gateway-restart",

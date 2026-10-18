@@ -132,7 +132,10 @@ describe("safe gateway restart coordinator", () => {
 
     try {
       await request?.run(async () => {
-        const preflight = requestPreflight({ getBackgroundExecSessions: () => 0 });
+        const preflight = createSafeGatewayRestartPreflight({
+          ...idleInspect,
+          getBackgroundExecSessions: () => 0,
+        });
 
         expect(preflight.counts).toMatchObject({ rootRequests: 1, totalActive: 1 });
         expect(preflight.blockers).toEqual([
@@ -152,10 +155,7 @@ describe("safe gateway restart coordinator", () => {
   it("schedules one restart request and marks active work as deferred", () => {
     const result = scheduleSafeGatewayRestart({
       reason: "test.safe",
-      inspect: {
-        ...idleInspect,
-        getQueueSize: () => 1,
-      },
+      inspect: { ...idleInspect, getQueueSize: () => 1 },
     });
 
     expect(result.status).toBe("deferred");
@@ -172,11 +172,7 @@ describe("safe gateway restart coordinator", () => {
       coalesced: true,
     });
 
-    const result = scheduleSafeGatewayRestart({
-      inspect: {
-        ...idleInspect,
-      },
-    });
+    const result = scheduleSafeGatewayRestart({ inspect: idleInspect });
 
     expect(result.status).toBe("coalesced");
   });
@@ -185,10 +181,7 @@ describe("safe gateway restart coordinator", () => {
     const result = scheduleSafeGatewayRestart({
       reason: "test.skip-deferral",
       skipDeferral: true,
-      inspect: {
-        ...idleInspect,
-        getQueueSize: () => 1,
-      },
+      inspect: { ...idleInspect, getQueueSize: () => 1 },
     });
 
     expect(result.status).toBe("scheduled");

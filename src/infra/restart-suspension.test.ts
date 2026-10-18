@@ -8,13 +8,13 @@ import {
   resetGatewayWorkAdmission,
   tryBeginGatewayPreparedRestartRootWorkAdmission,
 } from "../process/gateway-work-admission.js";
-import type { GatewayActiveWorkInspectors } from "./gateway-active-work.js";
 import {
   getGatewaySuspendStatus,
   prepareGatewaySuspend,
   resetGatewaySuspendCoordinatorForLifecycleRestart,
   resumeGatewaySuspend,
 } from "./gateway-suspend-coordinator.js";
+import { inspectors } from "./gateway-suspend-coordinator.test-support.js";
 import {
   isGatewayRestartExternallyAllowed,
   requestGatewayRestartWithSignalAdmission,
@@ -24,26 +24,6 @@ import {
   setPreRestartDeferralCheck,
 } from "./restart.js";
 
-function inspectors(): GatewayActiveWorkInspectors {
-  return {
-    getQueueSize: () => 0,
-    getPendingReplies: () => 0,
-    getEmbeddedRuns: () => 0,
-    getBackgroundExecSessions: () => 0,
-    getCronRuns: () => 0,
-    getAgentRuns: () => 0,
-    getAcpRuns: () => 0,
-    getMediaRuns: () => 0,
-    getRootRequests: () => getActiveGatewayRootWorkCount(),
-    getSessionAdmissions: () => 0,
-    getSessionMutations: () => 0,
-    getChatRuns: () => 0,
-    getQueuedTurns: () => 0,
-    getTerminalPersistence: () => 0,
-    getTerminalSessions: () => 0,
-  };
-}
-
 function prepareSuspension(
   requestId: string,
   options: Partial<Parameters<typeof prepareGatewaySuspend>[0]> = {},
@@ -52,7 +32,7 @@ function prepareSuspension(
     requestId,
     pauseScheduling: vi.fn(),
     resumeScheduling: vi.fn(),
-    inspect: inspectors(),
+    inspect: inspectors({ getRootRequests: () => getActiveGatewayRootWorkCount() }),
     ...options,
   });
 }
