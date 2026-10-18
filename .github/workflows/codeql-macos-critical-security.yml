@@ -69,7 +69,9 @@ jobs:
   macos:
     name: Critical Security (macOS)
     needs: prepare-mermaid
-    runs-on: xcode-27
+    # Swift CodeQL tracing requires macOS/Xcode 26 until upstream adds macOS 27 support.
+    # https://github.com/github/codeql/issues/22742
+    runs-on: macos-26-intel
     timeout-minutes: 90
     steps:
       - name: Checkout
@@ -80,21 +82,14 @@ jobs:
           ref: ${{ github.sha }}
           submodules: false
 
-      - name: Ensure Rosetta for CodeQL
-        run: |
-          if ! arch -x86_64 /usr/bin/true; then
-            sudo softwareupdate --install-rosetta --agree-to-license
-          fi
-          arch -x86_64 /usr/bin/true
-
       - name: Select Xcode
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
           xcodebuild -version
           xcode_version="$(xcodebuild -version | awk 'NR == 1 { print $2 }')"
-          if [[ "$xcode_version" != 27 && "$xcode_version" != 27.* ]]; then
-            echo "error: expected Xcode 27, got $xcode_version" >&2
+          if [[ "$xcode_version" != 26.6* ]]; then
+            echo "error: expected Xcode 26.6, got $xcode_version" >&2
             exit 1
           fi
           swift --version
@@ -124,20 +119,14 @@ jobs:
           --config.side-effects-cache=true
 
       - name: Initialize CodeQL
-        id: codeql
         uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           languages: swift
           build-mode: manual
           config-file: ./.github/codeql/codeql-macos-critical-security.yml
 
-      - name: Verify CodeQL under Rosetta
-        env:
-          CODEQL_PATH: ${{ steps.codeql.outputs.codeql-path }}
-        run: arch -x86_64 "$CODEQL_PATH" version
-
       - name: Build macOS for CodeQL
-        # Keep ARM-only application paths in CodeQL coverage.
+        # Preserve ARM-only application paths in CodeQL coverage on the Intel host.
         run: swift build --package-path apps/macos --product OpenClaw --arch arm64 --disable-index-store -debug-info-format none
 
       - name: Analyze
