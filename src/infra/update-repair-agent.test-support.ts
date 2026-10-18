@@ -4,6 +4,19 @@ import type { OpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import type { runUpdateRepairTurn } from "./update-repair-agent.runtime.js";
 
 type Turn = Parameters<typeof runUpdateRepairTurn>[0];
+export async function createRepairAuthRuntime() {
+  const [{ createExternalAuthRuntime }, { createAuthProfileStoreRuntime }] = await Promise.all([
+    import("../agents/auth-profiles/external-auth.js"),
+    import("../agents/auth-profiles/store.js"),
+  ]);
+  return createAuthProfileStoreRuntime(
+    createExternalAuthRuntime(
+      () => [],
+      async (_params, run) => run(),
+    ),
+  );
+}
+
 export function repairRoute(
   agentDir: string,
   config: OpenClawConfig = {},

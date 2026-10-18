@@ -114,14 +114,8 @@ it("emits a stopped event and result message when the delegated turn fails", asy
   await closed.promise;
   const stopped = findStopped(sent);
   const result = sent.find((m) => m.type === "result");
-  expect(stopped).toMatchObject({
-    status: "aborted",
-    reason: "turn exploded",
-  });
-  expect(result?.result).toMatchObject({
-    status: "aborted",
-    reason: "turn exploded",
-  });
+  expect(stopped).toMatchObject({ status: "aborted", reason: "turn exploded" });
+  expect(result?.result).toMatchObject({ status: "aborted", reason: "turn exploded" });
   expect(child.exitCode).toBe(1);
   expect(child.exit).not.toHaveBeenCalled();
 });

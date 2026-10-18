@@ -8,8 +8,6 @@ import {
   captureAgentToolExecutionBudget,
   captureAgentToolSourceExecutionGuard,
 } from "../agents/agent-tool-source-execution-guard.js";
-import { createExternalAuthRuntime } from "../agents/auth-profiles/external-auth.js";
-import { createAuthProfileStoreRuntime } from "../agents/auth-profiles/store.js";
 import type { RunEmbeddedAgentParams } from "../agents/embedded-agent-runner/run/params.js";
 import { createAgentCleanupScope } from "../agents/run-cleanup-timeout.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -28,7 +26,7 @@ import {
   runUpdateRepairTurn,
   withUpdateRepairEnvironment,
 } from "./update-repair-agent.runtime.js";
-import { repairTurnInput } from "./update-repair-agent.test-support.js";
+import { createRepairAuthRuntime, repairTurnInput } from "./update-repair-agent.test-support.js";
 
 const mocks = vi.hoisted(() => ({
   entry: vi.fn(),
@@ -108,35 +106,19 @@ it.each([
         });
       }
       const agentDir = state.statePath("agents", "owner", "agent");
-      const auth = createAuthProfileStoreRuntime(
-        createExternalAuthRuntime(
-          () => [],
-          async (_params, run) => run(),
-        ),
-      );
+      const auth = await createRepairAuthRuntime();
       const profileId = "fixture:subscription";
-      auth.saveAuthProfileStore({
-        version: 1,
-        profiles: {
-          [profileId]: {
-            type: "oauth",
-            provider: "fixture",
-            access: "synthetic-shared-access",
-            refresh: "synthetic-refresh",
-            expires: Date.now() + 3_600_000,
-          },
-        },
-      });
+      const shared = {
+        type: "oauth" as const,
+        provider: "fixture",
+        access: "synthetic-shared-access",
+        refresh: "synthetic-refresh",
+        expires: Date.now() + 3_600_000,
+      };
+      const local = { type: "token" as const, provider: "fixture", token: "synthetic-local-token" };
+      auth.saveAuthProfileStore({ version: 1, profiles: { [profileId]: shared } });
       if (localOverride) {
-        auth.saveAuthProfileStore(
-          {
-            version: 1,
-            profiles: {
-              [profileId]: { type: "token", provider: "fixture", token: "synthetic-local-token" },
-            },
-          },
-          agentDir,
-        );
+        auth.saveAuthProfileStore({ version: 1, profiles: { [profileId]: local } }, agentDir);
       }
       const config: OpenClawConfig = {
         plugins: { enabled: false },
@@ -169,11 +151,7 @@ it.each([
           readOnly: true,
           externalCli: { mode: "none" },
         }).profiles[profileId];
-        expect(selected).toMatchObject(
-          localOverride
-            ? { type: "token", token: "synthetic-local-token" }
-            : { type: "oauth", access: "synthetic-shared-access" },
-        );
+        expect(selected).toMatchObject(localOverride ? local : shared);
         retainedTool = captureAgentToolExecutionBudget();
         expect(retainedTool).toBeDefined();
         retainedTool?.();
@@ -280,10 +258,7 @@ it("refuses revoked repair authority before starting the runner", () =>
     expect(result).toMatchObject({
       status: "completed",
       toolCalls: 0,
-      envelope: {
-        status: "error",
-        error: { message: "Repair no longer owns the failed update." },
-      },
+      envelope: { status: "error", error: { message: "Repair no longer owns the failed update." } },
     });
     expect(mocks.run).not.toHaveBeenCalled();
     expect(mocks.entry).not.toHaveBeenCalled();
@@ -292,29 +267,24 @@ it("refuses revoked repair authority before starting the runner", () =>
 it("keeps full authority at tool effect guards when preparation uses live checks", () =>
   withOpenClawTestState({ layout: "home" }, async (state) => {
     let current = true;
-    let allowed = false;
-    let refusal: unknown;
     mocks.run.mockImplementation(async () => {
       captureAgentToolExecutionBudget()?.();
       const beforeEffect = captureAgentToolSourceExecutionGuard();
-      beforeEffect();
-      allowed = true;
+      expect(beforeEffect).not.toThrow();
       // Revocation during a tool's own awaits must stop its final write or spawn.
       current = false;
-      try {
-        beforeEffect();
-      } catch (error) {
-        refusal = error;
-      }
+      expect(beforeEffect).toThrow(/^Agent tool execution scope is no longer active$/u);
       return { payloads: [{ text: "Stopped." }], meta: { durationMs: 1 } };
     });
     const result = await repairTurn(state, {
       isCurrent: () => current,
       isLive: () => true,
     });
-    expect(allowed).toBe(true);
-    expect(refusal).toMatchObject({ message: "Agent tool execution scope is no longer active" });
-    expect(result).toMatchObject({ status: "completed", toolCalls: 1 });
+    expect(result).toMatchObject({
+      status: "completed",
+      toolCalls: 1,
+      envelope: { final: "Stopped.", status: "ok" },
+    });
   }));
 it("preserves a configuration failure instead of blaming model setup", () =>
   withOpenClawTestState({ layout: "home" }, async (state) => {
@@ -334,11 +304,7 @@ it("preserves a configuration failure instead of blaming model setup", () =>
 it("keeps disposable selectors but rejects hostile overrides before child execution", () =>
   withOpenClawTestState({ layout: "home" }, async (state) => {
     const before = { ...process.env };
-    const selectors = {
-      HOME: state.home,
-      TMPDIR: state.root,
-      OPENCLAW_HOME: state.home,
-    };
+    const selectors = { HOME: state.home, TMPDIR: state.root, OPENCLAW_HOME: state.home };
     const expected = {
       ...selectors,
       OPENCLAW_STATE_DIR: state.stateDir,

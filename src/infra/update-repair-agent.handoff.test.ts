@@ -1,9 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createManagedHandoffTestBinding } from "../../test/helpers/managed-handoff-isolation.js";
-import { createExternalAuthRuntime } from "../agents/auth-profiles/external-auth.js";
-import { createAuthProfileStoreRuntime } from "../agents/auth-profiles/store.js";
+import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
 import type { StreamFn } from "../agents/runtime/index.js";
-import { createMockUsage } from "../agents/test-helpers/embedded-agent-runner-e2e-fixtures.js";
+import {
+  buildEmbeddedRunnerAssistant,
+  createMockUsage,
+} from "../agents/test-helpers/embedded-agent-runner-e2e-fixtures.js";
 import { beginDoctorMaintenance } from "../commands/doctor-maintenance.js";
 import {
   clearRuntimeConfigSnapshot,
@@ -12,18 +14,21 @@ import {
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createAssistantMessageEventStream } from "../llm/utils/event-stream.js";
 import { readActiveOpenClawAgentDatabaseLeasesReadOnly } from "../state/openclaw-agent-db-lease.js";
-import { createOpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
-import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { createOpenClawDatabaseMaintenanceScope as createMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
+import { withOpenClawTestState as withState } from "../test-utils/openclaw-test-state.js";
 import { resolveManagedUpdateLeaseDatabasePath } from "./update-managed-service-handoff-lease.js";
-import { runUpdateRepairTurn } from "./update-repair-agent.runtime.js";
-import { repairModel, repairTurnInput } from "./update-repair-agent.test-support.js";
+import { runUpdateRepairTurn as runTurn } from "./update-repair-agent.runtime.js";
+import {
+  createRepairAuthRuntime,
+  repairModel,
+  repairTurnInput as turnInput,
+} from "./update-repair-agent.test-support.js";
 
 const fixture = vi.hoisted(() => ({
   stream: vi.fn<StreamFn>(),
   handoff: undefined as ReturnType<typeof createManagedHandoffTestBinding> | undefined,
 }));
-// Only inference is synthetic; admission, tool preparation/execution, terminal
-// resolution, auth bookkeeping, and database lifecycle are production owners.
+// Only inference is synthetic; tool execution, auth and database lifecycle are real.
 vi.mock("../agents/provider-stream.js", () => ({
   registerProviderStreamForModel: () => fixture.stream,
 }));
@@ -44,41 +49,30 @@ afterEach(() => {
 });
 
 it("settles the real repair handoff without closing a parent lease before Doctor admission", async () => {
-  await withOpenClawTestState({ layout: "home" }, async (state) => {
+  await withState({ layout: "home" }, async (state) => {
     fixture.handoff = createManagedHandoffTestBinding(state.root);
     vi.stubEnv(
       "NODE_OPTIONS",
       [process.env.NODE_OPTIONS, fixture.handoff.nodeOption].filter(Boolean).join(" "),
     );
-    expect(fixture.handoff.assertPath(resolveManagedUpdateLeaseDatabasePath())).toBe(
-      fixture.handoff.databasePath,
-    );
+    fixture.handoff.assertPath(resolveManagedUpdateLeaseDatabasePath());
     vi.stubEnv("OPENCLAW_SERVICE_REPAIR_POLICY", "external");
     const agentDir = state.agentDir("owner");
-    const auth = createAuthProfileStoreRuntime(
-      createExternalAuthRuntime(
-        () => [],
-        async (_params, run) => run(),
-      ),
-    );
+    const auth = await createRepairAuthRuntime();
+    const save = (profiles: AuthProfileStore["profiles"], dir = agentDir) =>
+      auth.saveAuthProfileStore({ version: 1, profiles }, dir);
     const leases = () => readActiveOpenClawAgentDatabaseLeasesReadOnly({ env: state.env });
     const load = () =>
       auth.loadAuthProfileStoreForRuntime(agentDir, {
         readOnly: true,
         externalCli: { mode: "none" },
       });
-    const seed = createOpenClawDatabaseMaintenanceScope();
+    const seed = createMaintenanceScope();
     try {
       seed.run(() =>
-        auth.saveAuthProfileStore(
-          {
-            version: 1,
-            profiles: {
-              "fixture:repair": { type: "token", provider: "fixture", token: "synthetic-token" },
-            },
-          },
-          agentDir,
-        ),
+        save({
+          "fixture:repair": { type: "token", provider: "fixture", token: "synthetic-token" },
+        }),
       );
     } finally {
       await seed.close();
@@ -107,8 +101,7 @@ it("settles the real repair handoff without closing a parent lease before Doctor
         stream.push({
           type: "done",
           reason: "toolUse",
-          message: {
-            role: "assistant",
+          message: buildEmbeddedRunnerAssistant({
             content: [
               {
                 type: "toolCall",
@@ -122,27 +115,23 @@ it("settles the real repair handoff without closing a parent lease before Doctor
             model: model.id,
             usage: createMockUsage(1, 1),
             stopReason: "toolUse",
-            timestamp: Date.now(),
-          },
+          }),
         });
         stream.end();
       });
       return stream;
     });
-    // Cold module loading is outside the deterministic model turn budget. The
-    // automatic caller allows ten minutes; this fixture exercises one immediate inference.
+    // Keep cold loading outside the deterministic model-turn budget.
     await Promise.all([
       import("../agents/embedded-agent.js"),
       import("../agents/embedded-agent-runner/run-entry.js"),
     ]);
-    const parent = createOpenClawDatabaseMaintenanceScope();
+    const parent = createMaintenanceScope();
     try {
-      parent.run(() =>
-        auth.saveAuthProfileStore({ version: 1, profiles: {} }, state.agentDir("independent")),
-      );
+      parent.run(() => save({}, state.agentDir("independent")));
       const result = await parent.run(() =>
-        runUpdateRepairTurn(
-          repairTurnInput(state, {
+        runTurn(
+          turnInput(state, {
             config,
             authProfileId: "fixture:repair",
             prompt: "Request Doctor repair using the maintenance tool.",

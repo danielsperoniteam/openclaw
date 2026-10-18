@@ -54,10 +54,10 @@ vi.mock("./update-repair-agent.runtime.js", async () => {
 
 type TurnDelegation = {
   runId?: string;
-  requester: { channel: string; senderId: string };
   admissionEnv: NodeJS.ProcessEnv;
   executor: { grant: UpdateCommandChildGrant; bindChild?: (pid: number) => void } | "unowned";
 };
+const requester = { channel: "synthetic", senderId: "owner" };
 
 type RepairDiagnostics = {
   stdoutTail: string;
@@ -98,16 +98,16 @@ async function runRepairEnvelope(
     controller.abort(failure);
     child.kill("SIGKILL");
   }, 90_000);
-  let stdoutTail = Buffer.alloc(0);
-  child.stdout?.on("data", (chunk: Buffer) => {
-    stdoutTail = Buffer.from(Buffer.concat([stdoutTail, chunk]).subarray(-16 * 1024));
-    diagnostics.stdoutTail = stdoutTail.toString("utf8");
-  });
-  let stderrTail = Buffer.alloc(0);
-  child.stderr?.on("data", (chunk: Buffer) => {
-    stderrTail = Buffer.from(Buffer.concat([stderrTail, chunk]).subarray(-16 * 1024));
-    diagnostics.stderrTail = stderrTail.toString("utf8");
-  });
+  for (const [stream, field] of [
+    [child.stdout, "stdoutTail"],
+    [child.stderr, "stderrTail"],
+  ] as const) {
+    let tail = Buffer.alloc(0);
+    stream?.on("data", (chunk: Buffer) => {
+      tail = Buffer.from(Buffer.concat([tail, chunk]).subarray(-16 * 1024));
+      diagnostics[field] = tail.toString("utf8");
+    });
+  }
   try {
     return await new Promise((resolve, reject) => {
       child.once("error", reject);
@@ -136,7 +136,7 @@ async function runRepairEnvelope(
                 type: "turn",
                 runId: delegation.runId,
                 executor: delegation.executor === "unowned" ? undefined : delegation.executor.grant,
-                requester: delegation.requester,
+                requester,
                 target: params.target,
                 prompt: "Repair the missing marker using the configured tools.",
                 wallClockMs: 90_000,
@@ -150,7 +150,7 @@ async function runRepairEnvelope(
             child.send({
               type: "start",
               runId: "released-update-run",
-              requester: { channel: "synthetic", senderId: "owner" },
+              requester,
               target: params.target,
               failure: { error: params.context.error },
               context: {},
@@ -228,31 +228,24 @@ type RepairEntry =
   | "unowned-turn"
   | "unidentified-turn";
 it.each([
-  { phase: "verifying", entry: "released-parent" },
-  { phase: "verifying", entry: "manual" },
-  { phase: "validating", entry: "turn" },
-  { phase: "verifying", entry: "revoked-turn" },
-  { phase: "verifying", entry: "wrong-receiver-turn" },
-  { phase: "verifying", entry: "unowned-turn" },
-  { phase: "verifying", entry: "unidentified-turn" },
+  "released-parent",
+  "manual",
+  "turn",
+  "revoked-turn",
+  "wrong-receiver-turn",
+  "unowned-turn",
+  "unidentified-turn",
 ] as const)(
-  "preserves released behavior and scopes repair inference ($entry, $phase)",
-  async ({ phase, entry }) => {
-    const diagnostics: RepairDiagnostics = {
-      stdoutTail: "",
-      stderrTail: "",
-    };
+  "preserves released behavior and scopes repair inference (%s)",
+  async (entry) => {
+    const phase = entry === "turn" ? "validating" : "verifying";
+    const diagnostics: RepairDiagnostics = { stdoutTail: "", stderrTail: "" };
     await withOpenClawTestState({ prefix: "update-repair-boundary-", layout: "home" }, (state) =>
       exerciseRepair(state, phase, entry, diagnostics),
     ).catch((error: unknown) => {
       // The E2E runner suppresses console output, including failed cases.
       process.stderr.write(
-        `[update-repair-test] diagnostics ${JSON.stringify({
-          phase,
-          entry,
-          workerStdoutTail: diagnostics.stdoutTail,
-          workerStderrTail: diagnostics.stderrTail,
-        })}\n`,
+        `[update-repair-test] diagnostics ${JSON.stringify({ phase, entry, workerStdoutTail: diagnostics.stdoutTail, workerStderrTail: diagnostics.stderrTail })}\n`,
       );
       throw error;
     });
@@ -269,8 +262,7 @@ async function exerciseRepair(
   const requests: ModelRequest[] = [];
   const providerCalls: string[] = [];
   const errors: unknown[] = [];
-  let issuedRepair = false;
-  let issuedScopeProbe = false;
+  const issued = { exec: false, write: false };
   await withServer(
     (request, response) => {
       providerCalls.push(`${request.method} ${request.url}`);
@@ -286,14 +278,12 @@ async function exerciseRepair(
         }
         const body = JSON.parse(await readText(request)) as ModelRequest;
         requests.push(body);
-        if (body.tools?.some((tool) => tool.name === "write") && !issuedScopeProbe) {
-          issuedScopeProbe = true;
-          writeRepairToolCall(response, "write");
-          return;
-        }
-        if (body.tools?.some((tool) => tool.name === "exec") && !issuedRepair) {
-          issuedRepair = true;
-          if (entry === "revoked-turn") {
+        for (const name of ["write", "exec"] as const) {
+          if (!body.tools?.some((tool) => tool.name === name) || issued[name]) {
+            continue;
+          }
+          issued[name] = true;
+          if (name === "exec" && entry === "revoked-turn") {
             // Remove the requester's owner permission while inference is awaiting.
             const current = JSON.parse(await fs.readFile(state.configPath, "utf8"));
             await fs.writeFile(
@@ -301,11 +291,11 @@ async function exerciseRepair(
               JSON.stringify({ ...current, commands: { ownerAllowFrom: ["other-owner"] } }),
             );
           }
-          writeRepairToolCall(response, "exec");
+          writeRepairToolCall(response, name);
           return;
         }
         writeOpenAiResponsesText(response, {
-          text: issuedRepair
+          text: issued.exec
             ? 'REPAIR_RESULT: {"status":"fixed","summary":"Created the target repair marker."}'
             : "OK",
           messageId: `msg_repair_${requests.length}`,
@@ -365,7 +355,7 @@ async function exerciseRepair(
                 ? { trigger: "cli" }
                 : {
                     trigger: "chat",
-                    origin: { requester: { channel: "synthetic", senderId: "owner" } },
+                    origin: { requester },
                   },
               { env: ledgerEnv },
             )
@@ -411,7 +401,6 @@ async function exerciseRepair(
         if (!run) {
           throw new Error("Delegated repair requires an update run.");
         }
-        const requester = { channel: "synthetic", senderId: "owner" };
         const control = state.path("executor-control");
         await fs.mkdir(control, { mode: 0o700 });
         const databasePath = path.join(control, "managed-update-handoffs.sqlite");
@@ -432,7 +421,6 @@ async function exerciseRepair(
                 }) =>
                   runRepairEnvelope(params, diagnostics, {
                     runId: entry === "unidentified-turn" ? undefined : run.runId,
-                    requester,
                     admissionEnv: ledgerEnv,
                     executor: receiver ?? { grant, bindChild },
                   });
@@ -473,7 +461,6 @@ async function exerciseRepair(
           entry === "unowned-turn"
             ? runRepairEnvelope(params, diagnostics, {
                 runId: run?.runId,
-                requester: { channel: "synthetic", senderId: "owner" },
                 admissionEnv: ledgerEnv,
                 executor: "unowned",
               })
@@ -490,7 +477,7 @@ async function exerciseRepair(
           ...(entry === "revoked-turn" ? { reason: "requester-revoked" } : {}),
         });
         if (entry === "revoked-turn") {
-          expect(issuedRepair).toBe(true);
+          expect(issued.exec).toBe(true);
         } else {
           expect(requests).toEqual([]);
         }
@@ -521,11 +508,7 @@ async function exerciseRepair(
       }
       expect(result, JSON.stringify(result)).toMatchObject(
         entry === "turn"
-          ? {
-              status: "completed",
-              toolCalls: 2,
-              summary: "Created the target repair marker.",
-            }
+          ? { status: "completed", toolCalls: 2, summary: "Created the target repair marker." }
           : {
               status: "repaired",
               finalValidation: { ok: true, score: 1 },
@@ -533,7 +516,7 @@ async function exerciseRepair(
             },
       );
       expect(requests.some((body) => body.tools?.some((tool) => tool.name === "exec"))).toBe(true);
-      expect(issuedScopeProbe).toBe(true);
+      expect(issued.write).toBe(true);
       await expect(
         fs.stat(path.join(state.workspaceDir, "..", "outside-repair.txt")),
       ).rejects.toMatchObject({ code: "ENOENT" });
