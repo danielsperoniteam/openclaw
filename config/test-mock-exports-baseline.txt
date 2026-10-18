@@ -794,7 +794,6 @@
 ["extensions/matrix/src/matrix/actions/profile.test.ts","../../runtime.js","529b5c7a82246fd1a05118a5696e0c3bcc87b614fe8545a9593afc177ee55697",1]
 ["extensions/matrix/src/matrix/actions/profile.test.ts","../profile.js","9081c95dbc655069079149c3dd5778ba37d0bf3bfa1f34cf709b5385f28b884e",1]
 ["extensions/matrix/src/matrix/actions/profile.test.ts","./client.js","b6174e3cfe72759e685186892e6f4d869b88147b66a49fa05599eb629e876ffb",1]
-["extensions/matrix/src/matrix/actions/verification.test.ts","../../runtime.js","e42823aebd0ce6e00dc0e1a7ce36fe28000406adf68e5ced40a158908903f58f",1]
 ["extensions/matrix/src/matrix/actions/verification.test.ts","./client.js","fe3efd22546625a79f990a5ba77ba3fb75e467f8fcd6bfeae023cb34942a6069",1]
 ["extensions/matrix/src/matrix/client-bootstrap.test.ts","../runtime.js","83f2a426138843376dc981a55ba3b1726f3a494ff066f84eedea01329619d952",1]
 ["extensions/matrix/src/matrix/client-bootstrap.test.ts","./client.js","26262c2017e1be9ae9a27cad43e0ab134f7768cbeba43259824e403821df7aa6",1]
