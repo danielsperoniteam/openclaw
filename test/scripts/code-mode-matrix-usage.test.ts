@@ -86,6 +86,16 @@ function accounting({
   });
 }
 
+function childRun(executionStatus = "terminal") {
+  return {
+    runId: "child-run",
+    childSessionKey: CHILD,
+    requesterSessionKey: ROOT,
+    requesterStorePath: null,
+    executionStatus,
+  };
+}
+
 function writeStore(root: string, agent: string, sessionKey: string, parentSessionKey?: string) {
   const file = path.join(root, "agents", agent, "agent", "openclaw-agent.sqlite");
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -155,14 +165,8 @@ describe("matrix task billing", () => {
       .run("qa", 2, JSON.stringify(assistant()));
     parent.close();
     const final = await readMatrixSessionLedger(root);
-    const task = accounting({
-      ledger: final,
-      after: taskEnd,
-    });
-    const interview = accounting({
-      ledger: final,
-      before: taskEnd,
-    });
+    const task = accounting({ ledger: final, after: taskEnd });
+    const interview = accounting({ ledger: final, before: taskEnd });
     expect(task).toMatchObject({
       complete: true,
       totalTokens: 48,
@@ -183,159 +187,133 @@ describe("matrix task billing", () => {
     ]);
   });
 
-  const unavailableTotals = {
+  const unavailable = { usageReport: { state: "unavailable" } };
+  const unknownTotals = {
     complete: false,
     costComplete: false,
     totalTokens: null,
     costUsd: null,
     reasoningTokens: null,
   };
-  const consumptionCases: {
-    label: string;
-    events?: unknown[];
-    options?: Partial<Parameters<typeof collectMatrixUsage>[0]>;
-    expected: Record<string, unknown>;
-  }[] = [
-    ...[0, 1].map((scale) => ({
-      label: scale === 0 ? "unavailable zero placeholders" : "unavailable provisional counters",
-      events: [
-        assistant({
-          usage: { ...usage(scale), usageReport: { state: "unavailable" } },
-        }),
-      ],
-      options: { rootUsage: { usageReport: { state: "unavailable" } } },
-      expected: {
-        ...unavailableTotals,
-        knownTotalTokens: 0,
-        knownCostUsd: 0,
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        assistantTurns: 1,
-      },
-    })),
-    ...[false, true].map((unavailableFirst) => {
-      const unavailable = assistant({
-        usage: { ...usage(), usageReport: { state: "unavailable" } },
-        stopReason: "error",
-      });
-      return {
-        label: unavailableFirst
-          ? "unavailable then measured usage"
-          : "measured then unavailable usage",
-        events: unavailableFirst ? [unavailable, assistant()] : [assistant(), unavailable],
-        options: { rootUsage: { usageReport: { state: "unavailable" } } },
-        expected: {
-          ...unavailableTotals,
-          knownTotalTokens: 24,
-          knownCostUsd: 0.012,
-          input: 10,
-          output: 4,
-          cacheRead: 8,
-          cacheWrite: 2,
-          reasoningComplete: false,
-          assistantTurns: 2,
-          modelErrors: 1,
-        },
-      };
-    }),
-    ...[false, true].map((measured) => {
-      const zeroUsage = {
-        ...usage(0),
-        cost: { total: 0, totalOrigin: "provider-billed" },
-        ...(measured ? { usageReport: { state: "available" } } : {}),
-      };
-      return {
-        label: measured ? "genuinely measured zero usage" : "unmeasured zero usage",
-        events: [assistant({ usage: zeroUsage })],
-        options: { rootUsage: zeroUsage },
-        expected: {
-          complete: measured,
-          costComplete: measured,
-          totalTokens: measured ? 0 : null,
-          costUsd: measured ? 0 : null,
-          knownTotalTokens: 0,
-          reasoningTokens: measured ? 0 : null,
-          reasoningComplete: measured,
-          assistantTurns: 1,
-        },
-      };
-    }),
-    {
-      label: "missing response usage",
-      events: [assistant({ usage: undefined })],
-      expected: { complete: false, costComplete: false, totalTokens: null, knownTotalTokens: 24 },
-    },
-    {
-      label: "placeholder price",
-      events: [assistant({ usage: { ...usage(), cost: { total: 0 } } })],
-      expected: { complete: true, costComplete: false, totalTokens: 24, knownTotalTokens: 24 },
-    },
-    {
-      label: "provider-billed zero",
-      events: [
-        assistant({
-          usage: { ...usage(), cost: { total: 0, totalOrigin: "provider-billed" } },
-        }),
-      ],
-      expected: { complete: true, costComplete: true, totalTokens: 24, knownTotalTokens: 24 },
-    },
-    {
-      label: "missing cache bucket",
-      events: [
-        assistant({ usage: { input: 10, output: 4, totalTokens: 24, cost: { total: 0.01 } } }),
-      ],
-      expected: { complete: false, costComplete: false, totalTokens: null, knownTotalTokens: 24 },
-    },
-    {
-      label: "failed model and tool consumption without the delivery mirror",
-      events: [
-        assistant({ stopReason: "error" }),
-        { role: "toolResult", toolCallId: "failed-call", isError: true },
-        assistant(),
-        { role: "assistant", provider: "openclaw", model: "delivery-mirror" },
-      ],
-      options: { rootUsage: reportedUsage(2) },
-      expected: {
-        complete: true,
-        totalTokens: 48,
-        assistantTurns: 2,
-        reasoningTokens: 6,
-        modelErrors: 1,
-        toolFailures: 1,
-      },
-    },
-    {
-      label: "lost terminal response",
-      options: { terminalResponseObserved: false, rootUsage: undefined },
-      expected: { complete: false, totalTokens: null, knownTotalTokens: 24, knownCostUsd: 0.012 },
-    },
-    {
-      label: "root auxiliary usage without invented buckets or doubled totals",
-      options: { rootUsage: reportedUsage(2) },
-      expected: {
-        complete: false,
-        totalTokens: null,
-        knownTotalTokens: 48,
-        input: 10,
-        output: 4,
-        cacheRead: 8,
-        cacheWrite: 2,
-        parents: { knownTotalTokens: 24 },
-        runtimeReconciliation: [
-          {
-            source: "root-response",
-            tokenGap: 24,
-            reported: { input: 20, output: 8, cacheRead: 16, cacheWrite: 4, total: 48 },
-            matched: false,
-          },
+  const buckets = { input: 10, output: 4, cacheRead: 8, cacheWrite: 2 };
+  it.each([0, 1])("ignores unavailable counters at scale %s", (scale) => {
+    expect(
+      accounting({
+        events: [assistant({ usage: { ...usage(scale), ...unavailable } })],
+        rootUsage: unavailable,
+      }),
+    ).toMatchObject({
+      ...unknownTotals,
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      knownTotalTokens: 0,
+      knownCostUsd: 0,
+      assistantTurns: 1,
+    });
+  });
+  it.each([false, true])("preserves measured usage with unavailable first=%s", (first) => {
+    const failed = assistant({ usage: { ...usage(), ...unavailable }, stopReason: "error" });
+    expect(
+      accounting({
+        events: first ? [failed, assistant()] : [assistant(), failed],
+        rootUsage: unavailable,
+      }),
+    ).toMatchObject({
+      ...unknownTotals,
+      ...buckets,
+      knownTotalTokens: 24,
+      knownCostUsd: 0.012,
+      reasoningComplete: false,
+      assistantTurns: 2,
+      modelErrors: 1,
+    });
+  });
+  it.each([false, true])("distinguishes measured=%s zero usage", (measured) => {
+    const zero = {
+      ...usage(0),
+      cost: { total: 0, totalOrigin: "provider-billed" },
+      ...(measured ? { usageReport: { state: "available" } } : {}),
+    };
+    expect(accounting({ events: [assistant({ usage: zero })], rootUsage: zero })).toMatchObject({
+      complete: measured,
+      costComplete: measured,
+      totalTokens: measured ? 0 : null,
+      costUsd: measured ? 0 : null,
+      knownTotalTokens: 0,
+      reasoningTokens: measured ? 0 : null,
+      reasoningComplete: measured,
+      assistantTurns: 1,
+    });
+  });
+  it.each([
+    ["missing response usage", undefined, false, false],
+    ["placeholder price", { ...usage(), cost: { total: 0 } }, true, false],
+    [
+      "provider-billed zero",
+      { ...usage(), cost: { total: 0, totalOrigin: "provider-billed" } },
+      true,
+      true,
+    ],
+    [
+      "missing cache bucket",
+      { input: 10, output: 4, totalTokens: 24, cost: { total: 0.01 } },
+      false,
+      false,
+    ],
+  ] as const)("accounts for %s", (_label, observation, complete, costComplete) => {
+    expect(accounting({ events: [assistant({ usage: observation })] })).toMatchObject({
+      complete,
+      costComplete,
+      totalTokens: complete ? 24 : null,
+      knownTotalTokens: 24,
+    });
+  });
+  it("counts failed model/tool consumption without the delivery mirror", () => {
+    expect(
+      accounting({
+        events: [
+          assistant({ stopReason: "error" }),
+          { role: "toolResult", toolCallId: "failed-call", isError: true },
+          assistant(),
+          { role: "assistant", provider: "openclaw", model: "delivery-mirror" },
         ],
-      },
-    },
-  ];
-  it.each(consumptionCases)("accounts for $label", ({ events, options, expected }) => {
-    expect(accounting({ events, ...options })).toMatchObject(expected);
+        rootUsage: reportedUsage(2),
+      }),
+    ).toMatchObject({
+      complete: true,
+      totalTokens: 48,
+      assistantTurns: 2,
+      reasoningTokens: 6,
+      modelErrors: 1,
+      toolFailures: 1,
+    });
+  });
+  it("withholds totals when the terminal response is lost", () => {
+    expect(accounting({ terminalResponseObserved: false, rootUsage: undefined })).toMatchObject({
+      complete: false,
+      totalTokens: null,
+      knownTotalTokens: 24,
+      knownCostUsd: 0.012,
+    });
+  });
+  it("keeps root auxiliary usage without inventing buckets or doubling totals", () => {
+    expect(accounting({ rootUsage: reportedUsage(2) })).toMatchObject({
+      ...buckets,
+      complete: false,
+      totalTokens: null,
+      knownTotalTokens: 48,
+      parents: { knownTotalTokens: 24 },
+      runtimeReconciliation: [
+        {
+          source: "root-response",
+          tokenGap: 24,
+          matched: false,
+          reported: { input: 20, output: 8, cacheRead: 16, cacheWrite: 4, total: 48 },
+        },
+      ],
+    });
   });
 
   it.each([
@@ -367,13 +345,7 @@ describe("matrix task billing", () => {
             : { input: 20, output: 8, cacheRead: 16, cacheWrite: 4, costUsd: 0.024 },
       },
     });
-    final.runs.push({
-      runId: "child-run",
-      childSessionKey: CHILD,
-      requesterSessionKey: ROOT,
-      requesterStorePath: null,
-      executionStatus: "terminal",
-    });
+    final.runs.push(childRun());
     if (condition === "multiple runs") {
       final.runs.push({ ...final.runs[0]!, runId: "another-run" });
     }
@@ -383,10 +355,12 @@ describe("matrix task billing", () => {
         ? { before: captureMatrixLedgerBoundary({ ...final, rows: [] }) }
         : {}),
     });
-    expect(result.complete).toBe(condition === "cost difference");
-    expect(result.totalTokens).toBe(condition === "cost difference" ? 48 : null);
-    expect(result.costComplete).toBe(false);
-    expect(result.knownTotalTokens).toBe(condition === "auxiliary usage" ? 72 : 48);
+    expect(result).toMatchObject({
+      complete: condition === "cost difference",
+      totalTokens: condition === "cost difference" ? 48 : null,
+      costComplete: false,
+      knownTotalTokens: condition === "auxiliary usage" ? 72 : 48,
+    });
     if (condition === "auxiliary usage") {
       expect(result.knownCostUsd).toBeCloseTo(0.036);
       expect(result.runtimeReconciliation[1]).toMatchObject({
@@ -420,10 +394,7 @@ describe("matrix task billing", () => {
   ])(
     "does not equate a final successful response with observed usage for an internal retry: %s",
     (runtimeLog) => {
-      const result = accounting({
-        ledger: ledger(),
-        runtimeLog,
-      });
+      const result = accounting({ runtimeLog });
       expect(result).toMatchObject({ complete: false, knownTotalTokens: 24, totalTokens: null });
       expect(result.issues).toEqual(
         expect.arrayContaining([expect.stringContaining("without separate failed-request usage")]),
@@ -434,9 +405,7 @@ describe("matrix task billing", () => {
   it("does not silently discard unlinked model activity in the isolated state", () => {
     const final = ledger();
     final.rows.push({ ...final.rows[0]!, sessionId: "orphan", sessionKey: CHILD });
-    const result = accounting({
-      ledger: final,
-    });
+    const result = accounting({ ledger: final });
     expect(result).toMatchObject({
       complete: false,
       knownTotalTokens: 48,
@@ -457,22 +426,14 @@ describe("matrix task billing", () => {
       } else if (condition === "duplicate-response") {
         final.rows.push({ ...final.rows[0]!, seq: 2 });
       } else if (condition === "unfinished-child") {
-        final.runs.push({
-          runId: "child-run",
-          childSessionKey: CHILD,
-          requesterSessionKey: ROOT,
-          requesterStorePath: null,
-          executionStatus: "running",
-        });
+        final.runs.push(childRun("running"));
       }
       const result = accounting({
         ledger: final,
         ...(condition === "rewritten" ? { after: before } : {}),
         settled: condition !== "unsettled",
       });
-      expect(result.complete).toBe(false);
-      expect(result.totalTokens).toBeNull();
-      expect(result.knownTotalTokens).toBe(24);
+      expect(result).toMatchObject({ complete: false, totalTokens: null, knownTotalTokens: 24 });
     },
   );
 });

@@ -10,7 +10,6 @@ import {
   requireGatewayMatrixTools,
   type GatewayMatrixTrace,
 } from "../../scripts/lib/code-mode-matrix-gateway.js";
-import type { NestedToolActivity } from "../../src/sessions/nested-tool-activity.js";
 
 function evaluate(
   task: Parameters<typeof evaluateGatewayMatrixTask>[0]["task"],
@@ -27,16 +26,24 @@ function evaluate(
   });
 }
 
-function assistantCall(id: string, code: string) {
+function callEvent(id: string, name: string, args: Record<string, unknown>) {
   return {
     type: "message",
     message: {
       role: "assistant",
       provider: "openai",
       model: "gpt-5.6-sol",
-      content: [{ type: "toolCall", id, name: "exec", arguments: { code } }],
+      content: [{ type: "toolCall", id, name, arguments: args }],
     },
   };
+}
+
+function assistantCall(id: string, code: string) {
+  return callEvent(id, "exec", { code });
+}
+
+function usageEvent(id: string, usage: Record<string, unknown>, code = "return 1;") {
+  return { message: { ...assistantCall(id, code).message, usage } };
 }
 
 function toolOutcome(id: string, details: Record<string, unknown>, isError = false, name = "exec") {
@@ -54,18 +61,7 @@ function toolOutcome(id: string, details: Record<string, unknown>, isError = fal
 }
 
 function waitEvents(id: string, runId: string, details: Record<string, unknown>, isError = false) {
-  return [
-    {
-      type: "message",
-      message: {
-        role: "assistant",
-        provider: "openai",
-        model: "gpt-5.6-sol",
-        content: [{ type: "toolCall", id, name: "wait", arguments: { runId } }],
-      },
-    },
-    toolOutcome(id, details, isError, "wait"),
-  ];
+  return [callEvent(id, "wait", { runId }), toolOutcome(id, details, isError, "wait")];
 }
 
 function nestedActivity(
@@ -75,29 +71,23 @@ function nestedActivity(
   result: Record<string, unknown> = {},
   isError = false,
   content: { type: "text"; text: string }[] = [],
-): NestedToolActivity {
+) {
   return {
-    role: "custom",
     customType: "openclaw.nested-tool.v1",
-    display: true,
-    excludeFromContext: true,
-    content: "",
-    timestamp: 100,
     details: {
-      runId: "run-1",
-      scopeId: "scope-1",
-      afterEntryId: null,
-      startOrder: 0,
       parentToolCallId: parentId,
-      toolCallId: `${parentId}-${name}`,
       toolName: name,
       input,
       result: { content, details: result },
       isError,
-      startedAt: 100,
-      timestamp: 101,
     },
   };
+}
+
+function textRead(id: string, path: string, text: string) {
+  return nestedActivity(id, "read", { path }, { kind: "text", content: text }, false, [
+    { type: "text", text },
+  ]);
 }
 
 function receipt(kind: "call" | "effect", tool: string, facts: Record<string, unknown> = {}) {
@@ -130,6 +120,35 @@ function traceCall(trace: GatewayMatrixTrace, id: string) {
     trace.calls.find((call) => call.id === id),
     id,
   );
+}
+
+function traceOutcome(trace: GatewayMatrixTrace, id: string) {
+  return expectDefined(
+    trace.outcomes.find((item) => item.id === id),
+    id,
+  );
+}
+
+function recoveryEvidence() {
+  const trace = processEvidence(true);
+  const launch = expectDefined(
+    trace.activities.find((item) => item.name === "exec"),
+    "launch",
+  );
+  const poll = expectDefined(
+    trace.activities.find((item) => item.name === "process"),
+    "poll",
+  );
+  const wait = traceCall(trace, "wrong-wait");
+  return {
+    trace,
+    launch,
+    poll,
+    wait,
+    pollCall: traceCall(trace, poll.parentId),
+    waitResult: traceOutcome(trace, wait.id),
+    launchResult: traceOutcome(trace, launch.parentId),
+  };
 }
 
 const SETTLEMENT = {
@@ -168,13 +187,12 @@ function settlementEvidence() {
 }
 
 const INVOICES = { nonce: "invoice-export-r1-v1", count: 240, totalsCents: { customer: 7100 } };
+const OBSERVED_USAGE = { input: 100, output: 10, totalTokens: 110, cost: { total: 0.002 } };
 
 function invoiceEvidence() {
   const reference = {
     id: "result-1",
     bytes: 131072,
-    count: 2,
-    shape: "{nonce:string,invoices:array}",
     preview: '{"nonce":"invoice-export-r1-v1","invoices":[{"id":"INV-1-0001"',
     previewTruncated: true,
   };
@@ -200,11 +218,7 @@ describe("Gateway matrix transcript evidence", () => {
   it("counts one underlying shell outcome through direct exec with error=true", () => {
     const isError = true;
     const input = { command: "node ./process-probe.mjs" };
-    const result = {
-      status: "failed",
-      exitCode: 1,
-      aggregated: "synthetic process failure",
-    };
+    const result = { status: "failed", exitCode: 1, aggregated: "synthetic process failure" };
     const name = "exec";
     const invocation = {
       message: {
@@ -230,19 +244,12 @@ describe("Gateway matrix transcript evidence", () => {
   });
 
   it("does not turn missing usage or cost observations into zero-valued measurements", () => {
-    const withUsage = {
-      ...assistantCall("one", "return 1;").message,
-      usage: { input: 100, output: 10, totalTokens: 110, cost: { total: 0.002 } },
-    };
-    const complete = collectGatewayMatrixTrace([{ message: withUsage }]);
+    const withUsage = usageEvent("one", OBSERVED_USAGE);
+    const complete = collectGatewayMatrixTrace([withUsage]);
     expect(complete.usage).toEqual({ input: 100, output: 10, total: 110 });
     expect(complete.costUsd).toBe(0.002);
-    const incomplete = collectGatewayMatrixTrace([
-      { message: withUsage },
-      assistantCall("two", "return 2;"),
-    ]);
-    expect(incomplete.usage).toBeUndefined();
-    expect(incomplete.costUsd).toBeUndefined();
+    const incomplete = collectGatewayMatrixTrace([withUsage, assistantCall("two", "return 2;")]);
+    expect(incomplete).toMatchObject({ usage: undefined, costUsd: undefined });
   });
 
   it.each([
@@ -251,30 +258,21 @@ describe("Gateway matrix transcript evidence", () => {
     { label: "known then unavailable", input: 20, output: 3, known: "before" },
     { label: "unavailable then known", input: 20, output: 3, known: "after" },
   ])("does not qualify $label as measured savings", ({ input, output, known }) => {
-    const unavailable = {
-      message: {
-        ...assistantCall("unavailable", "return await matrix_read({});").message,
-        usage: {
-          input,
-          output,
-          totalTokens: input + output,
-          cost: { total: 0.5 },
-          usageReport: { state: "unavailable" },
-        },
+    const unavailable = usageEvent(
+      "unavailable",
+      {
+        input,
+        output,
+        totalTokens: input + output,
+        cost: { total: 0.5 },
+        usageReport: { state: "unavailable" },
       },
-    };
-    const observed = {
-      message: {
-        ...assistantCall("observed", "return 1;").message,
-        usage: {
-          input: 100,
-          output: 10,
-          totalTokens: 110,
-          cost: { total: 0.002 },
-          usageReport: { state: "available" },
-        },
-      },
-    };
+      "return await matrix_read({});",
+    );
+    const observed = usageEvent("observed", {
+      ...OBSERVED_USAGE,
+      usageReport: { state: "available" },
+    });
     const trace = collectGatewayMatrixTrace([
       ...(known === "before" ? [observed] : []),
       unavailable,
@@ -282,14 +280,16 @@ describe("Gateway matrix transcript evidence", () => {
       toolOutcome("unavailable", { status: "completed", value: 1 }),
       ...(known === "after" ? [observed] : []),
     ]);
-    expect(trace.assistantTurns).toBe(known === "none" ? 1 : 2);
-    expect(trace.models).toEqual(["openai/gpt-5.6-sol"]);
+    expect(trace).toMatchObject({
+      assistantTurns: known === "none" ? 1 : 2,
+      models: ["openai/gpt-5.6-sol"],
+      usage: undefined,
+      costUsd: undefined,
+    });
     expect(trace.calls).toHaveLength(known === "none" ? 1 : 2);
     expect(trace.outcomes).toHaveLength(1);
     expect(trace.activities).toHaveLength(1);
     expect(trace.activities[0]).toMatchObject({ name: "matrix_read", result: { value: 1 } });
-    expect(trace.usage).toBeUndefined();
-    expect(trace.costUsd).toBeUndefined();
 
     const compared = compareCodeModeMatrixResults(
       [{ ...comparisonRow(), usage: { input: 100, output: 10 }, costUsd: 0.002 }],
@@ -311,18 +311,17 @@ describe("Gateway matrix transcript evidence", () => {
 
   it("retains genuinely measured zero usage and cost", () => {
     const trace = collectGatewayMatrixTrace([
-      {
-        message: {
-          ...assistantCall("zero", "return 0;").message,
-          usage: {
-            input: 0,
-            output: 0,
-            totalTokens: 0,
-            cost: { total: 0, totalOrigin: "provider-billed" },
-            usageReport: { state: "available" },
-          },
+      usageEvent(
+        "zero",
+        {
+          input: 0,
+          output: 0,
+          totalTokens: 0,
+          cost: { total: 0, totalOrigin: "provider-billed" },
+          usageReport: { state: "available" },
         },
-      },
+        "return 0;",
+      ),
     ]);
     expect(trace.usage).toEqual({ input: 0, output: 0, total: 0 });
     expect(trace.costUsd).toBe(0);
@@ -330,28 +329,26 @@ describe("Gateway matrix transcript evidence", () => {
   });
 });
 
-describe("Gateway matrix capability preflight", () => {
-  it.each(["registered", "wrong-plugin"] as const)(
-    "requires the fixture's registered capability: %s",
-    (registration) => {
-      const required = ["exec", "matrix_invoice_export"];
-      const tools = [
-        { id: "exec", source: "core" },
-        {
-          id: "matrix_invoice_export",
-          source: "plugin",
-          pluginId: registration === "registered" ? "code-mode-matrix-fixture" : "unrelated-plugin",
-        },
-      ];
-      const check = () => requireGatewayMatrixTools({ groups: [{ tools }] }, required);
-      if (registration === "registered") {
-        expect(check()).toEqual(required);
-      } else {
-        expect(check).toThrow("preflight failed before model call: matrix_invoice_export");
-      }
-    },
-  );
-});
+it.each(["registered", "wrong-plugin"] as const)(
+  "requires the fixture's registered capability: %s",
+  (registration) => {
+    const required = ["exec", "matrix_invoice_export"];
+    const tools = [
+      { id: "exec", source: "core" },
+      {
+        id: "matrix_invoice_export",
+        source: "plugin",
+        pluginId: registration === "registered" ? "code-mode-matrix-fixture" : "unrelated-plugin",
+      },
+    ];
+    const check = () => requireGatewayMatrixTools({ groups: [{ tools }] }, required);
+    if (registration === "registered") {
+      expect(check()).toEqual(required);
+    } else {
+      expect(check).toThrow("preflight failed before model call: matrix_invoice_export");
+    }
+  },
+);
 
 describe("Gateway matrix task oracles", () => {
   it.each([
@@ -366,9 +363,7 @@ describe("Gateway matrix task oracles", () => {
     );
     const diagnostic = {
       status: "completed",
-      value: {
-        error: "Output contract: receipt must be a string; totalCents is required",
-      },
+      value: { error: "Output contract: receipt must be a string; totalCents is required" },
     };
     const waiting = { status: "waiting", runId: "settlement-run" };
     events[2] = toolOutcome("settle", waiting);
@@ -389,11 +384,13 @@ describe("Gateway matrix task oracles", () => {
       receipts,
     );
     const accepted = scenario !== "unrelated-run";
-    expect(checks.answer).toBe(true);
-    expect(checks.exactlyOneEffect).toBe(true);
-    expect(checks.inspectedAfterFailure).toBe(true);
-    expect(checks.observedPersistedState).toBe(true);
-    expect(checks.actionableDiagnostics).toBe(accepted);
+    expect(checks).toMatchObject({
+      answer: true,
+      exactlyOneEffect: true,
+      inspectedAfterFailure: true,
+      observedPersistedState: true,
+      actionableDiagnostics: accepted,
+    });
     allChecks(checks, accepted);
   });
 
@@ -415,14 +412,7 @@ const AUTOMATION = {
 };
 
 function automationEvidence(terminal: "complete" | "partial") {
-  const baselineJob = {
-    id: "system-heartbeat",
-    name: "System heartbeat",
-    enabled: false,
-    sessionTarget: "main",
-    schedule: { kind: "every", everyMs: 1800000 },
-    payload: { kind: "systemEvent", text: "Heartbeat" },
-  };
+  const baselineJob = { id: "system-heartbeat", enabled: false };
   const job = {
     name: AUTOMATION.jobName,
     enabled: false,
@@ -531,11 +521,13 @@ describe("terminal automation evidence", () => {
       trace.activities[secondIndex] = first;
     }
     const checks = evaluate("automation-contracts", AUTOMATION, trace);
-    expect(checks.answer).toBe(true);
-    expect(checks.createdFacts).toBe(true);
-    expect(checks.baselinePreserved).toBe(true);
-    expect(checks.terminalInventoryComplete).toBe(true);
-    expect(checks.createdRemoved).toBe(true);
+    expect(checks).toMatchObject({
+      answer: true,
+      createdFacts: true,
+      baselinePreserved: true,
+      terminalInventoryComplete: true,
+      createdRemoved: true,
+    });
     allChecks(checks, false);
   });
 
@@ -579,8 +571,7 @@ describe("terminal automation evidence", () => {
         operation.input.job = { enabled: true };
       }
       const checks = evaluate("automation-contracts", AUTOMATION, trace);
-      expect(checks.createdRemoved).toBe(true);
-      expect(checks.remainedDisabled).toBe(false);
+      expect(checks).toMatchObject({ createdRemoved: true, remainedDisabled: false });
     },
   );
 });
@@ -652,11 +643,7 @@ function configReadEvidence() {
     ok: true,
     result: {
       path: "tools.codeMode",
-      config: {
-        enabled: true,
-        timeoutMs: 10_000,
-        maxOutputBytes: 65_536,
-      },
+      config: { enabled: true, timeoutMs: 10_000, maxOutputBytes: 65_536 },
     },
   };
   return {
@@ -675,21 +662,19 @@ function configReadEvidence() {
   };
 }
 
-describe("Gateway config read evidence", () => {
-  it.each(["unchanged", "missing-details"] as const)(
-    "grades %s config evidence independently of the final enabled claim",
-    (violation) => {
-      const evidence = configReadEvidence();
-      const activity = expectDefined(evidence.trace.activities[0], "config read");
-      if (violation === "missing-details") {
-        activity.result = { ok: true };
-      }
-      const checks = evaluateGatewayMatrixTask(evidence);
-      expect(checks.answer).toBe(true);
-      allChecks(checks, violation === "unchanged");
-    },
-  );
-});
+it.each(["unchanged", "missing-details"] as const)(
+  "grades %s config evidence independently of the final enabled claim",
+  (violation) => {
+    const evidence = configReadEvidence();
+    const activity = expectDefined(evidence.trace.activities[0], "config read");
+    if (violation === "missing-details") {
+      activity.result = { ok: true };
+    }
+    const checks = evaluateGatewayMatrixTask(evidence);
+    expect(checks.answer).toBe(true);
+    allChecks(checks, violation === "unchanged");
+  },
+);
 
 const PROCESS = { marker: "MATRIX_PROCESS_R1_DONE", status: "completed", exitCode: 0 };
 
@@ -733,14 +718,12 @@ function processEvidence(recovery = false) {
   return collectGatewayMatrixTrace(events);
 }
 
-describe("process lifecycle evidence", () => {
-  it("requires exactly one successful helper launch: single-helper", () => {
-    const trace = processEvidence();
+it("requires exactly one successful helper launch: single-helper", () => {
+  const trace = processEvidence();
 
-    const checks = evaluate("process-contracts", PROCESS, trace);
-    expect(checks).toMatchObject({ observedCompletion: true, singleHelperLaunch: true });
-    allChecks(checks);
-  });
+  const checks = evaluate("process-contracts", PROCESS, trace);
+  expect(checks).toMatchObject({ observedCompletion: true, singleHelperLaunch: true });
+  allChecks(checks);
 });
 
 describe("wrong-wait process recovery evidence", () => {
@@ -773,21 +756,7 @@ describe("wrong-wait process recovery evidence", () => {
     ["missing-marker", "observedMarker"],
     ["unsettled-poll-cell", "completedRecoveryPoll"],
   ] as const)("rejects %s despite the correct final claim", (violation, failedCheck) => {
-    const trace = processEvidence(true);
-    const launch = expectDefined(
-      trace.activities.find((item) => item.name === "exec"),
-      "launch",
-    );
-    const poll = expectDefined(
-      trace.activities.find((item) => item.name === "process"),
-      "poll",
-    );
-    const pollCall = traceCall(trace, poll.parentId);
-    const wait = traceCall(trace, "wrong-wait");
-    const waitResult = expectDefined(
-      trace.outcomes.find((item) => item.id === wait.id),
-      "wait result",
-    );
+    const { trace, launch, poll, pollCall, wait, waitResult, launchResult } = recoveryEvidence();
     if (violation === "missing-wait") {
       trace.calls = trace.calls.filter((call) => call !== wait);
       trace.outcomes = trace.outcomes.filter((outcome) => outcome !== waitResult);
@@ -801,10 +770,7 @@ describe("wrong-wait process recovery evidence", () => {
       waitResult.isError = false;
       waitResult.details = { status: "completed" };
     } else if (violation === "waiting-launch") {
-      expectDefined(
-        trace.outcomes.find((item) => item.id === launch.parentId),
-        "launch result",
-      ).details.status = "waiting";
+      launchResult.details.status = "waiting";
     } else if (violation === "same-turn-poll") {
       pollCall.eventIndex = wait.eventIndex;
     } else if (violation === "premature-poll") {
@@ -821,8 +787,7 @@ describe("wrong-wait process recovery evidence", () => {
       trace.outcomes = trace.outcomes.filter((outcome) => outcome.id !== pollCall.id);
     }
     const checks = evaluate("process-wait-recovery", PROCESS, trace);
-    expect(checks.answer).toBe(true);
-    expect(checks[failedCheck]).toBe(false);
+    expect(checks).toMatchObject({ answer: true, [failedCheck]: false });
     allChecks(checks, false);
   });
 });
@@ -838,12 +803,10 @@ describe("JavaScript declaration and argument-validation evidence", () => {
         "read-types",
         '// Inspect the real declaration.\nreturn await API.read("tools/read.d.ts");',
         {
-          path: "tools/read.d.ts",
           content: "declare function read(input: {path: string}): Promise<unknown>;",
         },
       ),
       ...completedEvents("write-types", 'return await API.read("tools/write.d.ts");', {
-        path: "tools/write.d.ts",
         content:
           "declare function write(input: {path: string; content: string}): Promise<unknown>;",
       }),
@@ -856,7 +819,6 @@ describe("JavaScript declaration and argument-validation evidence", () => {
         "read",
         { path: 42 },
         {
-          status: "error",
           error: 'Invalid arguments for tool "openclaw:core:read": /path: must be string.',
         },
         true,
@@ -868,14 +830,7 @@ describe("JavaScript declaration and argument-validation evidence", () => {
         ],
       }),
       assistantCall("read", 'return await read({path:"facts.txt"});'),
-      nestedActivity(
-        "read",
-        "read",
-        { path: "facts.txt" },
-        { kind: "text", content: `verification_code=${expected.verificationCode}\n` },
-        false,
-        [{ type: "text", text: `verification_code=${expected.verificationCode}\n` }],
-      ),
+      textRead("read", "facts.txt", `verification_code=${expected.verificationCode}\n`),
       toolOutcome("read", {
         status: "completed",
         value: `verification_code=${expected.verificationCode}`,
@@ -885,14 +840,7 @@ describe("JavaScript declaration and argument-validation evidence", () => {
         `await write({path:"result.txt",content:${JSON.stringify(expected.verificationCode)}}); return await read({path:"result.txt"});`,
       ),
       nestedActivity("write", "write", { path: "result.txt", content: expected.verificationCode }),
-      nestedActivity(
-        "write",
-        "read",
-        { path: "result.txt" },
-        { kind: "text", content: expected.verificationCode },
-        false,
-        [{ type: "text", text: expected.verificationCode }],
-      ),
+      textRead("write", "result.txt", expected.verificationCode),
       toolOutcome("write", { status: "completed", value: expected.verificationCode }),
     ]);
     return trace;
@@ -934,21 +882,20 @@ describe("JavaScript declaration and argument-validation evidence", () => {
 });
 
 describe("Gateway matrix interview evidence", () => {
-  const answer = JSON.stringify({
-    rationale: "The previous reference held a snapshot; this run observed that it expired.",
-    facts: {
-      priorRefAvailable: false,
-      retainedDataFresh: false,
-      sameRunOnly: true,
-      previewComplete: false,
-    },
-  });
+  function interviewAnswer(previewComplete: boolean | null) {
+    return JSON.stringify({
+      rationale: "Observed expiry of the prior snapshot.",
+      facts: {
+        priorRefAvailable: false,
+        retainedDataFresh: false,
+        sameRunOnly: true,
+        previewComplete,
+      },
+    });
+  }
 
   const previewCases = [
-    {
-      label: "missing preview metadata",
-      descriptors: [{ id: "unknown" }],
-    },
+    { label: "missing preview metadata", descriptors: [{ id: "unknown" }] },
     {
       label: "mixed selected previews",
       descriptors: [
@@ -962,13 +909,7 @@ describe("Gateway matrix interview evidence", () => {
       assistantCall("saved", "return await results.save({});"),
       toolOutcome("saved", {
         status: "completed",
-        value: descriptors.map((descriptor) => ({
-          bytes: 2,
-          count: 0,
-          shape: "object",
-          preview: "{}",
-          ...descriptor,
-        })),
+        value: descriptors.map((descriptor) => ({ bytes: 2, preview: "{}", ...descriptor })),
       }),
     ]);
     const interviewTrace = collectGatewayMatrixTrace(
@@ -983,20 +924,11 @@ describe("Gateway matrix interview evidence", () => {
         }),
       ]),
     );
-    const final = JSON.stringify({
-      rationale: "I inspected the descriptors and observed that the probed references expired.",
-      facts: {
-        priorRefAvailable: false,
-        retainedDataFresh: false,
-        sameRunOnly: true,
-        previewComplete: null,
-      },
-    });
     const checks = evaluateGatewayMatrixInterview(
       "invoices-auto-retention",
       taskTrace,
       interviewTrace,
-      final,
+      interviewAnswer(null),
     );
     expect(checks).toMatchObject({ priorReferenceProbed: true, priorReferenceUnavailable: true });
     allChecks(checks);
@@ -1022,7 +954,7 @@ describe("Gateway matrix interview evidence", () => {
       "invoices-auto-retention",
       taskTrace,
       collectGatewayMatrixTrace(events),
-      answer,
+      interviewAnswer(false),
     );
     expect(checks.priorReferenceProbed).toBe(true);
     expect(checks.priorReferenceUnavailable).toBe(false);
@@ -1045,10 +977,7 @@ function comparisonRow() {
       fixtureSha256: "fixed-fixture",
       settings: { executor: "node", thinking: "off", timeoutSeconds: 120 },
     },
-    gateway: {
-      upstreamCalls: 1,
-      taskElapsedMs: 10000,
-    },
+    gateway: { upstreamCalls: 1, taskElapsedMs: 10000 },
   };
 }
 
@@ -1162,10 +1091,7 @@ describe("separate task and interview comparison outcomes", () => {
         costUsd: null,
       },
     });
-    expect(cell.interviewConsistency).toEqual({
-      baselinePassed: true,
-      candidatePassed: false,
-    });
+    expect(cell.interviewConsistency).toEqual({ baselinePassed: true, candidatePassed: false });
     expect(compared).toMatchObject({ baselinePassed: 1, candidatePassed: 0 });
     expect(compared.outcomes).toEqual({
       taskBehavior: {

@@ -63,24 +63,12 @@ function initializeGitFixture(root: string, env = createNestedGitEnv()) {
     }).trim();
   git(["init", "--quiet"]);
   git(["add", "."]);
-  git([
-    "-c",
-    "user.name=QA Fixture",
-    "-c",
-    "user.email=qa@example.test",
-    "commit",
-    "--no-gpg-sign",
-    "--allow-empty",
-    "--quiet",
-    "-m",
-    "fixture",
-  ]);
+  const author = ["-c", "user.name=QA Fixture", "-c", "user.email=qa@example.test"];
+  git([...author, "commit", "--no-gpg-sign", "--allow-empty", "--quiet", "-m", "fixture"]);
   return { env, git, head: git(["rev-parse", "HEAD"]) };
 }
 
-it("the actual CLI completes a Gateway cell without a live provider or entrypoint import cycle", async ({
-  signal,
-}) => {
+it("runs the actual Gateway matrix CLI without a provider or import cycle", async ({ signal }) => {
   const root = tempDirs.make("openclaw-matrix-cli-");
   await Promise.all(
     ["dist", "node_modules", "packages", "home", "tmp"].map((directory) =>
@@ -141,13 +129,14 @@ it("the actual CLI completes a Gateway cell without a live provider or entrypoin
   );
   expect(run.error, run.stdout + run.stderr).toBeUndefined();
   expect(run.status, run.stderr).toBe(1);
-  const resultsPath = path.join(root, "artifacts", "results.jsonl");
-  const resultsText = await fs.readFile(resultsPath, "utf8").catch((cause: unknown) => {
-    throw new Error(
-      `Real CLI produced no result.\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
-      { cause },
-    );
-  });
+  const resultsText = await fs
+    .readFile(path.join(root, "artifacts/results.jsonl"), "utf8")
+    .catch((cause: unknown) => {
+      throw new Error(
+        `Real CLI produced no result.\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
+        { cause },
+      );
+    });
   const rows = resultsText
     .trim()
     .split("\n")
@@ -220,6 +209,7 @@ it.each([
     const runtimeDir = tempDirs.make("openclaw-matrix-frozen-runtime-");
     const { head: harnessSha } = initializeGitFixture(repoRoot);
     const runtimeSha = "a".repeat(40);
+    const source = { gitSha: runtimeSha, sourceDirty: false, sourcePatchSha256: null };
     for (const root of [repoRoot, runtimeDir]) {
       await fs.mkdir(path.join(root, "dist"));
       await fs.writeFile(
@@ -258,7 +248,6 @@ it.each([
         ...matrixOptions(repoRoot, runtimeDir),
         models: [model],
         gatewayExecutor: executor,
-        modes: ["code"],
         tasks: [task],
         repetitions: 3,
         baselineResults,
@@ -266,7 +255,7 @@ it.each([
       {
         readSourceIdentity: async (root) => {
           expect(root).toBe(runtimeDir);
-          return { gitSha: runtimeSha, sourceDirty: false, sourcePatchSha256: null };
+          return source;
         },
         readBuildSha256: async (root) => {
           expect(root).toBe(runtimeDir);
@@ -316,9 +305,7 @@ it.each([
           return {
             ...params.cell,
             buildSha256,
-            gitSha: runtimeSha,
-            sourceDirty: false,
-            sourcePatchSha256: null,
+            ...source,
             timestamp: new Date().toISOString(),
             elapsedMs: 10,
             expected: "fixture",
