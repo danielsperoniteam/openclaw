@@ -16,7 +16,10 @@ import * as deliveryRuntime from "./subagent-announce-delivery.runtime.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import * as announceOutput from "./subagent-announce-output.js";
 import type { createRequesterDescendantReader } from "./subagent-announce.requester-settle-descendants.js";
-import { publishWakeTransition } from "./subagent-announce.requester-settle-wake.test-support.js";
+import {
+  makeSettledChild,
+  publishWakeTransition,
+} from "./subagent-announce.requester-settle-wake.test-support.js";
 
 const readDescendantFacts = vi.hoisted(() =>
   vi.fn<
@@ -65,32 +68,29 @@ import { maybeWakeRequesterAfterAllChildrenSettled } from "./subagent-announce.r
 const REQUESTER = "agent:main:main";
 const readChildCompletionFindings = announceOutput.readChildCompletionFindings;
 
-function makeSettledChild(
-  overrides: Pick<SubagentRunRecord, "runId"> & Partial<SubagentRunRecord>,
-): SubagentRunRecord {
-  const { runId, ...record } = overrides;
-  return {
-    runId,
-    childSessionKey: "agent:main:subagent:" + runId,
-    requesterSessionKey: REQUESTER,
-    requesterDisplayKey: "main",
-    task: "investigate",
-    cleanup: "keep",
-    createdAt: 1_000,
-    execution: { status: "terminal", startedAt: 2_000, endedAt: 3_000 },
-    expectsCompletionMessage: true,
-    delivery: { status: "delivered" },
-    requesterSettleWake: { status: "pending", attemptCount: 0 },
-    ...record,
-  };
-}
-
 function completeBatch(batch: readonly SubagentRunRecord[], rearmGeneration?: number): void {
   for (const entry of batch) {
     if (entry.requesterSettleWake?.rearmGeneration === rearmGeneration) {
       entry.requesterSettleWake = undefined;
     }
   }
+}
+
+function holdDelivery() {
+  const admitted = createDeferred();
+  const execute = createDeferred();
+  const startedTurns: string[] = [];
+  deliverSpy.mockImplementationOnce(async (params) => {
+    admitted.resolve();
+    await execute.promise;
+    const allowed = params.isSourceSessionEffectsAllowed;
+    if (typeof allowed === "function" && !allowed()) {
+      return { delivered: false, path: "none", disposition: "intentional_non_delivery" };
+    }
+    startedTurns.push(REQUESTER);
+    return { delivered: true, path: "direct" };
+  });
+  return { admitted, execute, startedTurns };
 }
 
 function wakeParams() {
@@ -214,19 +214,7 @@ it.each(["same", "before admission", "during admission"] as const)(
     publishSystemEventStoreResolver(() =>
       replacement === "before admission" ? "replacement-store" : "original-store",
     );
-    const admitted = createDeferred();
-    const execute = createDeferred();
-    const startedTurns: string[] = [];
-    deliverSpy.mockImplementationOnce(async (params) => {
-      admitted.resolve();
-      await execute.promise;
-      const allowed = params.isSourceSessionEffectsAllowed;
-      if (typeof allowed === "function" && !allowed()) {
-        return { delivered: false, path: "none", disposition: "intentional_non_delivery" };
-      }
-      startedTurns.push(REQUESTER);
-      return { delivered: true, path: "direct" };
-    });
+    const { admitted, execute, startedTurns } = holdDelivery();
     const complete = vi.fn((batch: readonly SubagentRunRecord[], generation?: number) =>
       completeBatch(batch, generation),
     );
@@ -308,23 +296,7 @@ it("leaves a yielded batch intact when an older queued wake loses rearm authorit
     },
   });
   registryRuntimeMock.listSubagentRunsForRequester.mockReturnValue([child]);
-  const admitted = createDeferred();
-  const execute = createDeferred();
-  const startedTurns: string[] = [];
-  deliverSpy.mockImplementationOnce(async (params) => {
-    admitted.resolve();
-    await execute.promise;
-    const allowed = params.isSourceSessionEffectsAllowed;
-    if (typeof allowed === "function" && !allowed()) {
-      return {
-        delivered: false,
-        path: "none",
-        disposition: "intentional_non_delivery",
-      };
-    }
-    startedTurns.push(REQUESTER);
-    return { delivered: true, path: "direct" };
-  });
+  const { admitted, execute, startedTurns } = holdDelivery();
   const pending = maybeWakeRequesterAfterAllChildrenSettled(wakeParams());
   try {
     await awaitGateBeforeSettlement(

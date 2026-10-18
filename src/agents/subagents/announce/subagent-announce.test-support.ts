@@ -1,7 +1,3 @@
-/**
- * Test runtime factory for subagent announce delivery. It wires gateway,
- * session-store, queue, and hook behavior to caller-provided mocks.
- */
 import { isDeepStrictEqual } from "node:util";
 import { expect, vi } from "vitest";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
@@ -117,16 +113,11 @@ export function expectInputProvenance(
   params: Record<string, unknown> | undefined,
   sourceSessionKey: string,
 ) {
-  // Announce handoffs are inter-session messages; provenance lets the receiver
-  // distinguish child-output delivery from ordinary user input.
-  const inputProvenance = params?.inputProvenance;
-  if (!inputProvenance || typeof inputProvenance !== "object") {
-    throw new Error("Expected input provenance");
-  }
-  const provenance = inputProvenance as Record<string, unknown>;
-  expect(provenance.kind).toBe("inter_session");
-  expect(provenance.sourceSessionKey).toBe(sourceSessionKey);
-  expect(provenance.sourceTool).toBe("subagent_announce");
+  expect(params?.inputProvenance).toMatchObject({
+    kind: "inter_session",
+    sourceSessionKey,
+    sourceTool: "subagent_announce",
+  });
 }
 
 export function expectAgentCallFields(
@@ -138,15 +129,10 @@ export function expectAgentCallFields(
     to?: string;
   },
 ) {
-  expect(call.method).toBe("agent");
-  expect(call.params?.sessionKey).toBe(expected.sessionKey);
-  expect(call.params?.deliver).toBe(expected.deliver);
-  if ("channel" in expected) {
-    expect(call.params?.channel).toBe(expected.channel);
-  }
-  if ("to" in expected) {
-    expect(call.params?.to).toBe(expected.to);
-  }
+  expect(call).toMatchObject({
+    method: "agent",
+    params: { deliver: expected.deliver, ...expected },
+  });
 }
 
 export type MockSubagentRun = {

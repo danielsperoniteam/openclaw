@@ -1,44 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { createInternalAgentTurnFacade } from "../../../gateway/agent-turn/internal-facade.js";
 import { WRITE_SCOPE } from "../../../gateway/method-scopes.js";
-import { createGatewayMethodRegistry } from "../../../gateway/methods/registry.js";
 import type {
   GatewayRequestContext,
   GatewayRequestHandlers,
 } from "../../../gateway/server-methods/types.js";
 import { dispatchGatewayMethodInProcess } from "../../../gateway/server-plugin-in-process-dispatch.js";
+import { createContext as createGatewayContext } from "../../../gateway/server-plugin-in-process-dispatch.test-support.js";
 import { withPluginRuntimeGatewayContextResolver } from "../../../plugins/runtime/gateway-request-scope.js";
-import { trackAsyncWork } from "../../../shared/async-work-scope.js";
 
 function createContext(handlers: GatewayRequestHandlers): GatewayRequestContext {
-  const context = {
-    trackExecution: trackAsyncWork,
-    deps: {},
-    getRuntimeConfig: () => ({}),
-    getGatewayMethodRegistry: () => createRegistry(handlers),
-    logGateway: {
-      warn: vi.fn(),
-      error: vi.fn(),
-    },
-    dedupe: new Map(),
-  } as unknown as GatewayRequestContext;
-  context.createAgentTurnFacade = (principal) =>
-    createInternalAgentTurnFacade({
-      ...principal,
-      getContext: () => context,
-      getMethodRegistry: () => createRegistry(handlers),
-    });
-  return context;
-}
-
-function createRegistry(handlers: GatewayRequestHandlers) {
-  return createGatewayMethodRegistry(
-    Object.entries(handlers).map(([name, handler]) => ({
-      name,
-      handler,
-      owner: { kind: "core" as const, area: "test" },
-      scope: WRITE_SCOPE,
-    })),
+  return createGatewayContext(
+    Object.entries(handlers).map(([name, handler]) => [name, WRITE_SCOPE, "test", handler]),
   );
 }
 

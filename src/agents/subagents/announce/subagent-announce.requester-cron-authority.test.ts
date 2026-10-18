@@ -2,9 +2,11 @@ import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type { CronJob } from "../../../cron/types.js";
 import type { AgentRuntimeIdentity } from "../../../gateway/agent-runtime-identity-token.js";
 import type { SessionControllerInput } from "../../../sessions/session-controller.mailbox.js";
-import { createRequesterInitialTransferFixture } from "../registry/subagent-registry-requester-yield.test-support.js";
+import {
+  createRequesterInitialTransferFixture,
+  markRequesterTurnYieldedWithAuthority,
+} from "../registry/subagent-registry-requester-yield.test-support.js";
 import { copySubagentRunRuntimeOwner } from "../registry/subagent-run-generation.js";
-import { prepareRequesterCronAuthority } from "../requester-cron-authority.js";
 import {
   registryRuntimeMock,
   wakeParams,
@@ -70,7 +72,7 @@ describe("requester continuation automation management", () => {
       runWithCronCreatorAuthorityCapability,
     } = await import("../../cron-creator-authority-context.js");
     const { withGatewayToolCallerIdentity } = await import("../../tools/gateway-caller-context.js");
-    const { markRequesterTurnYieldedInRuns, settleRequesterTurnAfterSessionSpawns } =
+    const { settleRequesterTurnAfterSessionSpawns } =
       await import("../registry/subagent-registry-requester-yield.js");
     const sourceRunId = "admin-requester";
     let child = makeSettledChild({
@@ -107,24 +109,12 @@ describe("requester continuation automation management", () => {
             requesterAgentId: "main",
             requesterTurnRunId: sourceRunId,
           };
-          const preparedAuthority = prepareRequesterCronAuthority(requester);
-          try {
-            expect(
-              await markRequesterTurnYieldedInRuns({
-                ...requester,
-                preparedAuthority: preparedAuthority ?? null,
-                runs,
-                transfer,
-              }),
-            ).toBe(1);
-          } finally {
-            await preparedAuthority?.release();
-          }
+          expect(
+            await markRequesterTurnYieldedWithAuthority({ ...requester, runs, transfer }),
+          ).toBe(1);
           expect(
             await settleRequesterTurnAfterSessionSpawns({
-              requesterSessionKey: REQUESTER,
-              requesterAgentId: "main",
-              requesterTurnRunId: sourceRunId,
+              ...requester,
               requesterYielded: true,
               acceptedSessionSpawns: [
                 {

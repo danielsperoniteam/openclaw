@@ -1,11 +1,11 @@
 import "./subagent-announce.requester-settle-dispatch-mocks.test-support.js";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
 import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
 } from "../../../config/runtime-snapshot.js";
 import type { InternalSessionEntry } from "../../../config/sessions/types.js";
+import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import { registerChatAbortController } from "../../../gateway/chat-abort.js";
 import { waitForGatewayDispatch } from "../../../gateway/server-in-process-dispatch.js";
 import { createSyntheticPluginRuntimeClient } from "../../../gateway/server-plugin-runtime-client.js";
@@ -20,7 +20,6 @@ import { getExistingSessionControllerMailbox } from "../../../sessions/session-c
 import { markReplyOperationExecutionStarted } from "../../../sessions/session-controller.state.js";
 import { rpcSourceTesting } from "../../../sessions/session-lifecycle-admission.test-support.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
-import { closeOpenClawAgentDatabasesAsync } from "../../../state/openclaw-agent-db.js";
 import { prepareEmbeddedAttemptTimeout } from "../../embedded-agent-runner/run/attempt-timeout-prepare.js";
 import { resolveAgentTimeoutMs } from "../../timeout.js";
 import { consumeSubagentPauseNotice } from "../registry/subagent-delivery-state.js";
@@ -46,15 +45,7 @@ import {
 } from "./subagent-announce.requester-settle-dispatch.test-support.js";
 import { maybeWakeRequesterAfterAllChildrenSettled } from "./subagent-announce.requester-settle-wake.js";
 
-const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
-  afterEach(async () => {
-    for (const dir of tempDirs.dirs) {
-      await closeOpenClawAgentDatabasesAsync(dir);
-    }
-    cleanup();
-    clearRuntimeConfigSnapshot();
-  }),
-);
+afterEach(() => clearRuntimeConfigSnapshot());
 
 const REQUESTER_TARGET = captureSessionTarget({
   storeScope: "/synthetic/requester-settle-dispatch/sessions.db",
@@ -68,6 +59,41 @@ const REQUESTER_TURN = {
   sessionId: "requester-session",
   agentId: "main",
 };
+
+type WakeParams = Parameters<typeof maybeWakeRequesterAfterAllChildrenSettled>[0];
+function wakeParams(settledEntry: SubagentRunRecord, completeBatch: WakeParams["completeBatch"]) {
+  return {
+    requesterSessionKey: REQUESTER_KEY,
+    isSourceCurrent: () => true,
+    settledEntry,
+    transitionBatch: publishWakeTransition,
+    completeBatch,
+  };
+}
+function withGateway(context: ReturnType<typeof createContext>, run: () => Promise<boolean>) {
+  return withPluginRuntimeGatewayRequestScope(
+    { context, client: createSyntheticPluginRuntimeClient(), isWebchatConnect: () => false },
+    run,
+  );
+}
+function useDirectDelivery(cfg: OpenClawConfig = {}) {
+  setSubagentAnnounceDeliveryDepsForTest({
+    getRuntimeConfig: () => cfg,
+    loadRequesterSessionEntry: () => ({
+      cfg,
+      canonicalKey: REQUESTER_KEY,
+      agentId: "main",
+      storePath: REQUESTER_TARGET.storeScope,
+      entry: { sessionId: "requester-session", updatedAt: 1 },
+    }),
+    getRequesterSessionActivity: () => ({
+      sessionId: "requester-session",
+      target: REQUESTER_TARGET,
+      isActive: false,
+    }),
+  });
+  deliver.mockImplementation(sendSubagentAnnounceDirectly);
+}
 
 describe("requester settle dispatch deadline", () => {
   useRequesterSettleDispatchFixture();
@@ -212,13 +238,7 @@ describe("requester settle dispatch deadline", () => {
     });
     expect(await reserveRestoredSubagentControllerSources([child])).toEqual([]);
     await expect(
-      maybeWakeRequesterAfterAllChildrenSettled({
-        requesterSessionKey: REQUESTER_KEY,
-        isSourceCurrent: () => true,
-        settledEntry: child,
-        transitionBatch: publishWakeTransition,
-        completeBatch,
-      }),
+      maybeWakeRequesterAfterAllChildrenSettled(wakeParams(child, completeBatch)),
     ).resolves.toBe(settled);
     expect(startTurn).not.toHaveBeenCalled();
     expect(completeBatch).toHaveBeenCalledTimes(reconciled ? 1 : 0);
@@ -372,35 +392,9 @@ describe("requester settle dispatch deadline", () => {
         { status: "ok", result: { payloads: [{ text: "Continuation needed." }] } },
       ]);
     });
-    setSubagentAnnounceDeliveryDepsForTest({
-      getRuntimeConfig: () => ({}),
-      loadRequesterSessionEntry: () => ({
-        cfg: {},
-        canonicalKey: REQUESTER_KEY,
-        agentId: "main",
-        storePath: REQUESTER_TARGET.storeScope,
-        entry: { sessionId: "requester-session", updatedAt: 1 },
-      }),
-      getRequesterSessionActivity: () => ({
-        sessionId: "requester-session",
-        target: REQUESTER_TARGET,
-        isActive: false,
-      }),
-    });
-    deliver.mockImplementation(sendSubagentAnnounceDirectly);
-    const params = {
-      requesterSessionKey: REQUESTER_KEY,
-      isSourceCurrent: () => true,
-      settledEntry: child,
-      transitionBatch: publishWakeTransition,
-      completeBatch: () => {
-        consumeSubagentPauseNotice(child);
-      },
-    };
-    const wake = withPluginRuntimeGatewayRequestScope(
-      { context, client: createSyntheticPluginRuntimeClient(), isWebchatConnect: () => false },
-      () => maybeWakeRequesterAfterAllChildrenSettled(params),
-    );
+    useDirectDelivery();
+    const params = wakeParams(child, () => consumeSubagentPauseNotice(child));
+    const wake = withGateway(context, () => maybeWakeRequesterAfterAllChildrenSettled(params));
     try {
       await accepted.promise;
       expect(received).toEqual([]);
@@ -436,29 +430,8 @@ describe("requester settle dispatch deadline", () => {
       const completeBatch = vi.fn(() => {
         child.requesterSettleWake = undefined;
       });
-      const params = {
-        requesterSessionKey: REQUESTER_KEY,
-        isSourceCurrent: () => true,
-        settledEntry: child,
-        transitionBatch: publishWakeTransition,
-        completeBatch,
-      };
-      setSubagentAnnounceDeliveryDepsForTest({
-        getRuntimeConfig: () => ({}),
-        loadRequesterSessionEntry: () => ({
-          cfg: {},
-          canonicalKey: REQUESTER_KEY,
-          agentId: "main",
-          storePath: REQUESTER_TARGET.storeScope,
-          entry: { sessionId: "requester-session", updatedAt: 1 },
-        }),
-        getRequesterSessionActivity: () => ({
-          sessionId: "requester-session",
-          target: REQUESTER_TARGET,
-          isActive: false,
-        }),
-      });
-      deliver.mockImplementation(sendSubagentAnnounceDirectly);
+      const params = wakeParams(child, completeBatch);
+      useDirectDelivery();
       startTurn.mockImplementation(async ({ controllerInput, preflight, io }) => {
         const request = preflight.request;
         if (failure === "admitted") {
@@ -487,10 +460,7 @@ describe("requester settle dispatch deadline", () => {
         context.createAgentTurnFacade = undefined;
       }
       const run = () =>
-        withPluginRuntimeGatewayRequestScope(
-          { context, client: createSyntheticPluginRuntimeClient(), isWebchatConnect: () => false },
-          () => maybeWakeRequesterAfterAllChildrenSettled(params),
-        );
+        withGateway(context, () => maybeWakeRequesterAfterAllChildrenSettled(params));
       await expect(run()).resolves.toBe(false);
       if (failure === "unavailable") {
         expect(startTurn).not.toHaveBeenCalled();
@@ -522,13 +492,7 @@ describe("requester settle dispatch deadline", () => {
     const completeBatch = vi.fn();
 
     await expect(
-      maybeWakeRequesterAfterAllChildrenSettled({
-        isSourceCurrent: () => true,
-        requesterSessionKey: REQUESTER_KEY,
-        settledEntry: retired,
-        transitionBatch: publishWakeTransition,
-        completeBatch,
-      }),
+      maybeWakeRequesterAfterAllChildrenSettled(wakeParams(retired, completeBatch)),
     ).resolves.toBe(false);
     expect(deliver).not.toHaveBeenCalled();
     expect(completeBatch).not.toHaveBeenCalled();
@@ -626,37 +590,12 @@ describe("requester settle dispatch deadline", () => {
           await claim?.settlement.promise;
         }
       });
-      setSubagentAnnounceDeliveryDepsForTest({
-        getRuntimeConfig: () => cfg,
-        loadRequesterSessionEntry: () => ({
-          cfg,
-          canonicalKey: REQUESTER_KEY,
-          agentId: "main",
-          storePath: REQUESTER_TARGET.storeScope,
-          entry: { sessionId: "requester-session", updatedAt: 1 },
+      useDirectDelivery(cfg);
+      const wake = withGateway(context, () =>
+        maybeWakeRequesterAfterAllChildrenSettled({
+          ...wakeParams(child, completeBatch),
+          signal: stop.signal,
         }),
-        getRequesterSessionActivity: () => ({
-          sessionId: "requester-session",
-          target: REQUESTER_TARGET,
-          isActive: false,
-        }),
-      });
-      deliver.mockImplementation(sendSubagentAnnounceDirectly);
-      const wake = withPluginRuntimeGatewayRequestScope(
-        {
-          context,
-          client: createSyntheticPluginRuntimeClient(),
-          isWebchatConnect: () => false,
-        },
-        () =>
-          maybeWakeRequesterAfterAllChildrenSettled({
-            isSourceCurrent: () => true,
-            requesterSessionKey: REQUESTER_KEY,
-            settledEntry: child,
-            signal: stop.signal,
-            transitionBatch: publishWakeTransition,
-            completeBatch,
-          }),
       );
       try {
         await executionStarted.promise;
