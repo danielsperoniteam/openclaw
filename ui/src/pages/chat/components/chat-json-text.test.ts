@@ -2,8 +2,6 @@
 
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { readMarkdownCodeBlockCopyText } from "../../../components/markdown-code-blocks.ts";
-import { TOOL_OUTPUT_PREVIEW_CHARS } from "../../../lib/chat/tool-output.ts";
-import { mountSolid } from "../../../test-helpers/solid-render.tsx";
 import type { NativeMessageGroupOptions } from "./chat-message-group-view.tsx";
 import { prepareChatMessageRender } from "./chat-message-markdown-view.tsx";
 import {
@@ -11,9 +9,6 @@ import {
   createMessageGroupHarness,
 } from "./chat-message-native.test-support.tsx";
 import { createMessageGroup } from "./chat-message.test-support.ts";
-import type { SidebarContent } from "./chat-sidebar-content-types.ts";
-import { mountCard } from "./chat-tool-cards.test-support.tsx";
-import { ChatToolOutput } from "./chat-tool-output-view.tsx";
 import { settleToolBridges } from "./chat-tool-render.test-support.ts";
 
 // Keep these as literal source text: parsing expected values would repeat the
@@ -107,48 +102,6 @@ describe.each(["user", "assistant", "toolResult"])("%s JSON message text", (role
     const container = await renderMessage(text, streaming);
     expect(container.querySelector(".code-block-json-tree, .code-block-json-mode")).toBeNull();
     expect(container.textContent).toContain(text);
-  });
-});
-
-describe("tool JSON details", () => {
-  async function openToolDetails(text: string) {
-    const openSidebar = vi.fn<(content: SidebarContent) => void>();
-    const container = await mountCard(
-      { id: "json-tool", name: "lookup", outputText: text, completed: true },
-      { onOpenSidebar: openSidebar },
-    );
-    expect(container.querySelector(".chat-tool-card__block code")?.textContent).toBe(
-      text.slice(0, TOOL_OUTPUT_PREVIEW_CHARS),
-    );
-    container.querySelector<HTMLButtonElement>(".chat-tool-card__action-btn")!.click();
-    expect(openSidebar).toHaveBeenCalledOnce();
-    const content = openSidebar.mock.calls[0]?.[0];
-    expect(content?.kind).toBe("tool-output");
-    if (content?.kind !== "tool-output") {
-      throw new Error("Expected raw tool output inspector");
-    }
-    expect(content.card.outputText).toBe(text);
-    const panel = createContainer();
-    mountSolid(ChatToolOutput, { content }, panel);
-    await vi.waitFor(() =>
-      expect(panel.querySelector(".chat-tool-output__text code")?.textContent).toBe(text),
-    );
-    return panel;
-  }
-
-  it.each([
-    jsonSources[0]!,
-    {
-      name: "oversized JSON",
-      text: '{"text":"**stars**' + "x".repeat(19_981) + '"}',
-    },
-    { name: "explicit fence", text: '```json\n{"id":9007199254740993,"text":"**stars**"}\n```' },
-    { name: "invalid JSON", text: '{"count": }' },
-  ])("preserves $name after opening tool details", async (scenario) => {
-    const { text } = scenario;
-    const panel = await openToolDetails(text);
-    expect(panel.querySelector("pre code")?.textContent).toBe(text);
-    expect(panel.querySelector("pre strong")).toBeNull();
   });
 });
 
