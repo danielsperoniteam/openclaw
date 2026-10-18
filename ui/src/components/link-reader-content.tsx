@@ -1,8 +1,9 @@
 import type { JSX } from "@solidjs/web";
-import { createEffect, createMemo, For, Show } from "solid-js";
+import { createMemo, For, Show } from "solid-js";
 import type { ControlUiLinkReaderDocument } from "../../../src/shared/control-ui-link-reader.js";
 import { registerLinkReaderEnglish } from "../i18n/locales/en-link-reader.ts";
 import { registerEnglishCatalog, t } from "../lib/reactive/i18n.ts";
+import { createIntersectionObserver } from "../lib/reactive/observers.ts";
 import { LinkReaderMarkdown, documentUrl, type LoadImage } from "./link-reader-markdown.tsx";
 import type { ReaderReadyView, ReaderSection } from "./link-reader-panel-view.ts";
 import { linkReaderAuthorHref } from "./link-reader-response.ts";
@@ -357,25 +358,16 @@ function DeferredSection(props: {
   onLoad: () => void;
   sectionRef: (element: HTMLElement) => void;
 }) {
-  let element: HTMLElement | undefined;
+  let element!: HTMLElement;
   const label = () => t("linkReader." + props.section);
-  createEffect(
-    () => props.section === "files" && props.state === "idle",
-    (observe) => {
-      if (!observe || !element || typeof IntersectionObserver === "undefined") {
-        return undefined;
+  createIntersectionObserver(
+    () => (props.section === "files" && props.state === "idle" ? [element] : []),
+    (entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        props.onLoad();
       }
-      const observer = new IntersectionObserver(
-        (entries) => {
-          if (entries.some((entry) => entry.isIntersecting)) {
-            props.onLoad();
-          }
-        },
-        { rootMargin: "120px" },
-      );
-      observer.observe(element);
-      return () => observer.disconnect();
     },
+    { rootMargin: "120px" },
   );
   return (
     <section
