@@ -9,38 +9,35 @@ import {
   patchSessionEntryCore,
   replaceSessionEntry,
 } from "../../config/sessions/session-accessor.js";
-import { runExclusiveSessionStoreWrite } from "../../config/sessions/store-writer.js";
 import { rotateAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
 import { getRpcSource } from "../../sessions/session-controller.rpc-sources.js";
 import { rpcSourceTesting } from "../../sessions/session-lifecycle-admission.test-support.js";
 import { linkEmail } from "../../state/user-profile-writes.worker.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
 import { createExpectedProfileBinding } from "../expected-profile.js";
-import { PENDING_CHAT_SEND_DEDUPE_PREFIX } from "../server-shared.js";
+import { expectRejectedOnce as expectRejected } from "../server-methods.request-gate.test-support.js";
 import { bindSessionRowProjection } from "../session-row-projection-access.js";
 import { createSessionRowProjection } from "../session-row-projection.js";
 import * as sessionSharingFacts from "../session-sharing-facts-read.js";
 import { dispatchInboundMessageMock, installGatewayTestHooks } from "../test-helpers.js";
+import {
+  bindChatProfile,
+  holdSessionWriter,
+  observeChatReservation,
+} from "./chat-send-admission-fixtures.test-support.js";
 import { admitChatSend } from "./chat-send-admission.js";
+import { prepareChatAdmission } from "./chat-send-admission.test-support.js";
 import {
   setClientProfile,
-  setNativeIosClient,
   useBrowserFollowupFixture,
 } from "./chat-send-pending-inputs.test-support.js";
-import { normalizeChatSendRequest } from "./chat-send-request.js";
-import { prepareChatSendSession, qualifyChatSendSession } from "./chat-send-session.js";
-import type { RespondFn } from "./types.js";
 installGatewayTestHooks();
 registerAgentSessionLoopTestLifecycle();
 const createBrowserFollowupFixture = useBrowserFollowupFixture();
 type Fixture = Awaited<ReturnType<typeof createBrowserFollowupFixture>>;
 
-function expectRejected(respond: ReturnType<typeof vi.fn<RespondFn>> | undefined, error: object) {
-  expect(respond).toHaveBeenCalledExactlyOnceWith(false, undefined, expect.objectContaining(error));
-}
-
 function expectProfileMismatch(
-  respond: ReturnType<typeof vi.fn<RespondFn>> | undefined,
+  respond: unknown,
   execution: "not_started" | "may_have_executed" = "not_started",
 ) {
   expectRejected(respond, { details: { reason: "EXPECTED_PROFILE_MISMATCH", execution } });
@@ -61,9 +58,10 @@ describe("native profile-bound input admission", () => {
     "authorizes the default-scope global alias against main (admin: $admin, allowed: $mainAllowed)",
     async ({ admin, mainAllowed }) => {
       const fixture = await createBrowserFollowupFixture();
-      const profile = ensureProfileForEmail("global-alias-caller@example.test");
-      const owner = ensureProfileForEmail("global-alias-owner@example.test");
-      setClientProfile(fixture.client, profile);
+      const { successor: owner } = bindChatProfile(
+        fixture.client,
+        "global-alias-caller@example.test",
+      );
       if (!admin) {
         fixture.client.connect.scopes = ["operator.read", "operator.write"];
       }
@@ -189,42 +187,24 @@ describe("native profile-bound input admission", () => {
     "rejects a native account merge at %s without accepting or terminalizing input",
     async (boundary) => {
       const fixture = await createBrowserFollowupFixture();
-      const email = "native-source@example.test";
-      const source = ensureProfileForEmail(email);
-      const target = ensureProfileForEmail("native-target@example.test");
-      setNativeIosClient(fixture.client);
-      setClientProfile(fixture.client, source);
+      const runId = fixture.params.idempotencyKey;
+      const { profile: source, merge } = bindChatProfile(
+        fixture.client,
+        "native-source@example.test",
+        true,
+      );
       const before = loadSessionEntry(fixture.scope);
-      const release = createDeferred();
-      let writer: Promise<void> | undefined;
+      let writer: ReturnType<typeof holdSessionWriter> | undefined;
       let request: ReturnType<typeof fixture.send> | undefined;
       try {
         if (boundary === "reservation") {
-          const normalized = await normalizeChatSendRequest({
-            params: fixture.params,
-            client: fixture.client,
-          });
-          if (!normalized.ok) {
-            throw new Error(normalized.error);
-          }
-          const prepared = await prepareChatSendSession({
-            request: normalized.value,
-            client: fixture.client,
-            context: fixture.context,
-          });
-          if (!prepared.ok) {
-            throw new Error("Native session preparation failed");
-          }
-          const session = await qualifyChatSendSession(prepared.value);
+          const prepared = await prepareChatAdmission(fixture);
           const binding = (await createExpectedProfileBinding(source.id, fixture.client))!;
           binding.markInvoked();
-          linkEmail(email, target.id);
+          merge();
           await expect(
             admitChatSend({
-              request: normalized.value,
-              session,
-              client: fixture.client,
-              context: fixture.context,
+              ...prepared,
               respond: vi.fn(),
               assertCurrent: binding.assertCurrent,
             }),
@@ -236,40 +216,19 @@ describe("native profile-bound input admission", () => {
           expect(fixture.context.dedupe.size).toBe(0);
         } else {
           if (boundary === "writer") {
-            const entered = createDeferred();
-            writer = runExclusiveSessionStoreWrite(fixture.scope.storePath, async () => {
-              entered.resolve();
-              await release.promise;
-            });
-            await entered.promise;
-            const pendingKey = `${PENDING_CHAT_SEND_DEDUPE_PREFIX}${fixture.params.idempotencyKey}`;
-            const reserved = createDeferred();
-            const setDedupe = fixture.context.dedupe.set.bind(fixture.context.dedupe);
-            const observeReservation = vi
-              .spyOn(fixture.context.dedupe, "set")
-              .mockImplementation((key, entry) => {
-                const result = setDedupe(key, entry);
-                if (key === pendingKey) {
-                  reserved.resolve();
-                }
-                return result;
-              });
-            try {
+            writer = holdSessionWriter(fixture.scope.storePath);
+            await writer.entered;
+            {
+              using reservation = observeChatReservation(fixture.context, runId);
               request = fixture.send(undefined, { expectedProfileId: source.id });
-              await awaitGateBeforeSettlement(
-                reserved.promise,
-                request,
-                "chat.send settled before its pending reservation",
-              );
-              expect(fixture.context.dedupe.has(pendingKey)).toBe(true);
-            } finally {
-              observeReservation.mockRestore();
+              await reservation.wait(request);
+              expect(fixture.context.dedupe.has(reservation.key)).toBe(true);
             }
-            linkEmail(email, target.id);
-            release.resolve();
-            await writer;
+            merge();
+            writer.release();
+            await writer.finished;
           } else {
-            fixture.beforeApprove.mockImplementation(() => linkEmail(email, target.id));
+            fixture.beforeApprove.mockImplementation(merge);
             request = fixture.send(undefined, { expectedProfileId: source.id });
           }
           const respond = await request;
@@ -278,12 +237,12 @@ describe("native profile-bound input admission", () => {
         expect(loadSessionEntry(fixture.scope)).toEqual(before);
         await expectNoInput(fixture);
         expect(rpcSourceTesting.size).toBe(0);
-        const cached = fixture.context.dedupe.get(`chat:${fixture.params.idempotencyKey}`);
+        const cached = fixture.context.dedupe.get(`chat:${runId}`);
         expect(cached?.payload).toBeUndefined();
         expect(cached?.error).toBeUndefined();
       } finally {
-        release.resolve();
-        await writer;
+        writer?.release();
+        await writer?.finished;
         await request;
         await fixture.cleanup();
       }
@@ -292,18 +251,19 @@ describe("native profile-bound input admission", () => {
 
   it("terminalizes a native command account merge during fresh transcript approval without rewriting the ACK", async () => {
     await using fixture = await createBrowserFollowupFixture({ persistDuringDispatch: true });
+    const runId = fixture.params.idempotencyKey;
     fixture.params.message = "/context list";
-    const email = "native-approval@example.test";
-    const source = ensureProfileForEmail(email);
-    const target = ensureProfileForEmail("native-approval-target@example.test");
-    setNativeIosClient(fixture.client);
-    setClientProfile(fixture.client, source);
+    const { profile: source, merge } = bindChatProfile(
+      fixture.client,
+      "native-approval@example.test",
+      true,
+    );
     const ack = await fixture.send(undefined, { expectedProfileId: source.id });
     expect(ack.mock.calls[0]?.[1]).toMatchObject({ status: "started" });
     expect(fixture.beforeApprove).not.toHaveBeenCalled();
     const recorder = await fixture.dispatchedRecorder;
     const acceptedAck = structuredClone(ack.mock.calls);
-    fixture.beforeApprove.mockImplementation(() => linkEmail(email, target.id));
+    fixture.beforeApprove.mockImplementation(merge);
     await fixture.finishDispatch();
     expect(fixture.beforeApprove).toHaveBeenCalledOnce();
     expect.soft(recorder.getAdmissionReceipt()).toBeUndefined();
@@ -321,22 +281,21 @@ describe("native profile-bound input admission", () => {
         type: "custom_message",
         customType: "run-failed-before-reply",
         display: true,
-        details: expect.objectContaining({ runId: fixture.params.idempotencyKey }),
+        details: expect.objectContaining({ runId }),
       }),
     );
-    expect.soft(loadSessionEntry(fixture.scope)).toMatchObject({
-      status: "failed",
-      lastRunId: fixture.params.idempotencyKey,
-    });
-    expect.soft(fixture.context.dedupe.get(`chat:${fixture.params.idempotencyKey}`)).toMatchObject({
+    expect
+      .soft(loadSessionEntry(fixture.scope))
+      .toMatchObject({ status: "failed", lastRunId: runId });
+    expect.soft(fixture.context.dedupe.get(`chat:${runId}`)).toMatchObject({
       ok: false,
-      payload: { runId: fixture.params.idempotencyKey, status: "error" },
+      payload: { runId, status: "error" },
       error: { message: expect.stringContaining("Selected account changed") },
     });
     expect.soft(fixture.context.broadcast).toHaveBeenCalledWith(
       "chat",
       expect.objectContaining({
-        runId: fixture.params.idempotencyKey,
+        runId,
         state: "error",
         errorMessage: expect.stringContaining("Selected account changed"),
       }),
@@ -350,6 +309,7 @@ describe("native profile-bound input admission", () => {
     "preserves accepted native input across %s without adopting the retry socket",
     async (change) => {
       await using fixture = await createBrowserFollowupFixture();
+      const runId = fixture.params.idempotencyKey;
       const profile = ensureProfileForEmail("native-accepted@example.test");
       fixture.client.connect.client = {
         id: "openclaw-macos",
@@ -371,15 +331,11 @@ describe("native profile-bound input admission", () => {
       expect(receipt).toBeDefined();
       const accepted = loadTranscriptEventsSync(fixture.scope);
       expect(accepted).toHaveLength(fixture.activeTranscript.length + 1);
-      expect(accepted.at(-1)).toMatchObject({
-        message: { content: fixture.approvedContent },
-      });
-      const owner = rpcSourceTesting.get(fixture.params.idempotencyKey);
+      expect(accepted.at(-1)).toMatchObject({ message: { content: fixture.approvedContent } });
+      const owner = rpcSourceTesting.get(runId);
       expect(owner).toBeDefined();
       const ownerConnId = owner?.adapter.requester?.connectionId;
-      const cached = structuredClone(
-        fixture.context.dedupe.get(`chat:${fixture.params.idempotencyKey}`),
-      );
+      const cached = structuredClone(fixture.context.dedupe.get(`chat:${runId}`));
       if (change === "request-signal abort") {
         requestAbort.abort();
       }
@@ -394,12 +350,12 @@ describe("native profile-bound input admission", () => {
       } else {
         expect(retry.mock.calls[0]?.[1]).toMatchObject({ status: "in_flight" });
       }
-      expect(rpcSourceTesting.get(fixture.params.idempotencyKey)).toBe(owner);
+      expect(rpcSourceTesting.get(runId)).toBe(owner);
       expect(owner?.adapter.requester?.connectionId).toBe(ownerConnId);
       expect(owner?.input.abortSignal.aborted).toBe(false);
       expect(loadTranscriptEventsSync(fixture.scope)).toEqual(accepted);
       expect(recorder.getAdmissionReceipt()).toEqual(receipt);
-      expect(fixture.context.dedupe.get(`chat:${fixture.params.idempotencyKey}`)).toEqual(cached);
+      expect(fixture.context.dedupe.get(`chat:${runId}`)).toEqual(cached);
       expect(await recorder.persistApproved()).toEqual(committed);
       expect(loadTranscriptEventsSync(fixture.scope)).toEqual(accepted);
       expect(recorder.getAdmissionReceipt()).toEqual(receipt);
@@ -415,11 +371,9 @@ describe("native profile-bound input admission", () => {
         preserveContent: true,
         persistDuringDispatch: true,
       });
+      const runId = fixture.params.idempotencyKey;
       let hostCurrent = true;
-      const email = "retained-authority@example.test";
-      const profile = ensureProfileForEmail(email);
-      const target = ensureProfileForEmail("retained-authority-target@example.test");
-      setClientProfile(fixture.client, profile);
+      const { profile, merge } = bindChatProfile(fixture.client, "retained-authority@example.test");
       if (boundary === "session ACL") {
         fixture.client.connect.scopes = ["operator.read", "operator.write"];
       }
@@ -440,7 +394,7 @@ describe("native profile-bound input admission", () => {
         items: [{ state: "queued", message: { content: fixture.params.message } }],
       });
       await fixture.dispatchedRecorder;
-      linkEmail(email, target.id);
+      merge();
       if (boundary === "host") {
         hostCurrent = false;
       } else if (boundary === "session ACL") {
@@ -457,7 +411,7 @@ describe("native profile-bound input admission", () => {
             isRecord(entry) &&
             entry.type === "message" &&
             isRecord(entry.message) &&
-            entry.message.idempotencyKey === `${fixture.params.idempotencyKey}:user`,
+            entry.message.idempotencyKey === `${runId}:user`,
         ),
       ).toEqual([]);
       expect(await listSessionPendingInputs(fixture.scope)).toMatchObject({
@@ -470,25 +424,16 @@ describe("native profile-bound input admission", () => {
           },
         ],
       });
-      const cached = structuredClone(
-        fixture.context.dedupe.get(`chat:${fixture.params.idempotencyKey}`),
-      );
-      expect(cached).toMatchObject({
-        ok: false,
-        payload: { runId: fixture.params.idempotencyKey, status: "error" },
-      });
+      const cached = structuredClone(fixture.context.dedupe.get(`chat:${runId}`));
+      expect(cached).toMatchObject({ ok: false, payload: { runId, status: "error" } });
       expect(fixture.context.broadcast).toHaveBeenCalledWith(
         "chat",
-        expect.objectContaining({
-          runId: fixture.params.idempotencyKey,
-          state: "error",
-          errorMessage: expect.any(String),
-        }),
+        expect.objectContaining({ runId, state: "error", errorMessage: expect.any(String) }),
         expect.anything(),
       );
       const retry = await fixture.send(undefined, { expectedProfileId: profile.id });
       expectProfileMismatch(retry);
-      expect(fixture.context.dedupe.get(`chat:${fixture.params.idempotencyKey}`)).toEqual(cached);
+      expect(fixture.context.dedupe.get(`chat:${runId}`)).toEqual(cached);
       expect(rpcSourceTesting.size).toBe(0);
     },
   );

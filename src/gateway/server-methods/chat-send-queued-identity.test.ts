@@ -34,6 +34,7 @@ import { createDirectChatContext } from "../server-chat.agent-events.test-helper
 import { createChatSendTurnAdoptionLifecycle } from "./chat-send-turn-adoption.js";
 
 const sessionKey = "agent:main:queued-identity";
+const identity = { sessionKey, sessionId: "session", agentId: "main" };
 const target = captureSessionTarget({
   storeScope: "/synthetic/queued-identity/sessions",
   sessionKey,
@@ -80,9 +81,7 @@ function fixture(originatingChannel = "webchat") {
     const registration = registerChatAbortController({
       target,
       runId,
-      sessionKey,
-      sessionId: "session",
-      agentId: "main",
+      ...identity,
       timeoutMs: 10_000,
     });
     if (!registration.registered) {
@@ -145,9 +144,7 @@ function fixture(originatingChannel = "webchat") {
     const operation = createReplyOperation({
       mailboxClaim,
       target,
-      sessionKey,
-      sessionId: "session",
-      agentId: "main",
+      ...identity,
       resetTriggered: false,
     });
     ownedOperations.push(operation);
@@ -203,7 +200,7 @@ describe("queued chat input identity", () => {
         collected.queuedFollowupReplyDisposition.deliver(batch),
       ]);
       inputs.forEach(({ run }) => completeFollowupRunLifecycle(run));
-      expect(terminals()).toEqual(ids.map((runId) => expect.objectContaining({ runId, state })));
+      expect(terminals()).toMatchObject(ids.map((runId) => ({ runId, state })));
       expect(ids.every((id) => !isRpcSourceQueued(rpcSourceTesting.get(id)))).toBe(true);
       for (const id of ids) {
         expect(await waitResult(context, id)).toMatchObject({ runId: id, status });
@@ -236,9 +233,7 @@ describe("queued chat input identity", () => {
         completion: { kind: "failed", error: "progress preparation failed" },
       }),
     ).rejects.toThrow("progress preparation failed");
-    expect(terminals()).toEqual([
-      expect.objectContaining({ runId: "progress-failure-B", state: "error" }),
-    ]);
+    expect(terminals()).toMatchObject([{ runId: "progress-failure-B", state: "error" }]);
   });
 
   it("withdraws only the selected input before consumption", async () => {
@@ -253,9 +248,7 @@ describe("queued chat input identity", () => {
     expect(second.controller.signal.aborted).toBe(false);
     expect(active.abortSignal.aborted).toBe(false);
     expect(isRpcSourceQueued(second.sourceRef)).toBe(true);
-    expect(terminals()).toEqual([
-      expect.objectContaining({ runId: "cancel-B1", state: "aborted" }),
-    ]);
+    expect(terminals()).toMatchObject([{ runId: "cancel-B1", state: "aborted" }]);
   });
 
   it.each([1, 2])("waits for %i consumed inputs to settle after cancellation", async (count) => {
@@ -276,9 +269,7 @@ describe("queued chat input identity", () => {
     await source.adoption.onQueuedFollowupReplyBatch(
       replyBatch("running-C", { kind: "aborted", stopReason: "aborted" }),
     );
-    expect(terminals()).toEqual([
-      expect.objectContaining({ runId: `running-B-${count}`, state: "aborted" }),
-    ]);
+    expect(terminals()).toMatchObject([{ runId: `running-B-${count}`, state: "aborted" }]);
   });
 
   it("keeps external-channel streaming separate from the input terminal", async () => {
@@ -295,13 +286,8 @@ describe("queued chat input identity", () => {
     );
     await adoption.onQueuedFollowupReplyBatch(batch);
     expect(terminals()).toEqual([]);
-    await adoption.onQueuedFollowupReplyBatch({
-      ...batch,
-      completion: { kind: "completed" },
-    });
-    expect(terminals()).toEqual([
-      expect.objectContaining({ runId: "channel-B", state: "final", message: undefined }),
-    ]);
+    await adoption.onQueuedFollowupReplyBatch({ ...batch, completion: { kind: "completed" } });
+    expect(terminals()).toMatchObject([{ runId: "channel-B", state: "final", message: undefined }]);
   });
 
   it.each(["old", "new"] as const)(
@@ -311,12 +297,12 @@ describe("queued chat input identity", () => {
       enqueue(`overflow-first-${dropPolicy}`, dropPolicy, 1);
       enqueue(`overflow-second-${dropPolicy}`, dropPolicy, 1);
       const dropped = `overflow-${dropPolicy === "old" ? "first" : "second"}-${dropPolicy}`;
-      expect(terminals()).toEqual([
-        expect.objectContaining({
+      expect(terminals()).toMatchObject([
+        {
           runId: dropped,
           state: "error",
           errorMessage: expect.stringContaining("dropped"),
-        }),
+        },
       ]);
       expect(await waitResult(context, dropped)).toMatchObject({ runId: dropped, status: "error" });
     },

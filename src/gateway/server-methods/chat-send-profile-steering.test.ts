@@ -26,10 +26,10 @@ import {
   bindSessionControllerSourceTurnId,
   captureReplyMessageInjectionTarget,
 } from "../../sessions/session-controller.js";
-import { linkEmail } from "../../state/user-profile-writes.worker.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
 import { createExpectedProfileBinding } from "../expected-profile.js";
 import { dispatchInboundMessageMock, installGatewayTestHooks } from "../test-helpers.js";
+import { bindChatProfile } from "./chat-send-admission-fixtures.test-support.js";
 import { bindSteeringTools } from "./chat-send-authority.test-support.js";
 import {
   setClientProfile,
@@ -168,11 +168,11 @@ describe("native profile-bound steering", () => {
       if (!operation) {
         throw new Error("Expected the steering fixture to own an active run");
       }
-      const email = "native-steering@example.test";
-      const profile = ensureProfileForEmail(email);
-      const target = ensureProfileForEmail("native-steering-target@example.test");
-      setNativeIosClient(fixture.client);
-      setClientProfile(fixture.client, profile);
+      const { profile, merge } = bindChatProfile(
+        fixture.client,
+        "native-steering@example.test",
+        true,
+      );
       const fingerprint = "native-steering-tools";
       bindSteeringTools(operation, fingerprint);
       operation.setPhase("running");
@@ -206,7 +206,7 @@ describe("native profile-bound steering", () => {
         expect(enqueued).not.toHaveBeenCalled();
         expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
         if (change === "profile merge") {
-          linkEmail(email, target.id);
+          merge();
         } else if (change === "target closed") {
           operation.complete();
         }
@@ -291,9 +291,7 @@ describe("native profile-bound steering", () => {
                     "question.resolve",
                     {},
                     {},
-                    {
-                      dispatchAuthority: { version: 2, kind, assertCurrent },
-                    },
+                    { dispatchAuthority: { version: 2, kind, assertCurrent } },
                   );
                   await options?.userTurnTranscriptRecorder?.persistApproved();
                 },
@@ -338,10 +336,7 @@ describe("native profile-bound steering", () => {
       const release = createDeferred();
       let outcome: Promise<unknown> | undefined;
       try {
-        const email = "deferred-source@example.test";
-        const profile = ensureProfileForEmail(email);
-        const successor = ensureProfileForEmail("deferred-successor@example.test");
-        setClientProfile(fixture.client, profile);
+        const { profile, merge } = bindChatProfile(fixture.client, "deferred-source@example.test");
         const binding = (await createExpectedProfileBinding(profile.id, fixture.client))!;
         const write = vi.fn();
         const questionCall = resolveAgentQuestionGatewayCall({
@@ -375,9 +370,7 @@ describe("native profile-bound steering", () => {
                 "question.resolve",
                 {},
                 {},
-                {
-                  dispatchAuthority: { version: 2, kind, assertCurrent },
-                },
+                { dispatchAuthority: { version: 2, kind, assertCurrent } },
               );
               return true;
             },
@@ -394,18 +387,16 @@ describe("native profile-bound steering", () => {
         outcome = attempt.outcome.catch((error: unknown) => error);
         await Promise.race([entered.promise, outcome]);
         expect(write).not.toHaveBeenCalled();
-        linkEmail(email, successor.id);
+        merge();
         release.resolve();
         const result = await outcome;
         expect(write).toHaveBeenCalledTimes(bound ? 0 : 1);
         if (bound) {
           expect(result).toMatchObject({
             status: "failed",
-            error: expect.objectContaining({
-              error: expect.objectContaining({
-                details: { reason: "EXPECTED_PROFILE_MISMATCH", execution: "not_started" },
-              }),
-            }),
+            error: {
+              error: { details: { reason: "EXPECTED_PROFILE_MISMATCH", execution: "not_started" } },
+            },
           });
         } else {
           expect(result).toMatchObject({ status: "rejected" });

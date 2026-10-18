@@ -2,7 +2,6 @@ import { expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { createEmbeddedAttemptTranscriptLifecycle } from "../../agents/embedded-agent-runner/run/attempt-transcript-lifecycle.js";
 import { observeReplyDelivery } from "../../agents/reply-completion.js";
-import { getRuntimeConfig } from "../../config/io.js";
 import { setRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
 import {
   appendTranscriptMessageSync,
@@ -21,7 +20,7 @@ import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-trans
 import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { loadSessionEntryAsync } from "../session-entry-load.test-support.js";
-import { createChatSendReplyDispatch } from "./chat-send-reply-dispatch.js";
+import { createReplyDispatch } from "./chat-send-reply-dispatch.test-support.js";
 
 vi.mock("node:worker_threads", async () =>
   (
@@ -46,18 +45,16 @@ it.each(["reply-observation", "commentary-media"] as const)(
       };
       const entry = { sessionId: scope.sessionId, lifecycleRevision: "initial", updatedAt: 1 };
       await replaceSessionEntry(scope, entry);
-      const recorder = createUserTurnTranscriptRecorder({
-        input: { text: "Inspect the fixture", idempotencyKey: `${runId}:user` },
-        target: { ...scope, sessionEntry: entry },
-      });
+      const inputRecorder = (text: string, idempotencyKey: string) =>
+        createUserTurnTranscriptRecorder({
+          input: { text, idempotencyKey },
+          target: { ...scope, sessionEntry: entry },
+        });
+      const recorder = inputRecorder("Inspect the fixture", `${runId}:user`);
       await recorder.persistApproved();
       const controller = new AbortController();
       const warn = vi.fn();
-      const dispatch = createChatSendReplyDispatch({
-        getRuntimeConfig,
-        accountId: undefined,
-        isAgentRunStarted: () => true,
-        isRunCurrent: () => true,
+      const dispatch = createReplyDispatch(runId, {
         abortSignal: controller.signal,
         logGateway: { warn } as never,
         session: {
@@ -78,10 +75,12 @@ it.each(["reply-observation", "commentary-media"] as const)(
         agentId: scope.agentId,
         path: resolveSessionTranscriptDatabasePath(scope),
       };
-      if (scenario === "commentary-media") {
+      const markRebuilding = () =>
         openOpenClawAgentDatabase(databaseOptions)
           .db.prepare("UPDATE session_transcript_index_state SET needs_rebuild = 1")
           .run();
+      if (scenario === "commentary-media") {
+        markRebuilding();
         await transcriptReconcile.reconcileSessionTranscriptIndexes(databaseOptions);
       }
       const enteredWait = createDeferred();
@@ -149,9 +148,7 @@ it.each(["reply-observation", "commentary-media"] as const)(
               expect(
                 appendTranscriptMessageSync(scope, { eventId: "answer", message }),
               ).toMatchObject({ ok: true });
-              openOpenClawAgentDatabase(databaseOptions)
-                .db.prepare("UPDATE session_transcript_index_state SET needs_rebuild = 1")
-                .run();
+              markRebuilding();
               transcriptReconcile.startSessionTranscriptIndexReconcile(databaseOptions);
               if (scenario === "reply-observation") {
                 return await observeReplyDelivery(dispatch.resolveReplyDelivery, 0, warn);
@@ -199,10 +196,7 @@ it.each(["reply-observation", "commentary-media"] as const)(
       expect(loadTranscriptEventsSync(scope)).toContainEqual(
         expect.objectContaining({ id: "answer", message }),
       );
-      const nextInput = createUserTurnTranscriptRecorder({
-        input: { text: "Continue with the next fixture", idempotencyKey: "successor:user" },
-        target: { ...scope, sessionEntry: entry },
-      });
+      const nextInput = inputRecorder("Continue with the next fixture", "successor:user");
       expect(await nextInput.persistApproved()).toMatchObject({ appended: true });
     });
   },

@@ -1,10 +1,6 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { describe, expect, it, vi } from "vitest";
-import {
-  awaitGateBeforeSettlement,
-  createDeferred,
-  withinTest,
-} from "../../../test/helpers/promise.js";
+import { withinTest } from "../../../test/helpers/promise.js";
 import { registerAgentSessionLoopTestLifecycle } from "../../agents/sessions/agent-session-loop-correctness.test-support.js";
 import {
   appendTranscriptMessage,
@@ -18,7 +14,6 @@ import {
   toDatabaseOptions,
 } from "../../config/sessions/session-accessor.sqlite-scope.js";
 import { waitForSessionTranscriptIndexReconcile } from "../../config/sessions/session-transcript-reconcile.js";
-import { runExclusiveSessionStoreWrite } from "../../config/sessions/store-writer.js";
 import { rotateAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
 import { getSessionControllerWorkCount } from "../../sessions/session-controller.lifecycle.js";
 import { rpcSourceTesting } from "../../sessions/session-lifecycle-admission.test-support.js";
@@ -26,6 +21,10 @@ import { openOpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
 import { handleGatewayRequest } from "../server-methods.js";
 import { pendingChatSendDedupeKey } from "../server-shared.js";
 import { dispatchInboundMessageMock, installGatewayTestHooks } from "../test-helpers.js";
+import {
+  holdSessionWriter,
+  observeChatReservation,
+} from "./chat-send-admission-fixtures.test-support.js";
 import { useBrowserFollowupFixture } from "./chat-send-pending-inputs.test-support.js";
 import type { RespondFn } from "./types.js";
 
@@ -38,6 +37,7 @@ async function createRebuildingFixture() {
     active: false,
     persistDuringDispatch: true,
   });
+  const runId = fixture.params.idempotencyKey;
   await appendTranscriptMessage(fixture.scope, {
     eventId: "current-leaf",
     message: { role: "assistant", content: "Existing response.", timestamp: 2 },
@@ -58,9 +58,7 @@ async function createRebuildingFixture() {
   const assertNoDispatch = async () => {
     expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
     expect(rpcSourceTesting.size).toBe(0);
-    expect(
-      fixture.context.dedupe.has(pendingChatSendDedupeKey(fixture.params.idempotencyKey)),
-    ).toBe(false);
+    expect(fixture.context.dedupe.has(pendingChatSendDedupeKey(runId))).toBe(false);
     expect(await listSessionPendingInputs(fixture.scope)).toEqual({ items: [], total: 0 });
     expect(loadTranscriptEventsSync(fixture.scope)).toEqual(before);
     expect(getSessionControllerWorkCount()).toBe(0);
@@ -68,12 +66,7 @@ async function createRebuildingFixture() {
   const send = async () => {
     const respond = vi.fn<RespondFn>();
     await handleGatewayRequest({
-      req: {
-        type: "req",
-        id: fixture.params.idempotencyKey,
-        method: "chat.send",
-        params: fixture.params,
-      },
+      req: { type: "req", id: runId, method: "chat.send", params: fixture.params },
       client: fixture.client,
       context: fixture.context,
       respond,
@@ -165,42 +158,19 @@ describe("registered chat.send during SQLite projection rebuild", () => {
     "never revives a %s reservation while projection is rebuilding",
     async (change, { signal }) => {
       await using fixture = await createRebuildingFixture();
-      const entered = createDeferred();
-      const release = createDeferred();
-      const writer = runExclusiveSessionStoreWrite(fixture.scope.storePath, async () => {
-        entered.resolve();
-        await release.promise;
-      });
+      const runId = fixture.params.idempotencyKey;
+      const writer = holdSessionWriter(fixture.scope.storePath);
       let request: ReturnType<typeof fixture.send> | undefined;
       try {
-        await entered.promise;
+        await writer.entered;
         fixture.markRebuilding();
-        const key = pendingChatSendDedupeKey(fixture.params.idempotencyKey);
-        const reserved = createDeferred();
-        const setDedupe = fixture.context.dedupe.set.bind(fixture.context.dedupe);
-        // Observe real admission while the writer gate prevents it from completing.
-        const observeReservation = vi
-          .spyOn(fixture.context.dedupe, "set")
-          .mockImplementation((pendingKey, entry) => {
-            const result = setDedupe(pendingKey, entry);
-            if (pendingKey === key) {
-              reserved.resolve();
-            }
-            return result;
-          });
-        try {
+        let key: string;
+        {
+          using reservation = observeChatReservation(fixture.context, runId);
+          key = reservation.key;
           request = fixture.send();
-          await withinTest(
-            awaitGateBeforeSettlement(
-              reserved.promise,
-              request,
-              "chat.send settled before its pending reservation",
-            ),
-            signal,
-          );
+          await withinTest(reservation.wait(request), signal);
           expect(fixture.context.dedupe.has(key)).toBe(true);
-        } finally {
-          observeReservation.mockRestore();
         }
         if (change === "removed") {
           fixture.context.dedupe.delete(key);
@@ -222,10 +192,7 @@ describe("registered chat.send during SQLite projection rebuild", () => {
               type: "req",
               id: "cancel-pending",
               method: "chat.abort",
-              params: {
-                sessionKey: fixture.scope.sessionKey,
-                runId: fixture.params.idempotencyKey,
-              },
+              params: { sessionKey: fixture.scope.sessionKey, runId },
             },
             client: fixture.client,
             context: fixture.context,
@@ -234,8 +201,8 @@ describe("registered chat.send during SQLite projection rebuild", () => {
           });
           expect(abortResponse.mock.calls[0]?.[1]).toMatchObject({ aborted: true });
         }
-        release.resolve();
-        await writer;
+        writer.release();
+        await writer.finished;
         const response = await request;
         expect(JSON.stringify(response.mock.calls)).not.toContain("cloud-session");
         await fixture.assertNoDispatch();
@@ -263,8 +230,8 @@ describe("registered chat.send during SQLite projection rebuild", () => {
         );
         await fixture.assertNoDispatch();
       } finally {
-        release.resolve();
-        await writer;
+        writer.release();
+        await writer.finished;
         await request;
       }
     },

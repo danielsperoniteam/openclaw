@@ -22,6 +22,25 @@ import { createReplyTranscriptFixture } from "./chat-send-reply-dispatch.test-su
 import { createChatReplySessionReader } from "./chat-send-reply-session.js";
 import { createChatSendWorkAdmission } from "./chat-send-work-admission.js";
 
+function observeTargetRequests(onKind: (kind: unknown) => void | Promise<void>) {
+  const run = targetDiscoveryLane.pool.run.bind(targetDiscoveryLane.pool);
+  return vi.spyOn(targetDiscoveryLane.pool, "run").mockImplementation(async (...args) => {
+    const reply = await run(...args);
+    if (
+      reply.ok &&
+      typeof reply.value === "object" &&
+      reply.value !== null &&
+      "kind" in reply.value
+    ) {
+      const pending = onKind(reply.value.kind);
+      if (pending) {
+        await pending;
+      }
+    }
+    return reply;
+  });
+}
+
 it("selects display payloads and delivery anchors in one transcript request", async () => {
   await withOpenClawTestState({ label: "chat-delivery-one-snapshot" }, async () => {
     const { dispatch, append } = await createReplyTranscriptFixture();
@@ -112,28 +131,18 @@ it.each(["release", "replacement"] as const)(
           }
         },
       );
-      const run = targetDiscoveryLane.pool.run.bind(targetDiscoveryLane.pool);
       const reading = createDeferred();
       const resume = createDeferred();
       let hold = false;
       let inventories = 0;
-      const spy = vi.spyOn(targetDiscoveryLane.pool, "run").mockImplementation(async (...args) => {
-        const reply = await run(...args);
-        if (
-          reply.ok &&
-          typeof reply.value === "object" &&
-          reply.value !== null &&
-          "kind" in reply.value
-        ) {
-          if (reply.value.kind === "session-target-inventory") {
-            inventories += 1;
-          }
-          if (hold && reply.value.kind === "session-exact-entries") {
-            reading.resolve();
-            await resume.promise;
-          }
+      const spy = observeTargetRequests((kind) => {
+        if (kind === "session-target-inventory") {
+          inventories += 1;
         }
-        return reply;
+        if (hold && kind === "session-exact-entries") {
+          reading.resolve();
+          return resume.promise;
+        }
       });
       try {
         for (const updatedAt of [2, 3]) {
@@ -231,23 +240,12 @@ it.each(["unchanged", "foreign-lifecycle", "physical-replacement"] as const)(
                 );
                 return facts;
               });
-            const run = targetDiscoveryLane.pool.run.bind(targetDiscoveryLane.pool);
             let entries = 0;
-            using _ = vi
-              .spyOn(targetDiscoveryLane.pool, "run")
-              .mockImplementation(async (...args) => {
-                const reply = await run(...args);
-                if (
-                  reply.ok &&
-                  typeof reply.value === "object" &&
-                  reply.value !== null &&
-                  "kind" in reply.value &&
-                  reply.value.kind === "session-exact-entries"
-                ) {
-                  entries++;
-                }
-                return reply;
-              });
+            using _ = observeTargetRequests((kind) => {
+              if (kind === "session-exact-entries") {
+                entries++;
+              }
+            });
             const result = dispatch.resolveReplyDelivery();
             if (change === "physical-replacement") {
               await expect(result).rejects.toThrow();
