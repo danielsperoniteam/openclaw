@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { Page } from "playwright";
 import { expect, it } from "vitest";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
@@ -6,6 +7,25 @@ import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts"
 const suite = createControlUiE2eSuite({ name: "Omitted history image placeholder" });
 const RETAINED_IMAGE_DATA_URL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAmElEQVR4nO3QMREAIBDAsHeERQyjAWRkoEP2Xmftc382OkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAK0BOkBrgA7QGqADtAboAO0B06OyaOxP7RwAAAAASUVORK5CYII=";
+
+const omittedImage = { type: "image", omitted: true, bytes: 149255 };
+const computerCall = { name: "computer", toolCallId: "capture" };
+const screenshotArgs = { action: "screenshot" };
+const omittedCard = (page: Page) =>
+  page.locator(".chat-assistant-attachment-card", { hasText: "Omitted from history" });
+
+async function openHistoricalImage(page: Page, url?: string) {
+  await installMockGateway(page, {
+    historyMessages: [
+      {
+        role: "user",
+        timestamp: 1,
+        content: [{ type: "image", omitted: true, bytes: 12 * 1024, ...(url ? { url } : {}) }],
+      },
+    ],
+  });
+  await page.goto(`${suite.server.baseUrl}chat`);
+}
 
 suite.define(() => {
   it.each(["history", "result-first", "receipt-first"] as const)(
@@ -38,9 +58,7 @@ suite.define(() => {
             role: "toolResult",
             toolName: "computer",
             toolCallId: "capture",
-            content: [
-              { type: "image", omitted: true, bytes: 149255, mimeType: "image/png", artifactId },
-            ],
+            content: [{ ...omittedImage, mimeType: "image/png", artifactId }],
             details: { media: { outbound: false } },
             __openclaw: {
               id: "saved-screenshot",
@@ -71,9 +89,9 @@ suite.define(() => {
                   { type: "text", text: "Here is the desktop screenshot." },
                   {
                     type: "toolCall",
-                    name: "computer",
+                    name: computerCall.name,
                     id: "capture",
-                    arguments: { action: "screenshot" },
+                    arguments: screenshotArgs,
                   },
                 ],
                 __openclaw: { id: "capture-call", seq: 2, runId },
@@ -99,32 +117,20 @@ suite.define(() => {
           await page.getByText("Here is the desktop screenshot.", { exact: true }).waitFor();
           if (running) {
             await page.getByRole("button", { name: "Stop generating" }).waitFor();
-            await gateway.emitGatewayEvent("agent", {
-              sessionKey,
-              runId,
-              seq: 1,
-              ts: Date.now(),
-              stream: "tool",
-              data: {
-                phase: "start",
-                name: "computer",
-                toolCallId: "capture",
-                args: { action: "screenshot" },
-              },
-            });
-            const result = () =>
+            const toolEvent = (seq: number, data: Record<string, unknown>) =>
               gateway.emitGatewayEvent("agent", {
                 sessionKey,
                 runId,
-                seq: 2,
+                seq,
                 ts: Date.now(),
                 stream: "tool",
-                data: {
-                  phase: "result",
-                  name: "computer",
-                  toolCallId: "capture",
-                  result: { content: [{ type: "image", omitted: true, bytes: 149255 }] },
-                },
+                data: { ...computerCall, ...data },
+              });
+            await toolEvent(1, { phase: "start", args: screenshotArgs });
+            const result = () =>
+              toolEvent(2, {
+                phase: "result",
+                result: { content: [omittedImage] },
               });
             if (delivery === "result-first") {
               await result();
@@ -178,20 +184,8 @@ suite.define(() => {
 
   it("keeps sanitized historical images visible without fake recovery actions", async () => {
     await suite.withPage({ locale: "en-US", serviceWorkers: "block" }, async ({ page }) => {
-      await installMockGateway(page, {
-        historyMessages: [
-          {
-            role: "user",
-            content: [{ type: "image", omitted: true, bytes: 12 * 1024 }],
-            timestamp: 1,
-          },
-        ],
-      });
-
-      await page.goto(`${suite.server.baseUrl}chat`);
-      const placeholder = page.locator(".chat-assistant-attachment-card", {
-        hasText: "Omitted from history",
-      });
+      await openHistoricalImage(page);
+      const placeholder = omittedCard(page);
       await placeholder.waitFor({ state: "visible" });
 
       expect(await placeholder.textContent()).toContain("Image");
@@ -203,32 +197,11 @@ suite.define(() => {
 
   it("renders a retained image URL without an omitted-media placeholder", async () => {
     await suite.withPage({ locale: "en-US", serviceWorkers: "block" }, async ({ page }) => {
-      await installMockGateway(page, {
-        historyMessages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "image",
-                omitted: true,
-                bytes: 12 * 1024,
-                url: RETAINED_IMAGE_DATA_URL,
-              },
-            ],
-            timestamp: 1,
-          },
-        ],
-      });
-
-      await page.goto(`${suite.server.baseUrl}chat`);
+      await openHistoricalImage(page, RETAINED_IMAGE_DATA_URL);
       await page
         .locator(`img.chat-message-image[src="${RETAINED_IMAGE_DATA_URL}"]`)
         .waitFor({ state: "visible" });
-      expect(
-        await page
-          .locator(".chat-assistant-attachment-card", { hasText: "Omitted from history" })
-          .count(),
-      ).toBe(0);
+      expect(await omittedCard(page).count()).toBe(0);
     });
   });
 });

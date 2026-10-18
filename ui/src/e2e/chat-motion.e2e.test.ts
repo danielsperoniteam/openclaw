@@ -4,6 +4,7 @@ import { expect, it } from "vitest";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import {
   createChatFlowE2eSuite,
+  chatMessage,
   installMockGateway,
   requireRecord,
   requireString,
@@ -13,8 +14,7 @@ const suite = createChatFlowE2eSuite();
 const artifactDir = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR;
 type MotionArrival = { text: string; opacity: string; transform: string };
 type SendMotionFrame = { top: number; y: number | null; opacity: string | null; same: boolean };
-// `jump` is the offset change applied synchronously by the call; `remaining` is
-// the distance to the end when it was issued.
+// `jump` is the synchronous offset change; `remaining` is the starting distance to the end.
 type SendMotionScroll = { behavior?: ScrollBehavior; jump: number; remaining: number };
 type SendMotionProbe = { frames: SendMotionFrame[]; scrolls: SendMotionScroll[]; stop: () => void };
 
@@ -112,31 +112,13 @@ declare global {
 
 suite.define(() => {
   it.each([
-    {
-      name: "desktop",
-      width: 1280,
-      height: 900,
-      lines: 1,
-      reducedMotion: "no-preference" as const,
-    },
-    {
-      name: "multiline",
-      width: 1280,
-      height: 900,
-      lines: 8,
-      reducedMotion: "no-preference" as const,
-    },
-    { name: "mobile", width: 390, height: 844, lines: 8, reducedMotion: "no-preference" as const },
-    {
-      name: "reduced-motion",
-      width: 1280,
-      height: 900,
-      lines: 8,
-      reducedMotion: "reduce" as const,
-    },
+    { name: "desktop", lines: 1 },
+    { name: "multiline" },
+    { name: "mobile", width: 390, height: 844 },
+    { name: "reduced-motion", reducedMotion: "reduce" as const },
   ])(
     "animates new prompts without hiding streamed replies on $name",
-    async ({ name, width, height, lines, reducedMotion }) => {
+    async ({ name, width = 1280, height = 900, lines = 8, reducedMotion = "no-preference" }) => {
       const viewport = { width, height };
       const dir = createControlUiE2eArtifactDir(`chat-motion-${name}`, artifactDir);
       const context = await suite.newBrowserContext({
@@ -145,6 +127,11 @@ suite.define(() => {
         ...(dir ? { recordVideo: { dir, size: viewport } } : {}),
       });
       const page = await context.newPage();
+      const screenshot = async (file: string) => {
+        if (dir) {
+          await page.screenshot({ path: path.join(dir, file) });
+        }
+      };
       await page.addInitScript(() => {
         const arrivals: MotionArrival[] = [];
         window.openclawMotionArrivals = arrivals;
@@ -164,29 +151,23 @@ suite.define(() => {
         });
       });
       const gateway = await installMockGateway(page, {
-        historyMessages: Array.from({ length: 40 }, (_, index) => ({
-          role: index % 2 ? "assistant" : "user",
-          content: [
+        historyMessages: Array.from({ length: 40 }, (_, index) =>
+          chatMessage(
+            index % 2 ? "assistant" : "user",
+            `Existing message ${index}\nA retained conversation with enough detail to scroll.`,
             {
-              type: "text",
-              text:
-                "Existing message " +
-                index +
-                "\nA retained conversation with enough detail to scroll.",
+              timestamp: Date.now() - (40 - index) * 60_000,
+              __openclaw: { id: "old-" + index, seq: index + 1 },
             },
-          ],
-          timestamp: Date.now() - (40 - index) * 60_000,
-          __openclaw: { id: "old-" + index, seq: index + 1 },
-        })),
+          ),
+        ),
       });
       try {
         await page.goto(suite.server.baseUrl + "chat");
         await page.getByText("Existing message 39", { exact: false }).waitFor();
         await waitForChatScrollIdle(page);
         expect(await page.evaluate(() => window.openclawMotionArrivals)).toHaveLength(0);
-        if (dir) {
-          await page.screenshot({ path: path.join(dir, "01-history.png") });
-        }
+        await screenshot("01-history.png");
         const prompt =
           "Make this feel fast and smooth" + "\nKeep every detail steady.".repeat(lines - 1);
         await page.locator(".agent-chat__composer-combobox textarea").fill(prompt);
@@ -206,20 +187,14 @@ suite.define(() => {
           .toBe("1");
         await waitForChatScrollIdle(page);
         await finishSendMotion(page, reducedMotion);
-        if (dir) {
-          await page.screenshot({ path: path.join(dir, "02-prompt.png") });
-        }
+        await screenshot("02-prompt.png");
         let text = "A responsive reply, without a jump.";
         const emit = async () =>
           gateway.emitGatewayEvent("chat", {
             sessionKey: "main",
             runId,
             state: "delta",
-            message: {
-              role: "assistant",
-              content: [{ type: "text", text }],
-              timestamp: Date.now(),
-            },
+            message: chatMessage("assistant", text, { timestamp: Date.now() }),
           });
         await emit();
         await page.locator(".chat-bubble").getByText(text, { exact: true }).waitFor();
@@ -229,9 +204,7 @@ suite.define(() => {
           await page.locator(".chat-bubble").getByText(text, { exact: true }).waitFor();
         }
         await waitForChatScrollIdle(page);
-        if (dir) {
-          await page.screenshot({ path: path.join(dir, "03-reply.png") });
-        }
+        await screenshot("03-reply.png");
         expect(await page.evaluate(() => window.openclawMotionArrivals)).toHaveLength(expected);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
           true,

@@ -3,9 +3,17 @@ import { expect, it } from "vitest";
 import type { ModelCatalogEntry } from "../api/types.ts";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
 import { revealChatModelOption, selectChatModelOption } from "../test-helpers/select-picker-e2e.ts";
+import { polledAttribute, polledCount } from "./chat-presentation.test-support.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({ name: "Model runtime selection" });
+const key = "agent:main:main";
+function sessionFixture(sessionId: string, model: string, provider: string, extra = {}) {
+  return { key, sessionId, kind: "direct", model, modelProvider: provider, updatedAt: 1, ...extra };
+}
+function sessionList(row: ReturnType<typeof sessionFixture>, defaults: Record<string, unknown>) {
+  return { ts: 1, path: "", count: 1, defaults, sessions: [row] };
+}
 const model = {
   id: "gpt-5.6-sol",
   name: "GPT-5.6 Sol",
@@ -23,16 +31,9 @@ suite.define(() => {
     "keeps Default reset without offering denied models (manual choices: %s)",
     async (hasAllowedModel) => {
       await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
-        const key = "agent:main:main";
-        const row = {
-          key,
-          sessionId: "manual-policy-reset",
-          kind: "direct",
-          model: "manual",
-          modelProvider: "fixture",
+        const row = sessionFixture("manual-policy-reset", "manual", "fixture", {
           modelOverrideSource: "user",
-          updatedAt: 1,
-        };
+        });
         const models: ModelCatalogEntry[] = [
           {
             id: "automatic",
@@ -64,13 +65,11 @@ suite.define(() => {
           sessions: [row],
           sessionInfo: row,
           methodResponses: {
-            "sessions.list": {
-              ts: 1,
-              path: "",
-              count: 1,
-              defaults: { model: "automatic", modelProvider: "fixture", contextTokens: 128_000 },
-              sessions: [row],
-            },
+            "sessions.list": sessionList(row, {
+              model: "automatic",
+              modelProvider: "fixture",
+              contextTokens: 128_000,
+            }),
           },
         });
         await page.goto(`${suite.server.baseUrl}chat`);
@@ -100,29 +99,17 @@ suite.define(() => {
 
   it.each(["chat", "new"])("selects a second harness through /%s", async (route) => {
     await suite.withPage({ viewport: { width: 1280, height: 900 } }, async ({ page }) => {
-      const key = "agent:main:main";
-      const row = {
-        key,
-        sessionId: "runtime-selection",
-        kind: "direct",
+      const runtime = { agentRuntime: model.agentRuntime };
+      const row = sessionFixture("runtime-selection", model.id, "openai", {
+        modelOverrideSource: null,
+        ...runtime,
+      });
+      const result = sessionList(row, {
         model: model.id,
         modelProvider: "openai",
-        modelOverrideSource: null,
-        agentRuntime: model.agentRuntime,
-        updatedAt: 1,
-      };
-      const result = {
-        ts: 1,
-        path: "",
-        count: 1,
-        defaults: {
-          model: model.id,
-          modelProvider: "openai",
-          contextTokens: 1_000_000,
-          agentRuntime: model.agentRuntime,
-        },
-        sessions: [row],
-      };
+        contextTokens: 1_000_000,
+        ...runtime,
+      });
       const gateway = await installMockGateway(page, {
         agentModel: "openai/gpt-5.6-sol",
         models: [model],
@@ -138,7 +125,7 @@ suite.define(() => {
       const picker = composer.locator(".chat-controls__model-picker");
       const trigger = picker.locator("[data-chat-model-select]");
       await trigger.click();
-      await expect.poll(() => picker.locator("[data-chat-model-option]").count()).toBe(2);
+      await polledCount(picker.locator("[data-chat-model-option]")).toBe(2);
       const codex = picker.locator('[data-chat-model-runtime="codex"]');
       const embedded = picker.locator('[data-chat-model-runtime="openclaw"]');
       await revealChatModelOption(codex);
@@ -155,7 +142,7 @@ suite.define(() => {
       expect(await embedded.textContent()).toContain("1M · OpenClaw");
       await selectChatModelOption(codex);
       if (route === "new") {
-        await expect.poll(() => codex.getAttribute("aria-selected")).toBe("true");
+        await polledAttribute(codex, "aria-selected").toBe("true");
         expect(await trigger.textContent()).toContain("GPT-5.6 Sol codex");
         await composer.locator("textarea").first().fill("Reply with the selected runtime.");
         await page.getByRole("button", { name: "Start session" }).click();
@@ -182,8 +169,8 @@ suite.define(() => {
           path: "",
           entry: selected,
         });
-        await expect.poll(() => trigger.getAttribute("aria-disabled")).toBe("false");
-        await expect.poll(() => codex.getAttribute("aria-selected")).toBe("true");
+        await polledAttribute(trigger, "aria-disabled").toBe("false");
+        await polledAttribute(codex, "aria-selected").toBe("true");
         expect(await trigger.textContent()).toContain("GPT-5.6 Sol codex");
         expect(await picker.locator('[data-chat-model-option][aria-selected="true"]').count()).toBe(
           1,
@@ -198,7 +185,7 @@ suite.define(() => {
         ).toMatchObject(reset);
         await gateway.setSessionsListResponse(result);
         await gateway.resolveDeferred("sessions.patch", { ok: true, key, path: "", entry: row });
-        await expect.poll(() => embedded.getAttribute("aria-selected")).toBe("true");
+        await polledAttribute(embedded, "aria-selected").toBe("true");
         expect(await picker.locator('[data-chat-model-option][aria-selected="true"]').count()).toBe(
           1,
         );

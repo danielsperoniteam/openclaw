@@ -1,9 +1,11 @@
 import path from "node:path";
+import type { Locator } from "playwright";
 import { expect, it } from "vitest";
 import { createNestedToolActivity } from "../../../src/sessions/nested-tool-activity.ts";
 import { prepareChatHistoryFixture } from "../test-helpers/chat-activity-fixtures.ts";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import { installMockGateway } from "../test-helpers/control-ui-e2e.ts";
+import { chatMessage, textContent } from "./chat-flow.test-support.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({
@@ -14,6 +16,37 @@ const timestamp = Date.UTC(2026, 8, 11, 15, 0);
 const runId = "github-sign-in-run";
 const command = "printf '\n--- GitHub sign-in ---\n'\ngh auth login --hostname github.com --web";
 const wrapperCode = "await tools.exec({ command: 'gh auth login --hostname github.com --web' });";
+const conclusion = "GitHub sign-in could not start because the GitHub CLI is unavailable.";
+
+function toolCall(id: string, args: Record<string, unknown>, offset: number, extra = {}) {
+  return {
+    role: "assistant",
+    content: [{ type: "toolCall", id, name: "exec", ...extra, arguments: args }],
+    timestamp: timestamp + offset,
+    ...extra,
+  };
+}
+
+function toolResult(id: string, text: string, offset: number, extra = {}) {
+  return chatMessage("toolResult", text, {
+    toolCallId: id,
+    toolName: "exec",
+    timestamp: timestamp + offset,
+    ...extra,
+  });
+}
+
+async function expectCollapsed(work: Locator) {
+  const summary = work.locator(":scope > .chat-activity-group__summary");
+  expect(await summary.getAttribute("aria-expanded")).toBe("false");
+  expect(await summary.locator(".chat-activity-group__label").textContent()).toBe(
+    "1 command · 1 read",
+  );
+  expect((await summary.textContent())?.match(/1 failed/g)).toHaveLength(1);
+  expect(await summary.textContent()).not.toContain("/workspace/README.md");
+  expect(await summary.getByText("1 failed", { exact: true }).isVisible()).toBe(true);
+  expect(await work.textContent()).not.toContain("gh: command not found");
+}
 
 function nestedHistoryMessage(
   toolCallId: string,
@@ -32,7 +65,7 @@ function nestedHistoryMessage(
     toolCallId,
     toolName,
     input,
-    result: { content: [{ type: "text", text }] },
+    result: { content: textContent(text) },
     isError,
     startedAt: timestamp + startOrder * 1_000,
     timestamp: timestamp + startOrder * 1_000 + 500,
@@ -52,7 +85,7 @@ suite.define(() => {
               { role: "user", content: "Sign in to GitHub so I can authorize access.", timestamp },
               {
                 role: "assistant",
-                content: [{ type: "text", text: "Starting GitHub authentication." }],
+                content: textContent("Starting GitHub authentication."),
                 openclawStreamFallback: {
                   itemId: "github-commentary",
                   replacementText: "Starting GitHub authentication.",
@@ -60,20 +93,12 @@ suite.define(() => {
                 },
                 timestamp: timestamp + 100,
               },
-              {
-                role: "assistant",
-                runId,
-                content: [
-                  {
-                    type: "toolCall",
-                    id: "github-wrapper",
-                    name: "exec",
-                    runId,
-                    arguments: { title: "Start GitHub authentication", code: wrapperCode },
-                  },
-                ],
-                timestamp: timestamp + 500,
-              },
+              toolCall(
+                "github-wrapper",
+                { title: "Start GitHub authentication", code: wrapperCode },
+                500,
+                { runId },
+              ),
               nestedHistoryMessage(
                 "github-login",
                 "exec",
@@ -89,48 +114,23 @@ suite.define(() => {
                 "GitHub CLI is required for this workflow.",
                 2,
               ),
-              {
-                role: "toolResult",
+              toolResult("github-wrapper", "Child operations finished.", 3_000, {
                 runId,
-                toolCallId: "github-wrapper",
-                toolName: "exec",
                 isError: false,
-                content: [{ type: "text", text: "Child operations finished." }],
-                timestamp: timestamp + 3_000,
-              },
-              {
-                role: "assistant",
-                content: [
-                  {
-                    type: "text",
-                    text: "GitHub sign-in could not start because the GitHub CLI is unavailable.",
-                  },
-                ],
-                timestamp: timestamp + 4_000,
-              },
+              }),
+              chatMessage("assistant", conclusion, { timestamp: timestamp + 4_000 }),
             ]),
           },
         });
         await page.goto(`${suite.server.baseUrl}chat`);
-        await page
-          .getByText("GitHub sign-in could not start because the GitHub CLI is unavailable.", {
-            exact: true,
-          })
-          .waitFor();
+        await page.getByText(conclusion, { exact: true }).waitFor();
         await gateway.waitForRequest("chat.startup");
         const work = page.locator(".chat-activity-group").first();
         const summary = work.locator(":scope > .chat-activity-group__summary");
         await summary.waitFor();
         await page.screenshot({ path: path.join(artifactDir, "01-collapsed.png") });
-        expect(await summary.getAttribute("aria-expanded")).toBe("false");
-        expect(await summary.locator(".chat-activity-group__label").textContent()).toBe(
-          "1 command · 1 read",
-        );
-        expect((await summary.textContent())?.match(/1 failed/g)).toHaveLength(1);
-        expect(await summary.textContent()).not.toContain("/workspace/README.md");
+        await expectCollapsed(work);
         const failure = summary.getByText("1 failed", { exact: true });
-        expect(await failure.isVisible()).toBe(true);
-        expect(await work.textContent()).not.toContain("gh: command not found");
         expect(await work.textContent()).not.toContain("Sign in to GitHub");
         await summary.click();
         const activityBody = work.locator(".chat-activity-group__body");
@@ -161,14 +161,7 @@ suite.define(() => {
         await page.reload();
         await gateway.waitForRequest("chat.startup");
         await summary.waitFor();
-        expect(await summary.getAttribute("aria-expanded")).toBe("false");
-        expect(await summary.locator(".chat-activity-group__label").textContent()).toBe(
-          "1 command · 1 read",
-        );
-        expect((await summary.textContent())?.match(/1 failed/g)).toHaveLength(1);
-        expect(await summary.textContent()).not.toContain("/workspace/README.md");
-        expect(await failure.isVisible()).toBe(true);
-        expect(await work.textContent()).not.toContain("gh: command not found");
+        await expectCollapsed(work);
         await page.screenshot({ path: path.join(artifactDir, "03-reloaded.png") });
         await page.emulateMedia({ reducedMotion: "reduce" });
         await page.setViewportSize({ width: 390, height: 844 });
@@ -191,34 +184,17 @@ suite.define(() => {
         await installMockGateway(page, {
           historyMessages: [
             { role: "user", content: "Check the runtime.", timestamp },
-            {
-              role: "assistant",
-              content: [
-                {
-                  type: "toolCall",
-                  id: "ordinary-exec",
-                  name: "exec",
-                  arguments: {
-                    title: "Check runtime version",
-                    command: "node --version",
-                    code: "console.log(process.version)",
-                  },
-                },
-              ],
-              timestamp: timestamp + 100,
-            },
-            {
-              role: "toolResult",
-              toolCallId: "ordinary-exec",
-              toolName: "exec",
-              content: [{ type: "text", text: "v24.7.0" }],
-              timestamp: timestamp + 200,
-            },
-            {
-              role: "assistant",
-              content: [{ type: "text", text: "Runtime checked." }],
-              timestamp: timestamp + 300,
-            },
+            toolCall(
+              "ordinary-exec",
+              {
+                title: "Check runtime version",
+                command: "node --version",
+                code: "console.log(process.version)",
+              },
+              100,
+            ),
+            toolResult("ordinary-exec", "v24.7.0", 200),
+            chatMessage("assistant", "Runtime checked.", { timestamp: timestamp + 300 }),
           ],
         });
         await page.goto(`${suite.server.baseUrl}chat`);
