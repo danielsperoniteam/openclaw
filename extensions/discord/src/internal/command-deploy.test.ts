@@ -65,7 +65,9 @@ describe("DiscordCommandDeployer SQLite cache", () => {
   }
 
   function createRest(): RequestClient {
-    return attachRestMock(createInternalTestClient(), { get: vi.fn(async () => []) });
+    const client = createInternalTestClient();
+    attachRestMock(client, { get: vi.fn(async () => []) });
+    return client.rest;
   }
 
   function deployer(
