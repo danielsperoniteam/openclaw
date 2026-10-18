@@ -37,17 +37,25 @@ beforeEach(async () => {
   params = createParams(path.join(tempDir, "session.jsonl"), workspaceDir, {
     disableTools: false,
     runtimePlan: createCodexRuntimePlanFixture(),
+    config: { plugins: { enabled: false } },
+    agentDir: path.join(tempDir, "agent"),
   });
+  await fs.mkdir(workspaceDir);
 });
 afterEach(async () => {
   resetGlobalHookRunner();
   await cleanupDynamicToolBuildFixture(tempDir, hostCapabilityClosers);
 });
 
-function mockShellTools() {
-  setCodexTestToolFactory(params, () =>
-    ["exec", "process", "message"].map(createRuntimeDynamicTool),
-  );
+function buildTools(options: Parameters<typeof buildDynamicToolsForTest>[2] = {}) {
+  return buildDynamicToolsForTest(params, workspaceDir, {
+    nativeToolSurfaceEnabled: false,
+    ...options,
+  });
+}
+function toolNamed(tools: Awaited<ReturnType<typeof buildTools>>, name: string) {
+  const found = tools.find((tool) => tool.name === name);
+  return expectDefined(found, name);
 }
 async function nativeSurface(
   sandbox?: Parameters<typeof shouldEnableCodexAppServerNativeToolSurface>[1],
@@ -60,7 +68,6 @@ async function nativeSurface(
 }
 
 it("keeps required-root Codex file tools confined without native or shell tools", async () => {
-  await fs.mkdir(workspaceDir);
   const outside = path.join(tempDir, "outside.txt");
   await fs.writeFile(outside, "outside");
   await fs.symlink(outside, path.join(workspaceDir, "escape.txt"));
@@ -68,24 +75,14 @@ it("keeps required-root Codex file tools confined without native or shell tools"
   params.requireWorkspaceOnly = true;
   params.sessionRoot = workspaceDir;
 
-  params.config = { plugins: { enabled: false } };
-  params.agentDir = path.join(tempDir, "agent");
   params.toolsAllow = ["read", "write", "edit", "exec", "process"];
   await bindProductionCodexHostCapabilities(params, hostCapabilityClosers);
 
   expect(await nativeSurface()).toBe(false);
-  const tools = await buildDynamicToolsForTest(params, workspaceDir, {
-    nativeToolSurfaceEnabled: false,
-  });
+  const tools = await buildTools();
   expect(tools.map((tool) => tool.name)).toEqual(["read", "edit", "write"]);
-  const write = expectDefined(
-    tools.find((tool) => tool.name === "write"),
-    "rooted write",
-  );
-  const read = expectDefined(
-    tools.find((tool) => tool.name === "read"),
-    "rooted read",
-  );
+  const write = toolNamed(tools, "write");
+  const read = toolNamed(tools, "read");
   await write.execute("inside", { path: "inside.txt", content: "inside" });
   expect(await fs.readFile(path.join(workspaceDir, "inside.txt"), "utf8")).toBe("inside");
   for (const file of [outside, "../outside.txt", "escape.txt"]) {
@@ -98,75 +95,57 @@ it("keeps required-root Codex file tools confined without native or shell tools"
 });
 
 it.each([
-  { allow: ["group:runtime"], expected: ["sandbox_exec", "sandbox_process"] },
-  { allow: ["exec"], restrictWith: ["process"], expected: ["sandbox_process"] },
-])(
-  "keeps Docker shell projections pinned for runtime selectors $allow restricted by $restrictWith",
-  async ({ allow, restrictWith, expected }) => {
-    mockShellTools();
-    params.toolsAllow = allow;
-    if (restrictWith) {
-      initializeGlobalHookRunner(
-        createMockPluginRegistry([
-          { hookName: "before_prompt_build", handler: () => ({ toolsAllow: allow }) },
-          { hookName: "before_prompt_build", handler: () => ({ toolsAllow: restrictWith }) },
-        ]),
-      );
-      const result = await resolveAgentHarnessBeforePromptBuildResult({
-        prompt: params.prompt,
-        developerInstructions: "",
-        messages: [],
-        ctx: { agentId: "main", sessionKey: params.sessionKey },
-      });
-      params.toolsAllow = result.toolsAllow;
-    }
-    const sandbox = {
-      enabled: true,
-      backendId: "docker",
-      docker: { binds: ["/tmp/openclaw-data:/data:rw"] },
-    } as never;
-    const nativeToolSurfaceEnabled = await nativeSurface(sandbox);
-    expect(nativeToolSurfaceEnabled).toBe(false);
-    const tools = await buildDynamicToolsForTest(params, workspaceDir, {
-      sandbox,
-      nativeToolSurfaceEnabled,
-    });
-
-    expect(tools.map((tool) => tool.name)).toEqual(expected);
-    expect(tools.map((tool) => tool.catalogMode)).toEqual(
-      expected.map((name) => (name === "message" ? undefined : "direct-only")),
+  { allow: ["group:runtime"], expected: ["sandbox_exec", "sandbox_process"], enabled: true },
+  { allow: ["exec"], restrictWith: ["process"], expected: ["sandbox_process"], enabled: true },
+  { expected: ["exec", "process", "message", "node_exec"], enabled: false },
+  { expected: ["message"], excluded: "sandbox_exec", enabled: true },
+  { expected: ["message"], excluded: "process", enabled: true },
+])("projects sandbox shell: $enabled / $allow / $excluded", async (testCase) => {
+  const { allow, restrictWith, expected, enabled, excluded } = testCase;
+  setCodexTestToolFactory(params, () =>
+    ["exec", "process", "message"].map(createRuntimeDynamicTool),
+  );
+  params.toolsAllow = allow;
+  if (restrictWith) {
+    initializeGlobalHookRunner(
+      createMockPluginRegistry([
+        { hookName: "before_prompt_build", handler: () => ({ toolsAllow: allow }) },
+        { hookName: "before_prompt_build", handler: () => ({ toolsAllow: restrictWith }) },
+      ]),
     );
-    if (expected.includes("sandbox_exec")) {
-      expect(tools.find((tool) => tool.name === "sandbox_exec")?.description).toContain(
-        "Docker container-path bind layout",
-      );
-    }
-  },
-);
-
-it("exposes node shell but not sandbox shell tools when sandbox routing is disabled", async () => {
-  mockShellTools();
-
-  const disabledSandboxTools = await buildDynamicToolsForTest(params, workspaceDir, {
-    sandbox: { enabled: false, backendId: "ssh" } as never,
-    nativeToolSurfaceEnabled: false,
+    const result = await resolveAgentHarnessBeforePromptBuildResult({
+      prompt: params.prompt,
+      developerInstructions: "",
+      messages: [],
+      ctx: { agentId: "main", sessionKey: params.sessionKey },
+    });
+    params.toolsAllow = result.toolsAllow;
+  }
+  const sandbox = {
+    enabled,
+    backendId: allow ? "docker" : "ssh",
+    docker: { binds: ["/tmp/openclaw-data:/data:rw"] },
+  } as never;
+  if (allow) {
+    expect(await nativeSurface(sandbox)).toBe(false);
+  }
+  const tools = await buildTools({
+    sandbox,
+    pluginConfig: { codexDynamicToolsExclude: excluded ? [excluded] : [] },
   });
 
-  expect(disabledSandboxTools.map((tool) => tool.name)).toEqual([
-    "exec",
-    "process",
-    "message",
-    "node_exec",
-  ]);
+  expect(tools.map((tool) => tool.name)).toEqual(expected);
+  if (allow) {
+    expect(tools.map((tool) => tool.catalogMode)).toEqual(expected.map(() => "direct-only"));
+  }
+  if (expected.includes("sandbox_exec")) {
+    expect(tools.find((tool) => tool.name === "sandbox_exec")?.description).toContain(
+      "Docker container-path bind layout",
+    );
+  }
 });
 
 it("preserves completion-only sandbox exec when policy denies process", async () => {
-  const backendId = "ssh";
-
-  await fs.mkdir(workspaceDir, { recursive: true });
-
-  params.config = { plugins: { enabled: false } };
-  params.agentDir = path.join(tempDir, "agent");
   const buildExecSpec = vi.fn(async () => ({
     // A synthetic backend transport proves dispatch without Docker or SSH access.
     argv: [
@@ -183,13 +162,13 @@ it("preserves completion-only sandbox exec when policy denies process", async ()
   });
   const sandbox = createSandboxTestContext({
     overrides: {
-      backendId,
+      backendId: "ssh",
       workspaceDir,
       agentWorkspaceDir: workspaceDir,
       workspaceAccess: "ro",
       tools: { allow: ["read", "exec"], deny: ["process", "code_execution"] },
       backend: {
-        id: backendId,
+        id: "ssh",
         runtimeId: "sandbox-exec-only",
         runtimeLabel: "sandbox-exec-only",
         workdir: "/workspace",
@@ -208,17 +187,11 @@ it("preserves completion-only sandbox exec when policy denies process", async ()
   });
   await bindProductionCodexHostCapabilities(params, hostCapabilityClosers);
   const nativeToolSurfaceEnabled = await nativeSurface(sandbox, true);
-  const tools = await buildDynamicToolsForTest(params, workspaceDir, {
-    sandbox,
-    nativeToolSurfaceEnabled,
-  });
+  const tools = await buildTools({ sandbox, nativeToolSurfaceEnabled });
 
   expect(nativeToolSurfaceEnabled).toBe(false);
   expect(tools.map((tool) => tool.name)).toEqual(["read", "sandbox_exec"]);
-  const execTool = expectDefined(
-    tools.find((tool) => tool.name === "sandbox_exec"),
-    "completion-only sandbox exec",
-  );
+  const execTool = toolNamed(tools, "sandbox_exec");
   expect(execTool.catalogMode).toBe("direct-only");
   expect(execTool.parameters).not.toHaveProperty("properties.background");
   expect(execTool.parameters).not.toHaveProperty("properties.yieldMs");
@@ -248,17 +221,4 @@ it("preserves completion-only sandbox exec when policy denies process", async ()
   expect(buildExecSpec).toHaveBeenCalledExactlyOnceWith(
     expect.objectContaining({ command: "echo sandbox request", workdir: "/workspace" }),
   );
-});
-it("honors Codex dynamic tool excludes for sandbox shell exposure", async () => {
-  mockShellTools();
-
-  for (const excludedToolName of ["sandbox_exec", "process"]) {
-    const tools = await buildDynamicToolsForTest(params, workspaceDir, {
-      sandbox: { enabled: true, backendId: "ssh" } as never,
-      nativeToolSurfaceEnabled: false,
-      pluginConfig: { codexDynamicToolsExclude: [excludedToolName] },
-    });
-
-    expect(tools.map((tool) => tool.name)).toEqual(["message"]);
-  }
 });
