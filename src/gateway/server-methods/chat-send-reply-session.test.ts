@@ -143,6 +143,7 @@ it.each(["release", "replacement"] as const)(
           reading.resolve();
           return resume.promise;
         }
+        return undefined;
       });
       try {
         for (const updatedAt of [2, 3]) {

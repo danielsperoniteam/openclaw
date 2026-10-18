@@ -4,6 +4,7 @@ import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
 } from "../../../config/runtime-snapshot.js";
+import type { RestartRecoveryTerminalDeliveryEvidence } from "../../../config/sessions/restart-recovery-types.js";
 import type { InternalSessionEntry } from "../../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { AgentTurnStartRequest } from "../../../gateway/agent-turn/agent-turn-start-request.types.js";
@@ -103,7 +104,11 @@ function useDirectDelivery(cfg: OpenClawConfig = {}, entry?: InternalSessionEntr
   deliver.mockImplementation(sendSubagentAnnounceDirectly);
   return requester;
 }
-function recoveryEvidence(runId: string, transcriptRunId: string, failed = false) {
+function recoveryEvidence(
+  runId: string,
+  transcriptRunId: string,
+  failed = false,
+): RestartRecoveryTerminalDeliveryEvidence {
   return {
     runId,
     transcriptRunId,
@@ -119,13 +124,13 @@ function recoveryEvidence(runId: string, transcriptRunId: string, failed = false
 type Turn = Pick<AgentTurnStartRequest, "preflight" | "io" | "controllerInput">;
 function acceptTurn({ preflight, io }: Turn, cached?: true) {
   const runId = preflight.request.idempotencyKey;
-  io.emitAcceptance([true, { runId, status: "accepted" }], {
+  io.emitAcceptance([true, { runId, status: "accepted" }, undefined], {
     runId,
     ...(cached ? { cached } : {}),
   });
 }
 function finishTurn(io: Turn["io"], text: string | undefined) {
-  io.emitFinal([true, { status: "ok", result: { payloads: [{ text }] } }]);
+  io.emitFinal([true, { status: "ok", result: { payloads: [{ text }] } }, undefined]);
 }
 function registerRequesterTurn({ preflight, controllerInput }: Turn, timeoutMs: number) {
   return registerChatAbortController({
@@ -382,7 +387,9 @@ describe("requester settle dispatch deadline", () => {
       finishTurn(io, "Continuation needed.");
     });
     useDirectDelivery();
-    const params = wakeParams(child, () => consumeSubagentPauseNotice(child));
+    const params = wakeParams(child, () => {
+      consumeSubagentPauseNotice(child);
+    });
     const wake = withGateway(context, () => maybeWakeRequesterAfterAllChildrenSettled(params));
     try {
       await accepted.promise;

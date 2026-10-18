@@ -56,7 +56,7 @@ function revocableOwner() {
     setCurrent(value: boolean) {
       current = value;
     },
-    assertCurrent() {
+    assertCurrent: () => {
       if (!current) {
         throw new Error("fixture owner revoked");
       }

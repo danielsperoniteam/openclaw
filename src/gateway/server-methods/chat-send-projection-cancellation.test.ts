@@ -141,7 +141,7 @@ it.each(["reply-observation", "commentary-media"] as const)(
             {
               sessionTarget: scope,
               assertCommitAllowed: () => controller.signal.throwIfAborted(),
-              withTranscriptWrite: lifecycle.withTranscriptWrite,
+              withTranscriptWrite: (...args) => lifecycle.withTranscriptWrite(...args),
             },
             async () => {
               dispatch.captureAgentTranscriptStart();

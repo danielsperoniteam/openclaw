@@ -117,9 +117,9 @@ function recoveryEvidence() {
     launch,
     poll,
     wait,
-    pollCall: traceCall(trace, poll.parentId),
+    pollCall: traceCall(trace, expectDefined(poll.parentId, "poll parent")),
     waitResult: traceOutcome(trace, wait.id),
-    launchResult: traceOutcome(trace, launch.parentId),
+    launchResult: traceOutcome(trace, expectDefined(launch.parentId, "launch parent")),
   };
 }
 
@@ -216,7 +216,8 @@ it("does not turn missing usage or cost observations into zero-valued measuremen
   expect(complete.usage).toEqual({ input: 100, output: 10, total: 110 });
   expect(complete.costUsd).toBe(0.002);
   const incomplete = collectGatewayMatrixTrace([withUsage, assistantCall("two", "return 2;")]);
-  expect(incomplete).toMatchObject({ usage: undefined, costUsd: undefined });
+  expect(incomplete.usage).toBeUndefined();
+  expect(incomplete.costUsd).toBeUndefined();
 });
 
 it.each([
@@ -250,9 +251,9 @@ it.each([
   expect(trace).toMatchObject({
     assistantTurns: known === "none" ? 1 : 2,
     models: ["openai/gpt-5.6-sol"],
-    usage: undefined,
-    costUsd: undefined,
   });
+  expect(trace.usage).toBeUndefined();
+  expect(trace.costUsd).toBeUndefined();
   expect(trace.calls).toHaveLength(known === "none" ? 1 : 2);
   expect(trace.outcomes).toHaveLength(1);
   expect(trace.activities).toHaveLength(1);
@@ -438,7 +439,7 @@ it.each(["early-history", "history-before-read", "id-alias"] as const)(
         if (typeof activity.input.jobId === "string") {
           activity.input.id = activity.input.jobId;
           delete activity.input.jobId;
-          traceCall(trace, activity.parentId).args.code =
+          traceCall(trace, expectDefined(activity.parentId, "activity parent")).args.code =
             `return await automations(${JSON.stringify(activity.input)});`;
         }
       }

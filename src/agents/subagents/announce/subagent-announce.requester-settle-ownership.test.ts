@@ -20,6 +20,7 @@ import {
   publishWakeTransition,
 } from "./subagent-announce.requester-settle-wake.test-support.js";
 
+// mock-isolation: Ownership races supply settled descendants without opening session stores.
 vi.mock("./subagent-announce.requester-settle-descendants.js", () => ({
   createRequesterDescendantReader: () => async () => ({ unsettled: false, active: 0 }),
 }));

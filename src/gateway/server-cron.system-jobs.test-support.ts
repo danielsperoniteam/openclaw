@@ -19,9 +19,10 @@ function holdInventory(state: CronFixture) {
   const release = createDeferred();
   const listJobs = state.cron.list.bind(state.cron);
   vi.spyOn(state.cron, "list").mockImplementationOnce(async (options) => {
+    const inventory = await listJobs(options);
     entered.resolve();
     await release.promise;
-    return listJobs(options);
+    return inventory;
   });
   return { entered, release, listJobs, [Symbol.dispose]: () => release.resolve() };
 }

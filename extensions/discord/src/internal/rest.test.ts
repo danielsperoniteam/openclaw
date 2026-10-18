@@ -7,8 +7,8 @@ import { RateLimitError, RequestClient } from "./rest.js";
 import { createJsonResponse } from "./test-builders.test-support.js";
 
 async function expectRateLimitError(promise: Promise<unknown>, expected: { retryAfter: number }) {
+  await expect(promise).rejects.toBeInstanceOf(RateLimitError);
   const error = await promise.catch((caught: unknown) => caught);
-  expect(error).toBeInstanceOf(RateLimitError);
   expect(error).toMatchObject({ name: "RateLimitError", retryAfter: expected.retryAfter });
 }
 

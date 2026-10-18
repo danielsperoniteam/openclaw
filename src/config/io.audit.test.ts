@@ -210,7 +210,7 @@ it.each([
     '[{"path":"channels.slack.token","value":"secret-value"}]',
   ),
 ])("redacts $0 in persisted audit process info", (_name, argv, expected) => {
-  expect(createAuditRecordBase("/tmp/openclaw.json", argv).argv).toEqual(expected);
+  expect(createAuditRecordBase("/tmp/openclaw.json", [...argv]).argv).toEqual(expected);
 });
 
 it("redacts historical config audit entries while preserving file and directory modes", async () => {

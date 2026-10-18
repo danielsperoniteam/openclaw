@@ -266,7 +266,7 @@ it("keeps env-only agent callbacks isolated when saving", async () => {
       (store, _owner, inherited) => {
         expect(store).toEqual(empty);
         expect(inherited).toBeNull();
-        store.profiles.added = explicit.profiles.added;
+        Object.assign(store.profiles, explicit.profiles);
         return true;
       },
     );

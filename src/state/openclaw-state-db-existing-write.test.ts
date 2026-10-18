@@ -287,7 +287,7 @@ it.skipIf(process.platform === "win32")("rejects replacement before retained wri
   expect(mutate).not.toHaveBeenCalled();
   expect(readValues(options.path)).toEqual([]);
 });
-it.each([
+const metadataMutationCases: [string, RegExp, boolean?, boolean?][] = [
   [`PRAGMA user_version = ${SCHEMA_VERSION + 1}`, /newer schema version/iu, true],
   [
     "DELETE FROM config_machine_state WHERE state_key = 'state.schema.contentVersion'",
@@ -309,7 +309,8 @@ it.each([
     "INSERT INTO config_machine_state VALUES ('state.schema.contentVersion', '{', 1)",
     /invalid shared state schema content version/iu,
   ],
-] as const)(
+];
+it.each(metadataMutationCases)(
   "rejects metadata mutation %s",
   (sql, error, markersChange = false, deferred = false) => {
     const options = fixture(deferred);

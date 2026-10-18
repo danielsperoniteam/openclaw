@@ -77,6 +77,7 @@ function attemptAcquisition(params: AcquisitionParams) {
       closeAcquisition(acquired);
     }
   }
+  return undefined;
 }
 
 async function withCheckpointLogging(

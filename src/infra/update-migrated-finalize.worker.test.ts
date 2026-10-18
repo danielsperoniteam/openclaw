@@ -190,6 +190,7 @@ async function runWorker(
   process.argv = [process.execPath, "update-migrated-finalize.worker.js", ...(mode ? [mode] : [])];
   vi.spyOn(process.stdin, Symbol.asyncIterator).mockImplementation(async function* () {
     yield JSON.stringify(input);
+    return undefined;
   });
   await import("./update-migrated-finalize.worker.js");
   await settled.promise;

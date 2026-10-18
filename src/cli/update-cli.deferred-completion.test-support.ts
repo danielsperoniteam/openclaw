@@ -8,14 +8,6 @@ import { withEnvAsync } from "../test-utils/env.js";
 import type { TempHomeEnv } from "../test-utils/temp-home.js";
 import { createCliRuntimeCapture } from "./test-runtime-capture.js";
 import { createUpdateFixtureAssertions } from "./update-cli-shared-fixture.test-support.js";
-import {
-  createUpdateCliBaseSnapshot,
-  createUpdateCliConfigFixtures,
-  postCoreConvergenceResult,
-  stableConfig,
-  stableWhatsAppConfig,
-} from "./update-cli/update-cli-config.test-support.js";
-import { writeJsonFixture } from "./update-cli/update-cli-package.test-support.js";
 
 export const readPackageVersion = vi.fn();
 export const syncPluginsForUpdateChannel = vi.fn();
@@ -149,6 +141,7 @@ vi.mock("../plugins/update.js", async (importOriginal) => {
   };
 });
 
+// mock-isolation: Deferred completion supplies convergence facts without running Doctor or plugin installs.
 vi.mock("../commands/doctor/shared/post-core-plugin-convergence.js", () => ({
   runPostCorePluginConvergence: vi.fn(
     async (params: { cfg: OpenClawConfig; baselineInstallRecords?: unknown }) => ({
@@ -159,6 +152,14 @@ vi.mock("../commands/doctor/shared/post-core-plugin-convergence.js", () => ({
   ),
 }));
 
+const {
+  createUpdateCliBaseSnapshot,
+  createUpdateCliConfigFixtures,
+  postCoreConvergenceResult,
+  stableConfig,
+  stableWhatsAppConfig,
+} = await import("./update-cli/update-cli-config.test-support.js");
+const { writeJsonFixture } = await import("./update-cli/update-cli-package.test-support.js");
 const nodeSqlite = await import("../infra/node-sqlite.js");
 const windowsPrivateDirectory = await import("../infra/windows-private-directory.js");
 const { createTempHomeEnv } = await import("../test-utils/temp-home.js");

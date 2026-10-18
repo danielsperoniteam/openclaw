@@ -246,8 +246,8 @@ describe("Client.deployCommands", () => {
 });
 
 describe("Client gateway event queue", () => {
-  function listener(handle: () => Promise<void>): AnyListener {
-    return { type: "READY", handle: vi.fn(handle) };
+  function listener(handle: () => Promise<void>) {
+    return { type: "READY" as const, handle: vi.fn(handle) };
   }
 
   function createQueuedClient(

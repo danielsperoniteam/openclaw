@@ -195,11 +195,22 @@ it("opens databases with early cron tables before creating cron indexes", () => 
     id: "legacy-job",
     name: "Legacy job",
     enabled: true,
+    deleteAfterRun: true,
+    createdAtMs: 123,
     updatedAtMs: 456,
     agentId: "agent-a",
-    schedule: { kind: "every", everyMs: 3_600_000 },
-    payload: { kind: "agentTurn", message: "hello" },
-    delivery: { failureDestination: { to: "https://example.invalid/hook" } },
+    sessionKey: "agent:agent-a:main",
+    schedule: { kind: "every", everyMs: 3_600_000, anchorMs: 0 },
+    payload: { kind: "agentTurn", message: "hello", model: "anthropic/claude-sonnet-4-6" },
+    delivery: {
+      mode: "announce",
+      channel: "telegram",
+      to: "chat-1",
+      accountId: "acct-1",
+      bestEffort: true,
+      failureDestination: { to: "https://example.invalid/hook" },
+    },
+    failureAlert: { mode: "announce", channel: "discord", to: "ops", after: 2 },
   });
   const projectedJobJson = JSON.stringify({ delivery: { threadId: 1008013 } });
   db.exec(`

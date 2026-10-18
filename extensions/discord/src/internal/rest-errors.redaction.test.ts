@@ -13,8 +13,8 @@ async function captureError<T extends DiscordError>(
   promise: Promise<unknown>,
   type: abstract new (...args: never[]) => T,
 ): Promise<T> {
+  await expect(promise).rejects.toBeInstanceOf(type);
   const error = await promise.catch((caught: unknown) => caught);
-  expect(error).toBeInstanceOf(type);
   return error as T;
 }
 
