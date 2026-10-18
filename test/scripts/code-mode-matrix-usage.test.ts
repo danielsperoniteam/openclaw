@@ -15,8 +15,9 @@ import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const ROOT = "agent:qa:matrix:root";
 const CHILD = "agent:worker:subagent:child";
+const rootIdentity = { storeId: "qa", sessionId: "root", sessionKey: ROOT };
 
-function usage(scale = 1) {
+function usage(scale = 1, total = 0.012, totalOrigin?: "provider-billed") {
   return {
     input: 10 * scale,
     output: 4 * scale,
@@ -24,7 +25,7 @@ function usage(scale = 1) {
     cacheWrite: 2 * scale,
     totalTokens: 24 * scale,
     reasoningTokens: 3 * scale,
-    cost: { total: 0.012 },
+    cost: { total, totalOrigin },
   };
 }
 
@@ -37,23 +38,21 @@ function assistant(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+const assistantJson = JSON.stringify(assistant());
+const terminalRunJson = JSON.stringify({ execution: { status: "terminal" } });
 
 function ledger(events: unknown[] = [assistant()]): MatrixSessionLedger {
   return {
     stores: { qa: "1:2" },
     rows: events.map((event, seq) => ({
-      storeId: "qa",
-      sessionId: "root",
-      sessionKey: ROOT,
+      ...rootIdentity,
       seq,
       sha256: JSON.stringify(event),
       event,
     })),
     sessions: [
       {
-        storeId: "qa",
-        sessionId: "root",
-        sessionKey: ROOT,
+        ...rootIdentity,
         historyRewritten: false,
         generation: "initial",
       },
@@ -72,10 +71,8 @@ function reportedUsage(calls = 1) {
   };
 }
 
-function accounting({
-  events,
-  ...options
-}: Partial<Parameters<typeof collectMatrixUsage>[0]> & { events?: unknown[] } = {}) {
+type BillingOptions = Partial<Parameters<typeof collectMatrixUsage>[0]> & { events?: unknown[] };
+function accounting({ events, ...options }: BillingOptions = {}) {
   return collectMatrixUsage({
     ledger: ledger(events),
     rootSessionKeys: [ROOT],
@@ -96,19 +93,36 @@ function childRun(executionStatus = "terminal") {
   };
 }
 
-function writeStore(root: string, agent: string, sessionKey: string, parentSessionKey?: string) {
-  const file = path.join(root, "agents", agent, "agent", "openclaw-agent.sqlite");
+function database(
+  file: string,
+  schema: string,
+  ...rows: [table: string, ...values: (string | number | null)[]][]
+) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   try {
-    db.exec(`
+    db.exec(schema);
+    for (const [table, ...values] of rows) {
+      db.prepare(`INSERT INTO ${table} VALUES (${values.map(() => "?").join(",")})`).run(...values);
+    }
+  } finally {
+    db.close();
+  }
+  return file;
+}
+
+function writeStore(root: string, agent: string, sessionKey: string, parentSessionKey?: string) {
+  return database(
+    path.join(root, "agents", agent, "agent", "openclaw-agent.sqlite"),
+    `
       CREATE TABLE session_nodes(session_key TEXT PRIMARY KEY, entry_json TEXT);
       CREATE TABLE session_windows(session_id TEXT PRIMARY KEY, session_key TEXT, reason TEXT);
       CREATE TABLE transcript_events(session_id TEXT, seq INTEGER, event_json TEXT, event_zstd BLOB, event_utf8_bytes INTEGER, PRIMARY KEY(session_id,seq));
       CREATE TABLE transcript_rewrite_watermarks(session_id TEXT, generation TEXT);
       CREATE TABLE session_transcript_archives(session_id TEXT);
-    `);
-    db.prepare("INSERT INTO session_nodes VALUES (?,?)").run(
+    `,
+    [
+      "session_nodes",
       sessionKey,
       JSON.stringify({
         parentSessionKey,
@@ -120,21 +134,11 @@ function writeStore(root: string, agent: string, sessionKey: string, parentSessi
         estimatedCostUsd: 0.012,
         totalTokens: 9999,
       }),
-    );
-    db.prepare("INSERT INTO session_windows VALUES (?,?,?)").run(agent, sessionKey, "initial");
-    db.prepare("INSERT INTO transcript_rewrite_watermarks VALUES (?,?)").run(
-      agent,
-      `generation-${agent}`,
-    );
-    db.prepare("INSERT INTO transcript_events VALUES (?,?,?,NULL,NULL)").run(
-      agent,
-      1,
-      JSON.stringify(assistant()),
-    );
-  } finally {
-    db.close();
-  }
-  return file;
+    ],
+    ["session_windows", agent, sessionKey, "initial"],
+    ["transcript_rewrite_watermarks", agent, `generation-${agent}`],
+    ["transcript_events", agent, 1, assistantJson, null, null],
+  );
 }
 
 describe("matrix task billing", () => {
@@ -142,28 +146,13 @@ describe("matrix task billing", () => {
     const root = tempDirs.make("code-mode-accounting-");
     const parentFile = writeStore(root, "qa", ROOT);
     writeStore(root, "worker", CHILD, ROOT);
-    const shared = path.join(root, "state", "openclaw.sqlite");
-    fs.mkdirSync(path.dirname(shared), { recursive: true });
-    const registry = new DatabaseSync(shared);
-    registry.exec(
+    database(
+      path.join(root, "state", "openclaw.sqlite"),
       "CREATE TABLE subagent_runs(run_id TEXT, child_session_key TEXT, requester_session_key TEXT, requester_store_path TEXT, payload_json TEXT)",
+      ["subagent_runs", "child-run", CHILD, ROOT, parentFile, terminalRunJson],
     );
-    registry
-      .prepare("INSERT INTO subagent_runs VALUES (?,?,?,?,?)")
-      .run(
-        "child-run",
-        CHILD,
-        ROOT,
-        parentFile,
-        JSON.stringify({ execution: { status: "terminal" } }),
-      );
-    registry.close();
     const taskEnd = captureMatrixLedgerBoundary(await readMatrixSessionLedger(root));
-    const parent = new DatabaseSync(parentFile);
-    parent
-      .prepare("INSERT INTO transcript_events VALUES (?,?,?,NULL,NULL)")
-      .run("qa", 2, JSON.stringify(assistant()));
-    parent.close();
+    database(parentFile, "", ["transcript_events", "qa", 2, assistantJson, null, null]);
     const final = await readMatrixSessionLedger(root);
     const task = accounting({ ledger: final, after: taskEnd });
     const interview = accounting({ ledger: final, before: taskEnd });
@@ -196,6 +185,11 @@ describe("matrix task billing", () => {
     reasoningTokens: null,
   };
   const buckets = { input: 10, output: 4, cacheRead: 8, cacheWrite: 2 };
+  const incomplete = (knownTotalTokens = 24) => ({
+    complete: false,
+    totalTokens: null,
+    knownTotalTokens,
+  });
   it.each([0, 1])("ignores unavailable counters at scale %s", (scale) => {
     expect(
       accounting({
@@ -232,8 +226,7 @@ describe("matrix task billing", () => {
   });
   it.each([false, true])("distinguishes measured=%s zero usage", (measured) => {
     const zero = {
-      ...usage(0),
-      cost: { total: 0, totalOrigin: "provider-billed" },
+      ...usage(0, 0, "provider-billed"),
       ...(measured ? { usageReport: { state: "available" } } : {}),
     };
     expect(accounting({ events: [assistant({ usage: zero })], rootUsage: zero })).toMatchObject({
@@ -247,21 +240,12 @@ describe("matrix task billing", () => {
       assistantTurns: 1,
     });
   });
+  const missingCache = { input: 10, output: 4, totalTokens: 24, cost: { total: 0.01 } };
   it.each([
     ["missing response usage", undefined, false, false],
-    ["placeholder price", { ...usage(), cost: { total: 0 } }, true, false],
-    [
-      "provider-billed zero",
-      { ...usage(), cost: { total: 0, totalOrigin: "provider-billed" } },
-      true,
-      true,
-    ],
-    [
-      "missing cache bucket",
-      { input: 10, output: 4, totalTokens: 24, cost: { total: 0.01 } },
-      false,
-      false,
-    ],
+    ["placeholder price", usage(1, 0), true, false],
+    ["provider-billed zero", usage(1, 0, "provider-billed"), true, true],
+    ["missing cache bucket", missingCache, false, false],
   ] as const)("accounts for %s", (_label, observation, complete, costComplete) => {
     expect(accounting({ events: [assistant({ usage: observation })] })).toMatchObject({
       complete,
@@ -292,18 +276,14 @@ describe("matrix task billing", () => {
   });
   it("withholds totals when the terminal response is lost", () => {
     expect(accounting({ terminalResponseObserved: false, rootUsage: undefined })).toMatchObject({
-      complete: false,
-      totalTokens: null,
-      knownTotalTokens: 24,
+      ...incomplete(),
       knownCostUsd: 0.012,
     });
   });
   it("keeps root auxiliary usage without inventing buckets or doubling totals", () => {
     expect(accounting({ rootUsage: reportedUsage(2) })).toMatchObject({
       ...buckets,
-      complete: false,
-      totalTokens: null,
-      knownTotalTokens: 48,
+      ...incomplete(48),
       parents: { knownTotalTokens: 24 },
       runtimeReconciliation: [
         {
@@ -325,23 +305,17 @@ describe("matrix task billing", () => {
   ] as const)("reconciles a child's %s against its canonical run snapshot", (condition) => {
     const final = ledger();
     final.stores.worker = "1:3";
-    final.rows.push({
-      ...final.rows[0]!,
-      storeId: "worker",
-      sessionId: "child",
-      sessionKey: CHILD,
-    });
+    const identity = { storeId: "worker", sessionId: "child", sessionKey: CHILD };
+    final.rows.push({ ...final.rows[0]!, ...identity });
     final.sessions.push({
-      storeId: "worker",
-      sessionId: "child",
-      sessionKey: CHILD,
+      ...identity,
       parentSessionKey: ROOT,
       historyRewritten: false,
       runUsage: {
         runId: condition === "wrong run" ? "different-run" : "child-run",
         usage:
           condition === "cost difference"
-            ? { input: 10, output: 4, cacheRead: 8, cacheWrite: 2, costUsd: 0.024 }
+            ? { ...buckets, costUsd: 0.024 }
             : { input: 20, output: 8, cacheRead: 16, cacheWrite: 4, costUsd: 0.024 },
       },
     });
@@ -395,7 +369,7 @@ describe("matrix task billing", () => {
     "does not equate a final successful response with observed usage for an internal retry: %s",
     (runtimeLog) => {
       const result = accounting({ runtimeLog });
-      expect(result).toMatchObject({ complete: false, knownTotalTokens: 24, totalTokens: null });
+      expect(result).toMatchObject(incomplete());
       expect(result.issues).toEqual(
         expect.arrayContaining([expect.stringContaining("without separate failed-request usage")]),
       );
@@ -433,7 +407,7 @@ describe("matrix task billing", () => {
         ...(condition === "rewritten" ? { after: before } : {}),
         settled: condition !== "unsettled",
       });
-      expect(result).toMatchObject({ complete: false, totalTokens: null, knownTotalTokens: 24 });
+      expect(result).toMatchObject(incomplete());
     },
   );
 });
@@ -468,18 +442,17 @@ function modeRow(mode: "code" | "direct", repetition = 1) {
     accounting: accounting(),
   };
 }
+function comparePairs(...codeRows: ReturnType<typeof modeRow>[]) {
+  return compareCodeModeMatrixModes(
+    codeRows.flatMap((row) => [modeRow("direct", row.repetition), row]),
+  );
+}
 
 describe("same-source mode comparisons", () => {
   it("charges failed attempts to completed tasks and exposes auditable empirical pairs", () => {
     const completedWithErrors = modeRow("code", 1);
     completedWithErrors.accounting.toolFailures = 1;
-    const rows = [
-      modeRow("direct", 1),
-      completedWithErrors,
-      modeRow("direct", 2),
-      { ...modeRow("code", 2), passed: false },
-    ];
-    const report = compareCodeModeMatrixModes(rows);
+    const report = comparePairs(completedWithErrors, { ...modeRow("code", 2), passed: false });
     expect(report.incompletePairs).toEqual([]);
     expect(report.byTask[0]).toMatchObject({
       pairs: 2,
@@ -498,28 +471,18 @@ describe("same-source mode comparisons", () => {
       },
       operationalRatios: { totalTokensPerCompletedTask: 2 },
     });
-    expect(report.byTask[0]!.pairedSuccessDifference).toEqual({
-      samples: 2,
-      mean: -0.5,
-      p50: -0.5,
-      min: -1,
-      max: 0,
-    });
+    const distribution = { samples: 2, mean: -0.5, p50: -0.5, min: -1, max: 0 };
+    expect(report.byTask[0]!.pairedSuccessDifference).toEqual(distribution);
     expect(report.pairs[0]!.totalTokens).toEqual({ direct: 24, code: 24, delta: 0, ratio: 1 });
     expect(report.pairs[1]!.totalTokens).toBeNull();
   });
 
   it("does not claim successful-subset savings when another attempt has missing usage", () => {
-    const rows = [
-      modeRow("direct", 1),
-      modeRow("code", 1),
-      modeRow("direct", 2),
-      {
-        ...modeRow("code", 2),
-        accounting: accounting({ events: [assistant({ usage: undefined })] }),
-      },
-    ];
-    const result = compareCodeModeMatrixModes(rows);
+    const missingUsage = {
+      ...modeRow("code", 2),
+      accounting: accounting({ events: [assistant({ usage: undefined })] }),
+    };
+    const result = comparePairs(modeRow("code"), missingUsage);
     expect(result.pairs[1]!.totalTokens).toBeNull();
     expect(result.byModel[0]).toMatchObject({
       successfulPairs: 2,

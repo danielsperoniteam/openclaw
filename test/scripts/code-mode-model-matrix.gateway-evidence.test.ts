@@ -8,7 +8,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, assert, expect, it, vi } from "vitest";
 import {
   getEffectiveQaEvidenceEntries,
   projectQaEvidenceScenarioOutcomes,
@@ -34,6 +34,21 @@ import { toolingTsEntrypoints } from "./tooling-ts-runtime.test-support.js";
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const readJson = async (file: string) => JSON.parse(await fs.readFile(file, "utf8"));
 const writeJson = (file: string, value: unknown) => fs.writeFile(file, JSON.stringify(value));
+const sha256 = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+const readJsonLines = async (file: string) =>
+  (await fs.readFile(file, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+const readEvidence = async (root: string) =>
+  validateQaEvidenceSummaryJson(await readJson(path.join(root, "qa-evidence.json")));
+async function frozenRuntime(root: string, head: string, entry: string) {
+  await fs.mkdir(path.join(root, "dist"), { recursive: true });
+  await fs.writeFile(path.join(root, "dist", "entry.js"), entry);
+  for (const stamp of [BUILD_STAMP_FILE, RUNTIME_POSTBUILD_STAMP_FILE]) {
+    await writeJson(path.join(root, "dist", stamp), { head, inputsClean: true });
+  }
+}
 function matrixOptions(repoRoot: string, runtimeDir = repoRoot) {
   return {
     allowFailures: false,
@@ -71,7 +86,7 @@ function initializeGitFixture(root: string, env = createNestedGitEnv()) {
 it("runs the actual Gateway matrix CLI without a provider or import cycle", async ({ signal }) => {
   const root = tempDirs.make("openclaw-matrix-cli-");
   await Promise.all(
-    ["dist", "node_modules", "packages", "home", "tmp"].map((directory) =>
+    ["node_modules", "packages", "home", "tmp"].map((directory) =>
       fs.mkdir(path.join(root, directory)),
     ),
   );
@@ -79,11 +94,7 @@ it("runs the actual Gateway matrix CLI without a provider or import cycle", asyn
     path.join(root, ".gitignore"),
     "/dist/\n/node_modules/\n/packages/\n/home/\n/tmp/\n/artifacts/\n",
   );
-  await fs.writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module" }));
-  await fs.writeFile(
-    path.join(root, "dist", "entry.js"),
-    'throw new Error("Unexpected synthetic runtime launch");\n',
-  );
+  await writeJson(path.join(root, "package.json"), { type: "module" });
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH,
     SystemRoot: process.env.SystemRoot,
@@ -104,24 +115,15 @@ it("runs the actual Gateway matrix CLI without a provider or import cycle", asyn
     GIT_CONFIG_VALUE_1: "0",
   };
   const { head } = initializeGitFixture(root, env);
-  for (const stamp of [BUILD_STAMP_FILE, RUNTIME_POSTBUILD_STAMP_FILE]) {
-    await writeJson(path.join(root, "dist", stamp), { head, inputsClean: true });
-  }
+  await frozenRuntime(root, head, 'throw new Error("Unexpected synthetic runtime launch");\n');
   const run = await runNodeScript(
     (workerArgv) => [
       ...workerArgv(resolveRuntimeWorkerUrl(toolingTsEntrypoints.codeModeModelMatrix)),
       "--runtime-dir",
       root,
-      "--model",
-      "openai/fixture",
-      "--mode",
-      "code",
-      "--task",
-      "javascript-contracts",
-      "--repetitions",
-      "1",
-      "--output-dir",
-      "artifacts",
+      ..."--model openai/fixture --mode code --task javascript-contracts --repetitions 1 --output-dir artifacts".split(
+        " ",
+      ),
     ],
     env,
     30_000,
@@ -129,18 +131,14 @@ it("runs the actual Gateway matrix CLI without a provider or import cycle", asyn
   );
   expect(run.error, run.stdout + run.stderr).toBeUndefined();
   expect(run.status, run.stderr).toBe(1);
-  const resultsText = await fs
-    .readFile(path.join(root, "artifacts/results.jsonl"), "utf8")
-    .catch((cause: unknown) => {
+  const rows = await readJsonLines(path.join(root, "artifacts/results.jsonl")).catch(
+    (cause: unknown) => {
       throw new Error(
         `Real CLI produced no result.\nstdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
         { cause },
       );
-    });
-  const rows = resultsText
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
+    },
+  );
   expect(rows).toMatchObject([
     { task: "javascript-contracts", failureCategory: "provider_auth", passed: false },
   ]);
@@ -210,20 +208,9 @@ it.each([
     const { head: harnessSha } = initializeGitFixture(repoRoot);
     const runtimeSha = "a".repeat(40);
     const source = { gitSha: runtimeSha, sourceDirty: false, sourcePatchSha256: null };
-    for (const root of [repoRoot, runtimeDir]) {
-      await fs.mkdir(path.join(root, "dist"));
-      await fs.writeFile(
-        path.join(root, "dist", "entry.js"),
-        root === repoRoot ? "harness" : "runtime",
-      );
-    }
-    for (const stamp of [".buildstamp", ".runtime-postbuildstamp"]) {
-      await writeJson(path.join(runtimeDir, "dist", stamp), {
-        head: runtimeSha,
-        inputsClean: true,
-      });
-    }
-    const buildSha256 = createHash("sha256").update("runtime").digest("hex");
+    await frozenRuntime(repoRoot, harnessSha, "harness");
+    await frozenRuntime(runtimeDir, runtimeSha, "runtime");
+    const buildSha256 = sha256("runtime");
     const model = "openai/fixture";
     const task = "inventory-join";
     const baselineResults = path.join(repoRoot, "baseline.jsonl");
@@ -240,6 +227,7 @@ it.each([
     }));
     await fs.writeFile(baselineResults, baselineRows.map((row) => JSON.stringify(row)).join("\n"));
     const outputDir = path.join(repoRoot, "artifacts");
+    const artifact = (name: string) => path.join(outputDir, name);
     let calls = 0;
     const previousSigintListeners = process.rawListeners("SIGINT");
     const previousSigtermListeners = process.rawListeners("SIGTERM");
@@ -259,9 +247,7 @@ it.each([
         },
         readBuildSha256: async (root) => {
           expect(root).toBe(runtimeDir);
-          return createHash("sha256")
-            .update(await fs.readFile(path.join(root, "dist", "entry.js")))
-            .digest("hex");
+          return sha256(await fs.readFile(path.join(root, "dist", "entry.js")));
         },
         buildCliArtifacts: async () => {
           throw new Error("must not rebuild a frozen runtime");
@@ -276,15 +262,12 @@ it.each([
             buildSha256,
             executor,
           });
-          const before = validateQaEvidenceSummaryJson(
-            await readJson(path.join(outputDir, "qa-evidence.json")),
-          );
-          expect(outcomes(before)).toEqual(
-            calls === 1
-              ? [null, null, null]
-              : calls === 2
-                ? ["pass", null, null]
-                : ["pass", "fail", null],
+          expect(outcomes(await readEvidence(outputDir))).toEqual(
+            [
+              [null, null, null],
+              ["pass", null, null],
+              ["pass", "fail", null],
+            ][calls - 1],
           );
           if (calls === 2) {
             if (interrupted) {
@@ -331,36 +314,24 @@ it.each([
       await expect(run).rejects.toThrow("Code Mode matrix interrupted");
     } else {
       expect((await run).exitCode).toBe(1);
-      const comparison = await readJson(path.join(outputDir, "comparison.json"));
+      const comparison = await readJson(artifact("comparison.json"));
       expect(comparison).toMatchObject({ total: 3, baselinePassed: 3, candidatePassed: 2 });
-      expect(comparison.cells.map((cell: { candidateSha: string }) => cell.candidateSha)).toEqual([
-        runtimeSha,
-        runtimeSha,
-        runtimeSha,
-      ]);
+      expect(comparison.cells.map((cell: { candidateSha: string }) => cell.candidateSha)).toEqual(
+        Array(3).fill(runtimeSha),
+      );
     }
     expect(process.rawListeners("SIGINT")).toEqual(previousSigintListeners);
     expect(process.rawListeners("SIGTERM")).toEqual(previousSigtermListeners);
     expect(calls).toBe(interrupted ? 2 : 3);
-    const manifest = await readJson(path.join(outputDir, "manifest.json"));
-    expect(manifest).toMatchObject({
+    expect(await readJson(artifact("manifest.json"))).toMatchObject({
       gitSha: runtimeSha,
       buildSha256,
       harness: { gitSha: harnessSha },
       gatewayExecutor: executor,
     });
-    const rows: CodeModeMatrixCellResult[] = (
-      await fs.readFile(path.join(outputDir, "results.jsonl"), "utf8")
-    )
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    const evidence = validateQaEvidenceSummaryJson(
-      await readJson(path.join(outputDir, "qa-evidence.json")),
-    );
-    if (evidence.schemaVersion !== 3) {
-      throw new Error("expected canonical invocation evidence after comparison");
-    }
+    const rows: CodeModeMatrixCellResult[] = await readJsonLines(artifact("results.jsonl"));
+    const evidence = await readEvidence(outputDir);
+    assert(evidence.schemaVersion === 3, "expected canonical invocation evidence after comparison");
     expect(outcomes(evidence)).toEqual(["pass", "fail", interrupted ? null : "pass"]);
     expect(getEffectiveQaEvidenceEntries(evidence)).toHaveLength(calls);
     expect(evidence.occurrences).toHaveLength(3 + calls);
@@ -381,12 +352,10 @@ it.each([
       });
       expect(occurrence?.receipts).toHaveLength(1);
       const receipt = occurrence?.receipts[0];
-      if (!receipt) {
-        throw new Error("expected a prepared observation receipt");
-      }
+      assert(receipt, "expected a prepared observation receipt");
       expect(receipt.phase).toBe("prepared");
-      const bytes = await fs.readFile(path.join(outputDir, receipt.artifact.path));
-      expect(createHash("sha256").update(bytes).digest("hex")).toBe(receipt.artifact.sha256);
+      const bytes = await fs.readFile(artifact(receipt.artifact.path));
+      expect(sha256(bytes)).toBe(receipt.artifact.sha256);
       expect(JSON.parse(bytes.toString()).result).toEqual(row);
     }
   },
