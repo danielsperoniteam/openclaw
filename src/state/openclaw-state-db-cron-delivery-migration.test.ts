@@ -11,6 +11,7 @@ import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js
 import { requireNativeSqliteDatabase as nativeDatabase } from "../test-utils/native-sqlite.js";
 import { preflightOpenClawDatabaseSchemas } from "./openclaw-database-preflight.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION as SCHEMA_VERSION } from "./openclaw-state-db-contract.js";
+import { expectRow, expectRows } from "./openclaw-state-db-fixtures.test-support.js";
 import { openOpenClawStateReadOnlyLocation } from "./openclaw-state-db-read-connection.js";
 import { readStateSchemaContentVersion as readVersion } from "./openclaw-state-db-schema-version.js";
 import {
@@ -34,8 +35,8 @@ function observeReads<T>(run: (queries: string[]) => T): T {
   }
 }
 
-function expectReceipt(db: EngineConnection, columns: string, expected: unknown) {
-  expect(db.prepare(`SELECT ${columns} FROM cron_run_receipts`).all()).toEqual([expected]);
+function expectReceipt(db: EngineConnection, expected: Record<string, string>) {
+  expectRows(db, `SELECT ${Object.keys(expected).join(", ")} FROM cron_run_receipts`, [expected]);
 }
 
 function legacyReceiptDatabase() {
@@ -70,7 +71,7 @@ it.each(["managed transaction", "implicit snapshot"] as const)(
     const { db } = reader.database;
     try {
       const migrateWhileReading = () => {
-        expect(db.prepare("SELECT receipt_id FROM cron_run_receipts").get()).toEqual({
+        expectRow(db, "SELECT receipt_id FROM cron_run_receipts", {
           receipt_id: "legacy-receipt",
         });
         expect(readVersion(db)).toBe(19);
@@ -105,7 +106,7 @@ it.each(["managed transaction", "implicit snapshot"] as const)(
         expect(readVersion(db)).toBe(SCHEMA_VERSION);
         expect(queries).toEqual([]);
       });
-      expectReceipt(db, "delivery_attempt_state", { delivery_attempt_state: "unknown" });
+      expectReceipt(db, { delivery_attempt_state: "unknown" });
     } finally {
       reader.close();
     }
@@ -122,22 +123,20 @@ it.each(["runtime open", "doctor repair"] as const)(
       }
       const opened = openState(options);
       const integrityChecks = queries.filter((sql) => /^PRAGMA integrity_check\s*;?$/iu.test(sql));
-      if (entry === "runtime open") {
-        expect(integrityChecks).toHaveLength(1);
-      } else {
-        expect(integrityChecks).toEqual([]);
+      expect(integrityChecks).toHaveLength(entry === "runtime open" ? 1 : 0);
+      if (entry === "doctor repair") {
         expect(queries).toContain("PRAGMA quick_check;");
       }
       return opened;
     });
     const { db } = database;
-    expectReceipt(db, "receipt_id, status, delivery_attempt_state", {
+    expectReceipt(db, {
       receipt_id: "legacy-receipt",
       status: "running",
       delivery_attempt_state: "unknown",
     });
-    expect(db.prepare("PRAGMA user_version").get()).toEqual({ user_version: SCHEMA_VERSION });
-    expect(db.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    expectRow(db, "PRAGMA user_version", { user_version: SCHEMA_VERSION });
+    expectRow(db, "PRAGMA integrity_check", { integrity_check: "ok" });
     db.exec("UPDATE cron_run_receipts SET delivery_attempt_state = 'started'");
     // Reuse remains valid while a sibling is live; final close requires readmission.
     const survivingReader = openOpenClawStateReadOnlyLocation(database.path, database.path);
@@ -146,9 +145,7 @@ it.each(["runtime open", "doctor repair"] as const)(
     openState(options);
     try {
       observeReads((queries) => {
-        expectReceipt(openState(options).db, "delivery_attempt_state", {
-          delivery_attempt_state: "started",
-        });
+        expectReceipt(openState(options).db, { delivery_attempt_state: "started" });
         expect(
           queries.filter((sql) =>
             /(?:sqlite_(?:schema|master)|pragma_(?:table|index|foreign_key)|\bPRAGMA\s+(?:user_version|schema_version|integrity_check|quick_check|foreign_key_check|table_info|table_xinfo|index_list|index_info|index_xinfo)\b|\bFROM\s+"?schema_meta\b|state\.schema\.contentVersion)/iu.test(
@@ -166,12 +163,8 @@ it.each(["runtime open", "doctor repair"] as const)(
       scope: "state",
       supportedVersions: { state: 19, agent: 23 },
     });
-    expect(preflight.incompatible).toEqual([
-      expect.objectContaining({
-        kind: "state",
-        foundVersion: SCHEMA_VERSION,
-        supportedVersion: 19,
-      }),
+    expect(preflight.incompatible).toMatchObject([
+      { kind: "state", foundVersion: SCHEMA_VERSION, supportedVersion: 19 },
     ]);
   },
 );
@@ -184,15 +177,13 @@ it("rolls receipt migration back with schema publication failure", () => {
   legacy.close();
   expect(() => openState(options)).toThrow("fixture publication refusal");
   using after = new DatabaseSync(databasePath, { readOnly: true });
-  expect(after.prepare("PRAGMA user_version").get()).toEqual({ user_version: 19 });
-  expectReceipt(after, "receipt_id, status", { receipt_id: "legacy-receipt", status: "running" });
-  expect(
-    after
-      .prepare(
-        "SELECT 1 FROM pragma_table_info('cron_run_receipts') WHERE name = 'delivery_attempt_state'",
-      )
-      .get(),
-  ).toBeUndefined();
+  expectRow(after, "PRAGMA user_version", { user_version: 19 });
+  expectReceipt(after, { receipt_id: "legacy-receipt", status: "running" });
+  expectRow(
+    after,
+    "SELECT 1 FROM pragma_table_info('cron_run_receipts') WHERE name = 'delivery_attempt_state'",
+    undefined,
+  );
 });
 
 it("opens databases with early cron tables before creating cron indexes", () => {
@@ -238,26 +229,24 @@ it("opens databases with early cron tables before creating cron indexes", () => 
 
   const { db: migrated } = openState({ env: { OPENCLAW_STATE_DIR: stateDir } });
 
-  expect(
-    migrated
-      .prepare(
-        "SELECT name, enabled, payload_kind, agent_id, job_json FROM cron_jobs WHERE job_id = ?",
-      )
-      .get("legacy-job"),
-  ).toEqual({
-    enabled: 1,
-    agent_id: "agent-a",
-    name: "Legacy job",
-    payload_kind: "agentTurn",
-    job_json: jobJson,
-  });
-  expect(
-    migrated
-      .prepare(
-        `SELECT json_extract(job_json, '$.delivery.threadId') AS delivery_thread_id
+  expectRow(
+    migrated,
+    "SELECT name, enabled, payload_kind, agent_id, job_json FROM cron_jobs WHERE job_id = ?",
+    {
+      enabled: 1,
+      agent_id: "agent-a",
+      name: "Legacy job",
+      payload_kind: "agentTurn",
+      job_json: jobJson,
+    },
+    "legacy-job",
+  );
+  expectRow(
+    migrated,
+    `SELECT json_extract(job_json, '$.delivery.threadId') AS delivery_thread_id
            FROM cron_jobs
           WHERE job_id = ?`,
-      )
-      .get("already-projected-job"),
-  ).toEqual({ delivery_thread_id: 1008013 });
+    { delivery_thread_id: 1008013 },
+    "already-projected-job",
+  );
 });

@@ -18,6 +18,7 @@ import { requireNativeSqliteDatabase as nativeDatabase } from "../test-utils/nat
 import { OPENCLAW_STATE_SCHEMA_VERSION as SCHEMA_VERSION } from "./openclaw-state-db-contract.js";
 import { assertExistingOpenClawStateRuntimeSchema as assertRuntimeSchema } from "./openclaw-state-db-existing-schema.js";
 import { openExistingOpenClawStateWriter as openExistingWriter } from "./openclaw-state-db-existing-write.js";
+import { expectRow, readRow, readRows } from "./openclaw-state-db-fixtures.test-support.js";
 import {
   assertSupportedStateSchemaVersion as assertVersion,
   readStateSchemaContentVersion as readVersion,
@@ -114,11 +115,12 @@ it("admits a restarted current schema before repeated version and migration prob
   ]) {
     expect(observation.queries.filter((sql) => pattern.test(sql))).toHaveLength(1);
   }
-  expect(
-    restarted.db
-      .prepare("SELECT value_json FROM config_machine_state WHERE state_key = ?")
-      .get("restart.fixture"),
-  ).toEqual({ value_json: '"retained"' });
+  expectRow(
+    restarted.db,
+    "SELECT value_json FROM config_machine_state WHERE state_key = ?",
+    { value_json: '"retained"' },
+    "restart.fixture",
+  );
   restarted.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
   expect(() => assertVersion(restarted.db, restarted.path)).toThrow(/newer schema version/iu);
 });
@@ -140,10 +142,7 @@ it("repairs canonical indexes and shares admission until the final handle closes
   const observation = observeSqliteReadSql(StatementSync.prototype);
   const repaired = openState({ env });
   expect(
-    repaired.db
-      .prepare("PRAGMA index_info(idx_task_runs_runtime_run)")
-      .all()
-      .map((row) => row.name),
+    readRows(repaired.db, "PRAGMA index_info(idx_task_runs_runtime_run)").map((row) => row.name),
   ).toEqual(["runtime", "run_id", "source_id", "created_at", "task_id"]);
   repaired.db.exec("CREATE TABLE checkonce_later (value TEXT)");
   assertRuntimeSchema(nativeDatabase(repaired.db), pathname);
@@ -155,15 +154,14 @@ it("repairs canonical indexes and shares admission until the final handle closes
 });
 
 it("does not reuse row-backed metadata after recreating schema_meta with identical definitions", () => {
-  const table = "schema_meta";
   const env = { OPENCLAW_STATE_DIR: directories.make("state-checkonce-metadata-") };
   const { db, path: pathname } = openState({ env });
   assertRuntimeSchema(nativeDatabase(db), pathname);
   const definitionSql =
     "SELECT sql FROM sqlite_schema WHERE tbl_name=? AND sql IS NOT NULL ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END";
-  const definitions = db.prepare(definitionSql).all(table);
-  db.exec(`DROP TABLE ${table}; ${definitions.map(({ sql }) => sql).join(";")};`);
-  expect(db.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get()).toEqual({ total: 0 });
+  const definitions = readRows(db, definitionSql, "schema_meta");
+  db.exec(`DROP TABLE schema_meta; ${definitions.map(({ sql }) => sql).join(";")};`);
+  expectRow(db, "SELECT COUNT(*) AS total FROM schema_meta", { total: 0 });
   expect(() => assertRuntimeSchema(nativeDatabase(db), pathname)).toThrow(
     /inconsistent ownership or schema metadata/iu,
   );
@@ -201,7 +199,7 @@ it("readmits startup checkpoint storage after a tracked header change", () => {
         VALUES('primary', 'global', 1, 1, 1)`);
   }
   const callback = vi.fn(
-    (db: EngineConnection) => db.prepare("SELECT COUNT(*) AS total FROM state_leases").get()?.total,
+    (db: EngineConnection) => readRow(db, "SELECT COUNT(*) AS total FROM state_leases")?.total,
   );
   const read = () => withCheckpoint(callback, options);
   expect(read()).toBe(0);
@@ -226,7 +224,7 @@ it("keeps a historical first version lookup private when the current catalog is 
   admitSqliteSchema(reader);
   const futureVersion = SCHEMA_VERSION + 1;
   runSqliteDeferredTransactionSync(reader, () => {
-    reader.prepare("SELECT * FROM sample").get();
+    readRow(reader, "SELECT * FROM sample");
     getAdmittedSqliteSchemaFacts(reader);
     writer.setAuthorizer(() => constants.SQLITE_OK);
     writer.exec(`PRAGMA user_version=${futureVersion}`);
