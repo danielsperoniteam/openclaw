@@ -1,4 +1,3 @@
-// Bundled root cache tests cover cached bundled channel root resolution.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,7 +14,6 @@ vi.mock("../../plugins/bundled-dir.js", async (importOriginal) => {
 });
 
 const tempDirs: string[] = [];
-const originalBundledPluginsDir = process.env.OPENCLAW_BUNDLED_PLUGINS_DIR;
 
 function makeBundledRoot(prefix: string): { root: string; pluginsDir: string } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -25,29 +23,22 @@ function makeBundledRoot(prefix: string): { root: string; pluginsDir: string } {
   return { root, pluginsDir };
 }
 
-function resolveMockRootSuffix(params: {
-  activeRoot: string | undefined;
-  rootAPluginsDir: string;
-  rootBPluginsDir: string;
-}): "A" | "B" | "unknown" {
-  if (params.activeRoot === params.rootAPluginsDir) {
-    return "A";
-  }
-  if (params.activeRoot === params.rootBPluginsDir) {
-    return "B";
-  }
-  return "unknown";
+function plugin(id: string, label: string) {
+  return { id, meta: { id, label }, capabilities: {}, config: {} };
+}
+
+function loadBootstrap(scope: string) {
+  return importFreshModule<typeof import("./bootstrap-registry.js")>(
+    import.meta.url,
+    `./bootstrap-registry.js?scope=${scope}`,
+  );
 }
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
-  if (originalBundledPluginsDir === undefined) {
-    delete process.env.OPENCLAW_BUNDLED_PLUGINS_DIR;
-  } else {
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = originalBundledPluginsDir;
-  }
+  vi.unstubAllEnvs();
   vi.resetModules();
   vi.doUnmock("../../plugins/channel-catalog-registry.js");
   vi.doUnmock("./bundled.js");
@@ -76,64 +67,45 @@ describe("bundled root-aware plugin lookups", () => {
       "./bundled-ids.js?scope=root-aware-id-cache",
     );
 
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = rootA.pluginsDir;
+    vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", rootA.pluginsDir);
     expect(bundledIds.listBundledChannelIds()).toEqual(["alpha-chat"]);
 
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = rootB.pluginsDir;
+    vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", rootB.pluginsDir);
     expect(bundledIds.listBundledChannelIds()).toEqual(["beta-chat"]);
   });
 
   it("reads bootstrap plugins from the active bundled root without re-importing", async () => {
     const rootA = makeBundledRoot("openclaw-bootstrap-a-");
     const rootB = makeBundledRoot("openclaw-bootstrap-b-");
+    const suffix = () => {
+      const activeRoot = process.env.OPENCLAW_BUNDLED_PLUGINS_DIR;
+      return activeRoot === rootA.pluginsDir
+        ? "A"
+        : activeRoot === rootB.pluginsDir
+          ? "B"
+          : "unknown";
+    };
 
     vi.doMock("./bundled.js", () => ({
-      getBundledChannelPlugin: (id: string) => ({
-        id,
-        meta: { id, label: `runtime-${id}` },
-        capabilities: {},
-        config: {},
-      }),
-      getBundledChannelSetupPlugin: (id: string) => {
-        const suffix = resolveMockRootSuffix({
-          activeRoot: process.env.OPENCLAW_BUNDLED_PLUGINS_DIR,
-          rootAPluginsDir: rootA.pluginsDir,
-          rootBPluginsDir: rootB.pluginsDir,
-        });
-        return {
-          id,
-          meta: { id, label: `setup-${suffix}` },
-          capabilities: {},
-          config: {},
-        };
-      },
+      getBundledChannelPlugin: (id: string) => plugin(id, `runtime-${id}`),
+      getBundledChannelSetupPlugin: (id: string) => plugin(id, `setup-${suffix()}`),
       getBundledChannelSecrets: (id: string) => ({
         secretTargetRegistryEntries: [{ id: `runtime-${id}`, targetType: "channel" }],
       }),
-      getBundledChannelSetupSecrets: (id: string) => {
-        const suffix = resolveMockRootSuffix({
-          activeRoot: process.env.OPENCLAW_BUNDLED_PLUGINS_DIR,
-          rootAPluginsDir: rootA.pluginsDir,
-          rootBPluginsDir: rootB.pluginsDir,
-        });
-        return {
-          secretTargetRegistryEntries: [{ id: `setup-${id}-${suffix}`, targetType: "channel" }],
-        };
-      },
+      getBundledChannelSetupSecrets: (id: string) => ({
+        secretTargetRegistryEntries: [{ id: `setup-${id}-${suffix()}`, targetType: "channel" }],
+      }),
     }));
 
-    const bootstrapRegistry = await importFreshModule<typeof import("./bootstrap-registry.js")>(
-      import.meta.url,
-      "./bootstrap-registry.js?scope=root-aware-bootstrap-cache",
-    );
+    const bootstrapRegistry = await loadBootstrap("root-aware-bootstrap-cache");
 
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = rootA.pluginsDir;
+    vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", rootA.pluginsDir);
     expect(bootstrapRegistry.getBootstrapChannelPlugin("alpha")?.meta.label).toBe("setup-A");
     expect(
       bootstrapRegistry.getBootstrapChannelSecrets("alpha")?.secretTargetRegistryEntries?.[0]?.id,
     ).toBe("setup-alpha-A");
 
-    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = rootB.pluginsDir;
+    vi.stubEnv("OPENCLAW_BUNDLED_PLUGINS_DIR", rootB.pluginsDir);
     expect(bootstrapRegistry.getBootstrapChannelPlugin("beta")?.meta.label).toBe("setup-B");
     expect(
       bootstrapRegistry.getBootstrapChannelSecrets("beta")?.secretTargetRegistryEntries?.[0]?.id,
@@ -155,10 +127,7 @@ describe("bundled root-aware plugin lookups", () => {
       getBundledChannelSetupSecrets: vi.fn(() => undefined),
     }));
 
-    const bootstrapRegistry = await importFreshModule<typeof import("./bootstrap-registry.js")>(
-      import.meta.url,
-      "./bootstrap-registry.js?scope=bootstrap-plugin-load-guard",
-    );
+    const bootstrapRegistry = await loadBootstrap("bootstrap-plugin-load-guard");
 
     expect(bootstrapRegistry.getBootstrapChannelPlugin("alpha")).toBeUndefined();
     expect(bootstrapRegistry.getBootstrapChannelPlugin("alpha")).toBeUndefined();
@@ -171,12 +140,7 @@ describe("bundled root-aware plugin lookups", () => {
     const getBundledChannelSecretsMock = vi.fn(() => {
       throw new Error("Cannot find module '@larksuiteoapi/node-sdk'");
     });
-    const getBundledChannelPluginMock = vi.fn(() => ({
-      id: "alpha",
-      meta: { id: "alpha", label: "Alpha" },
-      capabilities: {},
-      config: {},
-    }));
+    const getBundledChannelPluginMock = vi.fn(() => plugin("alpha", "Alpha"));
 
     vi.doMock("./bundled.js", () => ({
       getBundledChannelPlugin: getBundledChannelPluginMock,
@@ -185,10 +149,7 @@ describe("bundled root-aware plugin lookups", () => {
       getBundledChannelSetupSecrets: vi.fn(() => undefined),
     }));
 
-    const bootstrapRegistry = await importFreshModule<typeof import("./bootstrap-registry.js")>(
-      import.meta.url,
-      "./bootstrap-registry.js?scope=bootstrap-secrets-load-guard",
-    );
+    const bootstrapRegistry = await loadBootstrap("bootstrap-secrets-load-guard");
 
     expect(bootstrapRegistry.getBootstrapChannelSecrets("alpha")).toBeUndefined();
     expect(bootstrapRegistry.getBootstrapChannelSecrets("alpha")).toBeUndefined();

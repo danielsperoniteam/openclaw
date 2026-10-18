@@ -13,7 +13,6 @@ import {
   resolveRuntimeConversationBindingRoute,
   resolveRuntimeConversationBindingRouteAsync,
   inspectRuntimeConversationBindingRoute,
-  type RuntimeConversationBindingRouteResult,
 } from "./binding-routing.js";
 const acpReadiness = vi.hoisted(() => vi.fn());
 // mock-isolation: Readiness timeout tests must not initialize ACP backend registries or Gateway reset state.
@@ -21,20 +20,23 @@ vi.mock("./acp-stateful-target-driver.js", () => ({
   ensureConfiguredAcpBindingTargetReady: acpReadiness,
 }));
 
+const conversation = { channel: "demo", accountId: "default", conversationId: "room-1" };
+const pluginOwner = {
+  pluginBindingOwner: "plugin",
+  pluginId: "demo-plugin",
+  pluginRoot: "/synthetic/demo",
+};
+
 function createRoute(): ResolvedAgentRoute {
-  const result: RuntimeConversationBindingRouteResult = {
-    bindingRecord: null,
-    route: {
-      agentId: "main",
-      channel: "demo",
-      accountId: "default",
-      sessionKey: "agent:main:main",
-      mainSessionKey: "agent:main:main",
-      lastRoutePolicy: "main",
-      matchedBy: "default",
-    },
+  return {
+    agentId: "main",
+    channel: "demo",
+    accountId: "default",
+    sessionKey: "agent:main:main",
+    mainSessionKey: "agent:main:main",
+    lastRoutePolicy: "main",
+    matchedBy: "default",
   };
-  return result.route;
 }
 
 function createBinding(overrides?: Partial<SessionBindingRecord>): SessionBindingRecord {
@@ -42,21 +44,17 @@ function createBinding(overrides?: Partial<SessionBindingRecord>): SessionBindin
     bindingId: "binding-1",
     targetSessionKey: "agent:review:acp:session-1",
     targetKind: "session",
-    conversation: {
-      channel: "demo",
-      accountId: "default",
-      conversationId: "room-1",
-    },
+    conversation,
     status: "active",
     boundAt: 1,
     ...overrides,
   };
 }
 
-function registerAdapter(record: SessionBindingRecord | null): {
-  resolveByConversation: ReturnType<typeof vi.fn>;
-  touch: ReturnType<typeof vi.fn>;
-} {
+function registerAdapter(
+  record: SessionBindingRecord | null,
+  touchAsync?: SessionBindingAdapter["touchAsync"],
+) {
   const resolveByConversation = vi.fn<SessionBindingAdapter["resolveByConversation"]>(() => record);
   const touch = vi.fn<NonNullable<SessionBindingAdapter["touch"]>>();
   registerSessionBindingAdapter({
@@ -65,6 +63,7 @@ function registerAdapter(record: SessionBindingRecord | null): {
     listBySession: () => [],
     resolveByConversation,
     touch,
+    touchAsync,
   });
   return { resolveByConversation, touch };
 }
@@ -112,19 +111,13 @@ describe("runtime conversation binding route", () => {
   it.each([
     null,
     createBinding({ targetSessionKey: "agent:review:cron:job:run:finished" }),
-    createBinding({
-      metadata: {
-        pluginBindingOwner: "plugin",
-        pluginId: "demo",
-        pluginRoot: "/synthetic/demo",
-      },
-    }),
+    createBinding({ metadata: pluginOwner }),
     createBinding({ targetSessionKey: "global" }),
   ])("does not invent an agent for a binding without an agent owner (%j)", (binding) => {
     registerAdapter(binding);
     expect(() =>
       resolveRuntimeConversationBindingRoute({
-        conversation: { channel: "demo", accountId: "default", conversationId: "room-1" },
+        conversation,
         resolveRoute: ({ boundAgentId }) =>
           resolveAgentRoute({
             cfg: { agents: { ownership: "explicit", entries: { main: {}, review: {} } } },
@@ -175,15 +168,7 @@ describe("runtime conversation binding route", () => {
     const binding = createBinding();
     const gate = createDeferredCore();
     const touchAsync = vi.fn(() => gate.promise);
-    const touch = vi.fn();
-    registerSessionBindingAdapter({
-      channel: "demo",
-      accountId: "default",
-      listBySession: () => [],
-      resolveByConversation: () => binding,
-      touch,
-      touchAsync,
-    });
+    const { touch } = registerAdapter(binding, touchAsync);
     const params = { route: createRoute(), conversation: binding.conversation };
     expect(
       inspectRuntimeConversationBindingRoute({
@@ -206,41 +191,20 @@ describe("runtime conversation binding route", () => {
   });
 
   it.each([
-    { name: "agent session", binding: createBinding(), kind: "agent", agentId: "review" },
-    {
-      name: "inspection",
-      binding: createBinding(),
-      kind: "agent",
-      agentId: "review",
-      touchBinding: false,
-    },
-    {
-      name: "global fallback",
-      binding: createBinding({ targetSessionKey: "global" }),
-      kind: "agent",
-      agentId: "main",
-    },
-    {
-      name: "plugin owner",
-      binding: createBinding({
-        metadata: {
-          pluginBindingOwner: "plugin",
-          pluginId: "demo-plugin",
-          pluginRoot: "/tmp/demo-plugin",
-        },
-      }),
-      kind: "plugin",
-    },
-    {
-      name: "isolated cron",
-      binding: createBinding({
+    ["agent session", createBinding(), "agent", "review"],
+    ["inspection", createBinding(), "agent", "review", false],
+    ["global fallback", createBinding({ targetSessionKey: "global" }), "agent", "main"],
+    ["plugin owner", createBinding({ metadata: pluginOwner }), "plugin"],
+    [
+      "isolated cron",
+      createBinding({
         targetSessionKey: "agent:youtube:cron:monthly-report:run:closed-run-1",
       }),
-      kind: "none",
-    },
-  ])(
-    "projects $name and touches only its owning channel account",
-    ({ binding, kind, agentId, touchBinding }) => {
+      "none",
+    ],
+  ] as const)(
+    "projects %s and touches only its owning channel account",
+    (_name, binding, kind, agentId, touchBinding) => {
       const route = createRoute();
       const { resolveByConversation, touch } = registerAdapter(binding);
       const siblingTouches = [
@@ -265,10 +229,12 @@ describe("runtime conversation binding route", () => {
       for (const siblingTouch of siblingTouches) {
         expect(siblingTouch).not.toHaveBeenCalled();
       }
-      expect(result.bindingOwnerAvailable).toBe(true);
+      expect(result).toMatchObject({
+        bindingOwnerAvailable: true,
+        boundSessionKey: kind === "agent" ? binding.targetSessionKey : undefined,
+        boundAgentId: agentId,
+      });
       expect(result.bindingRecord).toBe(kind === "none" ? null : binding);
-      expect(result.boundSessionKey).toBe(kind === "agent" ? binding.targetSessionKey : undefined);
-      expect(result.boundAgentId).toBe(agentId);
       expect(Object.fromEntries(Object.entries(result.route))).toEqual(
         kind === "agent"
           ? {
