@@ -15,6 +15,7 @@ vi.mock("./chat-pane.tsx", async () => {
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import { mobileNavLayoutMediaQuery } from "../../app/mobile-nav-layout.ts";
 import { loadSettings, patchSettings } from "../../app/settings.ts";
+import { registerMcpAppUnmountTarget } from "../../components/mcp-app-unmount.ts";
 import { UI_COMMAND_EVENT, type UiCommandDetail } from "../../components/panel-toggle-contract.ts";
 import { captureI18nStateForTesting } from "../../i18n/lib/translate.test-support.ts";
 import { i18n } from "../../i18n/lib/translate.ts";
@@ -270,12 +271,12 @@ describe("chat page split layout host", () => {
       const outside = document.body.appendChild(document.createElement("button"));
       const teardown = createDeferred();
       if (scenario === "teardown") {
-        added.append(
-          Object.assign(document.createElement("mcp-app-view"), {
-            teardown: () => teardown.promise,
-            restartAfterTeardown: () => undefined,
-          }),
-        );
+        const app = Object.assign(document.createElement("mcp-app-view"), {
+          teardown: () => teardown.promise,
+          restartAfterTeardown: () => undefined,
+        });
+        onTestFinished(registerMcpAppUnmountTarget(app));
+        added.append(app);
       }
       button.focus();
       const href = window.location.href;

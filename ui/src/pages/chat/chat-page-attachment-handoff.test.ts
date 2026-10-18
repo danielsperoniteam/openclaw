@@ -1,8 +1,9 @@
 /* @vitest-environment jsdom */
 /* @vitest-environment-options {"url":"http://chat-page-attachment-handoff.test/"} */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
+import { registerMcpAppUnmountTarget } from "../../components/mcp-app-unmount.ts";
 
 // mock-isolation: Fake panes own staged-attachment callbacks during MCP teardown; real tag registration would replace that lifecycle.
 vi.mock("./chat-pane.tsx", async () => {
@@ -100,6 +101,7 @@ describe("chat page staged attachment rebound", () => {
     const restartAfterTeardown = vi.fn();
     mcpApp.restartAfterTeardown = restartAfterTeardown;
     mcpApp.teardown = vi.fn(() => teardown.promise);
+    onTestFinished(registerMcpAppUnmountTarget(mcpApp));
     closingPane.append(mcpApp);
 
     closingPane.onClosePane?.(closingPane.paneId);

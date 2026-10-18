@@ -1,8 +1,9 @@
 import { createRouter, definePage, type RouteMatch, type Router } from "@openclaw/uirouter";
 import type { JSX } from "@solidjs/web";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferredCore } from "../../../src/shared/deferred.js";
 import type { SolidRouteProps } from "../app-route-types.ts";
+import { registerMcpAppUnmountTarget } from "../components/mcp-app-unmount.ts";
 import { registerControlUiReloadGuard } from "./document-reload-guard.ts";
 import {
   disposeRouterOutlets,
@@ -96,8 +97,11 @@ describe("openclaw-router-outlet", () => {
       <>
         <mcp-app-view
           ref={(element) => {
-            Reflect.set(element, "restartAfterTeardown", vi.fn());
-            Reflect.set(element, "teardown", teardownView);
+            const target = Object.assign(element, {
+              restartAfterTeardown: vi.fn(),
+              teardown: teardownView,
+            });
+            onTestFinished(registerMcpAppUnmountTarget(target));
           }}
         />
         <div data-testid="owned-route">{props.label}</div>
@@ -196,8 +200,11 @@ describe("openclaw-router-outlet", () => {
       <>
         <mcp-app-view
           ref={(element) => {
-            Reflect.set(element, "restartAfterTeardown", vi.fn());
-            Reflect.set(element, "teardown", teardownView);
+            const target = Object.assign(element, {
+              restartAfterTeardown: vi.fn(),
+              teardown: teardownView,
+            });
+            onTestFinished(registerMcpAppUnmountTarget(target));
           }}
         />
         <div data-testid="route-page">page</div>
