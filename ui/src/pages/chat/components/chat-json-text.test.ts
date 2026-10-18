@@ -58,7 +58,7 @@ describe.each(["user", "assistant", "toolResult"])("%s JSON message text", (role
     return container;
   }
 
-  it.each<{ name: string; text: string; fenced: boolean; tree: boolean; size?: number }>([
+  it.each([
     ...(role === "assistant" ? jsonSources : jsonSources.slice(0, 1)).map(({ name, text }) => ({
       name,
       text,
@@ -67,7 +67,6 @@ describe.each(["user", "assistant", "toolResult"])("%s JSON message text", (role
     })),
     ...[20_000, 20_001].map((size) => ({
       name: `${size}-character boundary`,
-      size,
       text: '{"text":"' + "x".repeat(size - 11) + '"}',
       fenced: false,
       tree: size === 20_000,
@@ -80,9 +79,6 @@ describe.each(["user", "assistant", "toolResult"])("%s JSON message text", (role
     },
   ])("preserves $name in literal code and copy", async (scenario) => {
     const { text, fenced, tree } = scenario;
-    if (scenario.size !== undefined) {
-      expect(text).toHaveLength(scenario.size);
-    }
     const source = fenced ? "```json\n" + text + "\n```" : text;
     const displayed = fenced ? (role === "toolResult" ? source : text + "\n") : text;
     const container = await renderMessage(source);
@@ -103,12 +99,8 @@ describe.each(["user", "assistant", "toolResult"])("%s JSON message text", (role
     }
     if (role === "assistant" && tree) {
       expect(container.querySelectorAll(".code-block-json-tree")).toHaveLength(1);
-      expect(container.querySelector('[data-json-mode="tree"]')?.getAttribute("aria-pressed")).toBe(
-        "true",
-      );
-      expect(container.querySelector('[data-json-mode="raw"]')?.getAttribute("aria-pressed")).toBe(
-        "false",
-      );
+      expectJsonMode(container, "tree", true);
+      expectJsonMode(container, "raw", false);
       expect(container.querySelector(".code-block-viewport pre code")?.textContent).toBe(displayed);
     } else {
       expect(container.querySelector(".code-block-json-tree, .code-block-json-mode")).toBeNull();
@@ -175,16 +167,12 @@ describe("tool JSON details", () => {
     jsonSources[0]!,
     {
       name: "oversized JSON",
-      size: 20_001,
       text: '{"text":"**stars**' + "x".repeat(19_981) + '"}',
     },
     { name: "explicit fence", text: '```json\n{"id":9007199254740993,"text":"**stars**"}\n```' },
     { name: "invalid JSON", text: '{"count": }' },
   ])("preserves $name after opening tool details", async (scenario) => {
     const { text } = scenario;
-    if ("size" in scenario) {
-      expect(text).toHaveLength(scenario.size);
-    }
     const panel = await openToolDetails(text);
     expect(panel.querySelector("pre code")?.textContent).toBe(text);
     expect(panel.querySelector("pre strong")).toBeNull();
@@ -198,43 +186,41 @@ function expectElement<T extends Element>(
 ): T {
   const element = container.querySelector<T>(selector);
   expect(element).toBeInstanceOf(constructor);
-  if (!(element instanceof constructor)) {
-    throw new Error(`Expected ${selector} to match ${constructor.name}`);
-  }
-  return element;
+  return element!;
 }
 
-const jsonGroups = new WeakMap<
-  HTMLElement,
-  ReturnType<typeof mountSolid<Parameters<typeof MessageGroup>[0]>>
->();
+function expectJsonMode(container: Element, mode: string, pressed: boolean) {
+  expect(container.querySelector(`[data-json-mode="${mode}"]`)?.getAttribute("aria-pressed")).toBe(
+    String(pressed),
+  );
+}
 
-function renderJsonMessageGroup(
-  container: HTMLElement,
-  message: unknown,
-  role: string,
-  opts: Partial<Parameters<typeof MessageGroup>[0]["options"]>,
-) {
-  const group = createMessageGroup(message, role, {
-    key: role + "-group",
-    messages: [{ key: role + "-message", message }],
-  });
-  const props = {
-    group,
-    options: {
-      showReasoning: true,
-      showToolCalls: true,
-      assistantName: "OpenClaw",
-      assistantAvatar: null,
-      ...opts,
+function jsonMessageGroup(message: unknown, role: string) {
+  const container = createContainer();
+  let view: ReturnType<typeof mountSolid<Parameters<typeof MessageGroup>[0]>> | undefined;
+  return {
+    container,
+    render(options: Partial<Parameters<typeof MessageGroup>[0]["options"]>) {
+      const props = {
+        group: createMessageGroup(message, role, {
+          key: role + "-group",
+          messages: [{ key: role + "-message", message }],
+        }),
+        options: {
+          showReasoning: true,
+          showToolCalls: true,
+          assistantName: "OpenClaw",
+          assistantAvatar: null,
+          ...options,
+        },
+      };
+      if (view) {
+        view.update(props);
+      } else {
+        view = mountSolid(MessageGroup, props, container);
+      }
     },
   };
-  const view = jsonGroups.get(container);
-  if (view) {
-    view.update(props);
-  } else {
-    jsonGroups.set(container, mountSolid(MessageGroup, props, container));
-  }
 }
 
 describe("JSON group DOM retention", () => {
@@ -248,12 +234,12 @@ describe("JSON group DOM retention", () => {
       text: "[\n" + Array.from({ length: 45 }, () => "0").join(",\n") + "\n]",
     },
   ])("uses message disclosure for $name user JSON without JSON controls", ({ text }) => {
-    const container = createContainer();
     const message = { role: "user", content: text, timestamp: 1 };
+    const { container, render } = jsonMessageGroup(message, "user");
     const onToggleUserMessageExpanded = vi.fn();
     let expanded = false;
     const rerender = () =>
-      renderJsonMessageGroup(container, message, "user", {
+      render({
         isUserMessageExpanded: () => expanded,
         onToggleUserMessageExpanded,
       });
@@ -281,13 +267,13 @@ describe("JSON group DOM retention", () => {
     expect(code.textContent).toBe(text);
   });
   it.each(["user", "assistant"])("preserves %s JSON DOM across rerenders", (role) => {
-    const container = createContainer();
     const message = {
       role,
       content: role === "user" ? '{"ok":true}' : '{"nested":{"ok":true}}',
       timestamp: 1,
     };
-    renderJsonMessageGroup(container, message, role, { showToolCalls: true });
+    const { container, render } = jsonMessageGroup(message, role);
+    render({ showToolCalls: true });
     const code = expectElement(container, ".chat-text pre code", HTMLElement);
     expect(code.textContent).toBe(message.content);
     const tree =
@@ -304,7 +290,7 @@ describe("JSON group DOM retention", () => {
     } else {
       expect(container.querySelector(".chat-text button, .chat-text details")).toBeNull();
     }
-    renderJsonMessageGroup(container, message, role, { showToolCalls: false });
+    render({ showToolCalls: false });
     expect(container.querySelector(".chat-text pre code")).toBe(code);
     expect(code.textContent).toBe(message.content);
     if (role === "assistant") {

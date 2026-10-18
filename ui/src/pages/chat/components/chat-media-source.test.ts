@@ -8,11 +8,15 @@ function mockMediaState(
   state: { currentTime: number; duration: number; paused: boolean; ended?: boolean },
 ) {
   let currentTime = state.currentTime;
+  let rejected = false;
   Object.defineProperties(media, {
     currentTime: {
       configurable: true,
       get: () => currentTime,
       set: (value: number) => {
+        if (rejected) {
+          throw new DOMException("media range unavailable", "InvalidStateError");
+        }
         currentTime = value;
       },
     },
@@ -23,22 +27,10 @@ function mockMediaState(
   return {
     currentTime: () => currentTime,
     rejectSeek: () => {
-      Object.defineProperty(media, "currentTime", {
-        configurable: true,
-        get: () => currentTime,
-        set: () => {
-          throw new DOMException("media range unavailable", "InvalidStateError");
-        },
-      });
+      rejected = true;
     },
     allowSeek: () => {
-      Object.defineProperty(media, "currentTime", {
-        configurable: true,
-        get: () => currentTime,
-        set: (value: number) => {
-          currentTime = value;
-        },
-      });
+      rejected = false;
     },
   };
 }
@@ -99,15 +91,10 @@ describe("ChatMediaSourceOwner", () => {
   });
 
   it("suppresses a stale completion after the readiness identity changes", async () => {
-    let resolveOld: ((response: Response) => void) | undefined;
+    const old = Promise.withResolvers<Response>();
     const fetchMock = vi
       .fn<typeof fetch>()
-      .mockImplementationOnce(
-        async () =>
-          await new Promise<Response>((resolve) => {
-            resolveOld = resolve;
-          }),
-      )
+      .mockReturnValueOnce(old.promise)
       .mockResolvedValueOnce(new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
     const media = document.createElement("video");
@@ -128,7 +115,7 @@ describe("ChatMediaSourceOwner", () => {
       "new-token",
     );
     await newRequest;
-    resolveOld?.(new Response(null, { status: 200 }));
+    old.resolve(new Response(null, { status: 200 }));
     await oldRequest;
 
     expect(controller.currentIdentity).toBe("media:new");
