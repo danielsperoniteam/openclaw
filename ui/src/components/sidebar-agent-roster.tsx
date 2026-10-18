@@ -266,7 +266,7 @@ export function SidebarAgentRoster(props: RosterProps) {
   return (
     <openclaw-sidebar-agent-roster>
       {renderSessionListFrame(
-        host(),
+        host,
         <div class="sidebar-agent-roster">
           <Show when={error()}>
             <button class="sidebar-agent-roster__link" onClick={() => void store().refresh()}>

@@ -5,6 +5,7 @@ import type { ApplicationContext, ApplicationNavigationOptions } from "../app/co
 import { gatewayPresentationScope } from "../app/gateway-presentation-scope.ts";
 import { t } from "../i18n/index.ts";
 import { shouldHandleNavigationClick } from "../lib/navigation-click.ts";
+import { listen } from "../lib/reactive/listener.ts";
 import type {
   SessionConnectionScope,
   SessionListSnapshot,
@@ -69,13 +70,13 @@ export function hidePersonalSidebarCatalog(
   recoveryLink.className = "session-link";
   recoveryLink.href = recoveryHref;
   recoveryLink.textContent = t("chat.sidebar.sectionHiddenRecovery");
-  recoveryLink.onclick = (event) => {
+  listen(recoveryLink, "click", (event) => {
     if (!shouldHandleNavigationClick(event)) {
       return;
     }
     event.preventDefault();
     host.onNavigate?.(recovery.routeId, { search: recovery.search, hash: recovery.hash });
-  };
+  });
   message.append(t("chat.sidebar.sectionHidden", { section: label }), " ", recoveryLink);
   showToast({
     message,

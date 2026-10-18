@@ -110,6 +110,7 @@ export function createSidebarMenus(deps: {
   });
   const triggers = new Map<MenuTrigger, HTMLElement | null>();
   const menuHandles = new Map<"catalogView" | "agent", MenuHandle>();
+  let focusAgentRoster: (() => void) | undefined;
   const agentMenuAvatars = createIdentityAvatars();
   const routePreloadTimers = new Map<EventTarget, ReturnType<typeof globalThis.setTimeout>>();
   const sessionMenuWorkOwner = {};
@@ -297,7 +298,12 @@ export function createSidebarMenus(deps: {
     element,
     triggers,
     railPins: new Map<string, HTMLElement>(),
-    focusAgentRoster: undefined as (() => void) | undefined,
+    get focusAgentRoster() {
+      return focusAgentRoster;
+    },
+    set focusAgentRoster(focus: (() => void) | undefined) {
+      focusAgentRoster = focus;
+    },
     menuRef(menu: "catalogView" | "agent") {
       let bound: MenuHandle | undefined;
       onCleanup(() => {

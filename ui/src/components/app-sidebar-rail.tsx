@@ -1,5 +1,5 @@
 import type { JSX } from "@solidjs/web";
-import { createMemo, For, Show, onCleanup } from "solid-js";
+import { createMemo, For, Show, onCleanup, untrack } from "solid-js";
 import {
   SESSION_ICON_GLYPH_IDS,
   SESSION_ICON_SVG_DATA_URL_PREFIX,
@@ -176,7 +176,11 @@ export function renderSidebarRail(host: AppSidebarRenderHost): JSX.Element {
         onDrop={(event) => host.sessionOrganizer.handleSidebarZoneDrop(event)}
       >
         <For each={pins()} keyed={serializeSidebarEntry}>
-          {(entry) => renderRailPin(host, entry(), zone)}
+          {(entry) => {
+            // The serialized entry is this pin's key; its live row facts come from zone.
+            const initialEntry = untrack(entry);
+            return renderRailPin(host, initialEntry, zone);
+          }}
         </For>
       </div>
       <div class="sidebar-rail__bottom">{renderAppSidebarFooterBar(host)}</div>
@@ -324,8 +328,8 @@ function renderRailPin(
   };
   const openMenu = (event: MouseEvent | KeyboardEvent) => {
     if (!host.sidebarSnapshot) {
-      handleContextMenuEvent(event, trigger ?? pin ?? null, (trigger, x, y) =>
-        host.sidebarMenus.openRailPinMenu(serialized, label(), x, y, trigger),
+      handleContextMenuEvent(event, trigger ?? pin ?? null, (menuTrigger, x, y) =>
+        host.sidebarMenus.openRailPinMenu(serialized, label(), x, y, menuTrigger),
       );
     }
   };
@@ -514,12 +518,13 @@ export function renderSidebarPages(host: AppSidebarRenderHost): JSX.Element {
       <openclaw-mcp-app-catalog surface="sidebar" />
       <For each={entries()} keyed={serializeSidebarEntry}>
         {(entry) => {
-          const fixedEntry = entry();
-          const key = serializeSidebarEntry(fixedEntry);
+          // The For key is the complete serialized identity; labels stay live in the renderer.
+          const initialEntry = untrack(entry);
+          const key = serializeSidebarEntry(initialEntry);
           // Allocate once per entry; the rendered link owns its reactive fields.
           const content = renderAppSidebarPageEntry(
             host,
-            fixedEntry,
+            initialEntry,
             rows,
             () => zone().pluginTabs,
           );

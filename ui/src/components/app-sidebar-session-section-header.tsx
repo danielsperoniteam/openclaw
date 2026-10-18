@@ -1,7 +1,7 @@
 import type { JSX } from "@solidjs/web";
-import { createMemo, onCleanup } from "solid-js";
+import { createMemo, onSettled, Show } from "solid-js";
 import { writeSidebarSectionDragData } from "../lib/sessions/drag.ts";
-import { renderSidebarReorderMenu } from "./sidebar-reorder.tsx";
+import { renderSidebarReorderMenu as SidebarReorderMenu } from "./sidebar-reorder.tsx";
 export function renderSidebarSessionSectionHeader(params: {
   sectionId: string;
   sectionHeaders: Map<string, HTMLElement>;
@@ -24,18 +24,21 @@ export function renderSidebarSessionSectionHeader(params: {
   };
 }) {
   const draggable = createMemo(() => params.draggable !== false && !params.disabledReason);
-  const sectionId = params.sectionId;
-  let header: HTMLElement | undefined;
-  onCleanup(() => {
-    if (params.sectionHeaders.get(sectionId) === header) {
-      params.sectionHeaders.delete(sectionId);
-    }
+  let header!: HTMLElement;
+  onSettled(() => {
+    const sectionId = params.sectionId;
+    const sectionHeaders = params.sectionHeaders;
+    sectionHeaders.set(sectionId, header);
+    return () => {
+      if (sectionHeaders.get(sectionId) === header) {
+        sectionHeaders.delete(sectionId);
+      }
+    };
   });
   return (
     <div
       ref={(element) => {
         header = element;
-        params.sectionHeaders.set(sectionId, element);
       }}
       class={[
         "sidebar-recent-sessions__head",
@@ -44,8 +47,8 @@ export function renderSidebarSessionSectionHeader(params: {
       draggable={draggable() ? "true" : "false"}
       title={params.disabledReason}
       onMouseDown={(event) => {
-        const header = event.currentTarget;
-        header.toggleAttribute(
+        const currentHeader = event.currentTarget;
+        currentHeader.toggleAttribute(
           "data-section-drag-blocked",
           Boolean(event.target.closest("button, a")),
         );
@@ -58,11 +61,11 @@ export function renderSidebarSessionSectionHeader(params: {
           event.preventDefault();
           return;
         }
-        const header = event.currentTarget;
+        const currentHeader = event.currentTarget;
         const startedFromControl =
           Boolean(event.target.closest("button, a")) ||
-          header.hasAttribute("data-section-drag-blocked");
-        header.removeAttribute("data-section-drag-blocked");
+          currentHeader.hasAttribute("data-section-drag-blocked");
+        currentHeader.removeAttribute("data-section-drag-blocked");
         if (startedFromControl) {
           event.preventDefault();
           return;
@@ -80,13 +83,16 @@ export function renderSidebarSessionSectionHeader(params: {
     >
       <span class="sidebar-session-group-drag-handle" aria-hidden="true" />
       {params.content}
-      {draggable() && params.reorder
-        ? renderSidebarReorderMenu({
-            ...params.reorder,
-            sectionId,
-            sections: params.sectionHeaders,
-          })
-        : undefined}
+      <Show when={draggable() && params.reorder}>
+        {(reorder) => (
+          <SidebarReorderMenu
+            label={reorder().label}
+            onMove={(target, position) => reorder().onMove(target, position)}
+            sectionId={params.sectionId}
+            sections={params.sectionHeaders}
+          />
+        )}
+      </Show>
       {params.status ? (
         <button
           type="button"

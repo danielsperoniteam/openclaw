@@ -276,7 +276,7 @@ defineSolidBridge<ViewerFacepileProps>(
   "openclaw-viewer-facepile",
   (props, host) => {
     host.style.display = "contents";
-    mountedFacepiles.set(host, props);
+    mountedFacepiles.set(host, host);
     onCleanup(() => mountedFacepiles.delete(host));
     return <ViewerFacepileContent {...props} />;
   },

@@ -88,9 +88,6 @@ function AppSidebarContent(
         })
       : undefined;
   });
-  owner.readContextualSidebar = createMemo(() => contextual()?.read(), {
-    equals: equalSidebarContext,
-  });
   const projection = projectSource(owner, {
     read: (current) => current,
     subscribe: (current, notify) => {
@@ -132,7 +129,7 @@ function AppSidebarContent(
       snapshotPending();
       snapshotModel();
       Object.values(props);
-      void owner.contextualSidebar;
+      contextual()?.read();
       // Snapshot capture keeps observing Pages after its navigation view closes.
       void catalog.dashboards;
       // Arm presence deadlines before preparation can project a row.
@@ -156,6 +153,7 @@ function AppSidebarContent(
     projection.revision();
     snapshotModel();
     Object.values(props);
+    contextual()?.read();
     return owner.narrationEnabled();
   });
   const narration = createMemo(() => {
@@ -169,7 +167,7 @@ function AppSidebarContent(
     const source = narration()?.();
     return source ? projectOwner(source, (current) => current.read()) : null;
   });
-  owner.readNarration = createParkedProjection(
+  const narrationState = createParkedProjection(
     () => narrationProjection()?.read(),
     () => props.navigationVisible,
   );
@@ -180,10 +178,14 @@ function AppSidebarContent(
       snapshotPending();
       snapshotModel();
       // Router context can reveal parked rows without an owner publication.
-      void owner.contextualSidebar;
+      contextual()?.read();
+      narrationState();
+      owner.attention.resolve();
       return projection.revision();
     },
     () => props.navigationVisible,
+    // Shell inputs finish preparing a hidden first mount; owner traffic stays parked.
+    () => Object.values(props),
   );
   const observed = new WeakMap<object, object>();
   const observe = <T extends object>(target: T): T => {
@@ -253,7 +255,7 @@ function AppSidebarContent(
     () => {
       prepared();
       narration()?.();
-      owner.readNarration();
+      narrationState();
       scroll.capture();
     },
     () => {

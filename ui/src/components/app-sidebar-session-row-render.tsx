@@ -90,7 +90,7 @@ function renderRecentSessionRow(params: RecentSessionParams) {
   const subtitle = createMemo(() => subtitleState().subtitle),
     narration = createMemo(() => subtitleState().narration),
     toolName = createMemo(() => subtitleState().toolName);
-  const indicators = renderSidebarSessionIndicators(host(), session, display, icon);
+  const indicators = renderSidebarSessionIndicators(host, session, display, icon);
   const running = createMemo(() => indicators.running),
     stateId = createMemo(() => indicators.stateId),
     metaId = createMemo(() => indicators.metaId),
@@ -406,8 +406,8 @@ export function renderPendingSessionCreateRow(
     </Show>
   );
 }
-export function renderChildSessionLoadError(host: SessionListHost, parentKey: string) {
-  const error = createMemo(() => host.sessionData.childSessionErrorsByParent.get(parentKey));
+export function renderChildSessionLoadError(host: () => SessionListHost, parentKey: string) {
+  const error = createMemo(() => host().sessionData.childSessionErrorsByParent.get(parentKey));
   return (
     <Show when={error()}>
       <div
@@ -420,7 +420,7 @@ export function renderChildSessionLoadError(host: SessionListHost, parentKey: st
           class="sidebar-session-tree__show-more"
           type="button"
           data-retry-child-sessions={parentKey}
-          onClick={() => host.sessionData.retryChildSessions(parentKey)}
+          onClick={() => host().sessionData.retryChildSessions(parentKey)}
         >
           {t("common.retry")}
         </button>
@@ -484,7 +484,7 @@ export function renderSessionTree(params: {
             </button>
           ) : undefined}
           <For each={session().childLoadParentKeys ?? [session().key]}>
-            {(key) => renderChildSessionLoadError(host(), key)}
+            {(key) => renderChildSessionLoadError(host, key)}
           </For>
           {session().loadingChildren && session().children.length === 0 ? (
             <span
