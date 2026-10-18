@@ -41,7 +41,7 @@ async function transportFixture(scopes: string[], signal: AbortSignal) {
           socket,
           frame.id,
           buildMinimalGatewayHelloOkPayload({
-            auth: { role: "operator", scopes },
+            auth: { role: "operator", scopes, recoveryScope: "account-a" },
             methods: ["doctor.memory.status", "memory.search", "health"],
           }),
         );
@@ -137,6 +137,18 @@ async function transportFixture(scopes: string[], signal: AbortSignal) {
       retire(cause: string) {
         if (cause === "runtime") {
           runtime.abort();
+        } else if (cause === "account reassignment" || cause === "access revocation") {
+          const auth = connected.auth!;
+          gateway.snapshot.hello = {
+            ...connected,
+            auth:
+              cause === "account reassignment"
+                ? { ...auth, recoveryScope: "account-b" }
+                : { ...auth, scopes: [] },
+          };
+          for (const notify of listeners) {
+            notify();
+          }
         } else {
           snapshot = {
             ...snapshot,
@@ -154,7 +166,7 @@ async function transportFixture(scopes: string[], signal: AbortSignal) {
   }
 }
 
-it.for(["agent", "runtime", "method catalog"])(
+it.for(["agent", "runtime", "method catalog", "account reassignment", "access revocation"])(
   "fences real transport dispatch and replies after %s retirement",
   async (cause, { signal }) => {
     const method = cause === "method catalog" ? "memory.search" : "doctor.memory.status";
