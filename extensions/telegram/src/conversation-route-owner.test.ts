@@ -13,6 +13,14 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { inspectTelegramConversationRouteOwner } from "./conversation-route-owner.test-support.js";
 
+type TelegramConfig = NonNullable<NonNullable<OpenClawConfig["channels"]>["telegram"]>;
+const config = (
+  telegram: TelegramConfig,
+  rest: Omit<OpenClawConfig, "channels"> = {},
+): OpenClawConfig => ({ ...rest, channels: { telegram } });
+const defaultAccounts = { default: {} };
+const unbound = { enabled: false };
+
 describe("inspectTelegramConversationRouteOwner", () => {
   let adapter: SessionBindingAdapter;
 
@@ -75,14 +83,10 @@ describe("inspectTelegramConversationRouteOwner", () => {
       });
       expect(
         await inspectTelegramConversationRouteOwner({
-          cfg: {
-            channels: {
-              telegram: {
-                accounts: { default: {} },
-                groups: { "-100123": { topics: { "42": { agentId: "configured" } } } },
-              },
-            },
-          },
+          cfg: config({
+            accounts: defaultAccounts,
+            groups: { "-100123": { topics: { "42": { agentId: "configured" } } } },
+          }),
           accountId: "default",
           conversation,
         }),
@@ -96,120 +100,74 @@ describe("inspectTelegramConversationRouteOwner", () => {
     },
   );
 
-  const accountCases: Array<{
-    name: string;
-    accountId?: string;
-    cfg: OpenClawConfig;
-    expected: Awaited<ReturnType<typeof inspectTelegramConversationRouteOwner>>;
-    topic?: boolean;
-  }> = [
-    {
-      name: "temporary adapter gap",
-      cfg: { channels: { telegram: { accounts: { default: {} } } } },
-      expected: { kind: "unavailable" },
-    },
-    {
-      name: "disabled thread bindings",
-      cfg: {
-        channels: { telegram: { accounts: { default: {} }, threadBindings: { enabled: false } } },
-      },
-      expected: { kind: "agent", agentId: "main" },
-    },
-    {
-      name: "removed account",
-      accountId: "retired",
-      cfg: { channels: { telegram: { accounts: { default: {} } } } },
-      expected: null,
-    },
-    {
-      name: "removed default account",
-      cfg: { channels: { telegram: { accounts: {} } } },
-      expected: null,
-    },
-    {
-      name: "disabled account",
-      cfg: { channels: { telegram: { accounts: { default: { enabled: false } } } } },
-      expected: null,
-    },
-    {
-      name: "disabled channel",
-      cfg: { channels: { telegram: { enabled: false, accounts: { default: { enabled: true } } } } },
-      expected: null,
-    },
-    {
-      name: "binding-created account with inherited credentials",
-      accountId: "bot-main",
-      cfg: {
+  const tokenConfig = { botToken: "123456:synthetic", threadBindings: unbound };
+  const binding = (agentId: string) => [
+    { agentId, match: { channel: "telegram", accountId: "bot-main" } },
+  ];
+  const mainOwner = { kind: "agent", agentId: "main" } as const;
+  const accountCases: Array<
+    [
+      name: string,
+      cfg: OpenClawConfig,
+      expected: Awaited<ReturnType<typeof inspectTelegramConversationRouteOwner>>,
+      accountId?: string,
+      topic?: boolean,
+    ]
+  > = [
+    ["temporary adapter gap", config({ accounts: defaultAccounts }), { kind: "unavailable" }],
+    [
+      "disabled thread bindings",
+      config({ accounts: defaultAccounts, threadBindings: unbound }),
+      mainOwner,
+    ],
+    ["removed account", config({ accounts: defaultAccounts }), null, "retired"],
+    ["removed default account", config({ accounts: {} }), null],
+    ["disabled account", config({ accounts: { default: { enabled: false } } }), null],
+    [
+      "disabled channel",
+      config({ enabled: false, accounts: { default: { enabled: true } } }),
+      null,
+    ],
+    [
+      "binding-created account with inherited credentials",
+      config(tokenConfig, {
         agents: { ownership: "explicit", entries: { main: {}, specialist: {} } },
-        channels: {
-          telegram: { botToken: "123456:synthetic", threadBindings: { enabled: false } },
+        bindings: binding("specialist"),
+      }),
+      { kind: "agent", agentId: "specialist" },
+      "bot-main",
+    ],
+    ["removed account with remaining credentials", config(tokenConfig), null, "retired", false],
+    [
+      "binding-only account in explicit multi-account config",
+      config({ ...tokenConfig, accounts: defaultAccounts }, { bindings: binding("main") }),
+      null,
+      "bot-main",
+    ],
+    [
+      "implicit default alongside named accounts",
+      config({ ...tokenConfig, accounts: { secondary: { botToken: "654321:synthetic" } } }),
+      mainOwner,
+      undefined,
+      false,
+    ],
+    [
+      "unavailable token on an existing account",
+      config({
+        botToken: {
+          source: "env",
+          provider: "default",
+          id: "OPENCLAW_TEST_MISSING_TELEGRAM_TOKEN",
         },
-        bindings: [
-          { agentId: "specialist", match: { channel: "telegram", accountId: "bot-main" } },
-        ],
-      },
-      expected: { kind: "agent", agentId: "specialist" },
-    },
-    {
-      name: "removed account with remaining credentials",
-      accountId: "retired",
-      cfg: {
-        channels: {
-          telegram: { botToken: "123456:synthetic", threadBindings: { enabled: false } },
-        },
-      },
-      topic: false,
-      expected: null,
-    },
-    {
-      name: "binding-only account in explicit multi-account config",
-      accountId: "bot-main",
-      cfg: {
-        channels: {
-          telegram: {
-            botToken: "123456:synthetic",
-            accounts: { default: {} },
-            threadBindings: { enabled: false },
-          },
-        },
-        bindings: [{ agentId: "main", match: { channel: "telegram", accountId: "bot-main" } }],
-      },
-      expected: null,
-    },
-    {
-      name: "implicit default alongside named accounts",
-      cfg: {
-        channels: {
-          telegram: {
-            botToken: "123456:synthetic",
-            accounts: { secondary: { botToken: "654321:synthetic" } },
-            threadBindings: { enabled: false },
-          },
-        },
-      },
-      topic: false,
-      expected: { kind: "agent", agentId: "main" },
-    },
-    {
-      name: "unavailable token on an existing account",
-      cfg: {
-        channels: {
-          telegram: {
-            botToken: {
-              source: "env",
-              provider: "default",
-              id: "OPENCLAW_TEST_MISSING_TELEGRAM_TOKEN",
-            },
-          },
-        },
-      },
-      topic: false,
-      expected: { kind: "unavailable" },
-    },
+      }),
+      { kind: "unavailable" },
+      undefined,
+      false,
+    ],
   ];
   it.each(accountCases)(
-    "resolves $name without a runtime adapter",
-    async ({ accountId = "default", cfg, expected, topic = true }) => {
+    "resolves %s without a runtime adapter",
+    async (_name, cfg, expected, accountId = "default", topic = true) => {
       vi.stubEnv("OPENCLAW_TEST_MISSING_TELEGRAM_TOKEN", undefined);
       unregisterSessionBindingAdapter({ channel: "telegram", accountId: "default", adapter });
       expect(
