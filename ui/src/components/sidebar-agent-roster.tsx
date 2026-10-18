@@ -65,7 +65,7 @@ function cachedRosterCards(host: RosterHost) {
 }
 
 export function SidebarAgentRoster(props: RosterProps) {
-  const application = useApplication();
+  const context = useApplication();
   const hostProjection = createMemo(() =>
     projectSource(props.host, {
       read: (host) => host,
@@ -75,22 +75,20 @@ export function SidebarAgentRoster(props: RosterProps) {
   );
   const presented = () => props.active;
   const host = createParkedProjection(() => hostProjection().read(), presented);
-  const context = createMemo(() => host().sessionDataContext ?? application);
-  const store = createMemo(() => rosterActivityStore(context()));
+  const store = rosterActivityStore(context);
   const snapshot = createParkedProjection(() => {
     host();
-    return store().snapshot;
+    return store.snapshot;
   }, presented);
   const cached = createMemo(() => cachedRosterCards(host()));
   const cards = createParkedProjection(() => {
     if (cached()) {
       return cached()!;
     }
-    const currentContext = context();
     return snapshot().cards.map((card) =>
       Object.assign({}, card, {
         target: sessionNavigationTarget({
-          context: currentContext,
+          context,
           face: "chat",
           sessionKey: card.mainKey,
           agentId: card.id,
@@ -114,61 +112,25 @@ export function SidebarAgentRoster(props: RosterProps) {
     };
   };
   const parkedSections = createParkedProjection(() => props.sections, presented);
-  const navigation = createMemo(() =>
-    projectOwner(context().navigation, (owner) => owner.snapshot),
-  );
+  const navigation = createMemo(() => projectOwner(context.navigation, (owner) => owner.snapshot));
   const pinnedIds = createParkedProjection(
     () => new Set(navigation().read().pinnedAgentIds),
     presented,
   );
   const pinnedCards = () => cards().filter((card) => pinnedIds().has(card.id));
   const unpinnedCards = () => cards().filter((card) => !pinnedIds().has(card.id));
-  const hiddenAgentSections = createMemo<ReadonlySet<string>>((previous) => {
-    const next = new Set(cards().map((card) => card.id));
-    if (previous?.size === next.size && [...next].every((id) => previous.has(id))) {
-      return previous;
-    }
-    return next;
-  });
   createEffect(
-    () => [store(), props.involvingMe] as const,
-    ([rosterStore, involvingMe]) => {
-      rosterStore.setInvolvingMe(involvingMe);
-    },
+    () => props.involvingMe,
+    (involvingMe) => store.setInvolvingMe(involvingMe),
   );
-  createEffect(store, (rosterStore) => () => rosterStore.setInvolvingMe(false));
-  // Sidebar queries keep the last admitted selection while the roster is parked.
-  const queryCollapsed = createMemo<ReadonlySet<string> | null>((previous) =>
-    presented() ? hiddenAgentSections() : (previous ?? null),
-  );
-  // Owner publications must not tear down the query accessor on the same host.
-  const hostIdentity = createMemo(() => props.host);
-  // The synchronous owner publishes through its own frame, not this child's dependencies.
-  const readCollapsed = () => untrack(queryCollapsed);
-  createEffect(hostIdentity, (currentHost) => {
-    currentHost.readRosterCollapsedAgentIds = readCollapsed;
-    return () => {
-      if (currentHost.readRosterCollapsedAgentIds === readCollapsed) {
-        currentHost.readRosterCollapsedAgentIds = null;
-        currentHost.invalidate();
-      }
-    };
-  });
-  createEffect(
-    () => [hostIdentity(), queryCollapsed()] as const,
-    ([currentHost, ids]) => {
-      if (ids) {
-        currentHost.sessionData.requestSessionDataUpdate();
-      }
-    },
-  );
+  onSettled(() => () => store.setInvolvingMe(false));
   const canDeleteAgent = (id: string) =>
-    (context().agents.state.agentsList?.agents.filter((agent) => agent.kind !== "system").length ??
+    (context.agents.state.agentsList?.agents.filter((agent) => agent.kind !== "system").length ??
       0) > 1 &&
-    canCallGatewayMethod(context().gateway.snapshot, "agents.delete", "operator.admin") &&
+    canCallGatewayMethod(context.gateway.snapshot, "agents.delete", "operator.admin") &&
     cards().some((agent) => agent.id === id);
   const deleteAgent = async (agent: { id: string; name: string }) => {
-    const currentContext = context();
+    const currentContext = context;
     const client = currentContext.gateway.snapshot.client;
     if (!client || !canDeleteAgent(agent.id)) {
       return;
@@ -213,18 +175,18 @@ export function SidebarAgentRoster(props: RosterProps) {
         switch (item.id) {
           case "pin": {
             const id = card().id;
-            togglePinnedAgent(context().navigation, id);
+            togglePinnedAgent(context.navigation, id);
             // Pinning replaces the menu trigger; keep keyboard focus on its agent.
             onSettled(() => agentLinks.get(id)?.focus());
             break;
           }
           case "sessions":
-            context().agentSelection.setScope(card().id);
+            context.agentSelection.setScope(card().id);
             host().onNavigate?.("sessions");
             break;
           case "settings":
-            context().navigate("agents", {
-              pathname: pathForAgentPanel(card().id, null, context().basePath),
+            context.navigate("agents", {
+              pathname: pathForAgentPanel(card().id, null, context.basePath),
             });
             break;
           case "delete":
@@ -269,7 +231,7 @@ export function SidebarAgentRoster(props: RosterProps) {
         untrack(host),
         <div class="sidebar-agent-roster">
           <Show when={error()}>
-            <button class="sidebar-agent-roster__link" onClick={() => void store().refresh()}>
+            <button class="sidebar-agent-roster__link" onClick={() => void store.refresh()}>
               {t("agentsHome.loadFailed")}
             </button>
           </Show>

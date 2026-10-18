@@ -1,7 +1,8 @@
 import type { JSX } from "@solidjs/web";
-import { createUniqueId, onCleanup, Show } from "solid-js";
+import { createUniqueId, onSettled, Show } from "solid-js";
 import { isMobileNavLayout } from "../app/mobile-nav-layout.ts";
 import { t } from "../lib/reactive/i18n.ts";
+import { listen } from "../lib/reactive/listener.ts";
 import { Popover, type PopoverHandle } from "./solid/popover.tsx";
 
 const TABBABLE_SELECTOR =
@@ -34,13 +35,14 @@ type SidebarSessionFilterPopoverProps = {
 export function SidebarSessionFilterPopover(props: SidebarSessionFilterPopoverProps) {
   let host!: HTMLElement;
   let handle: PopoverHandle | undefined;
+  let disconnectKeydown: (() => void) | undefined;
   let focused = false;
   const handleKeydown = (event: KeyboardEvent) => {
     if (event.key === "Tab" && !event.defaultPrevented && isMobileNavLayout() && handle) {
       keepSheetFocus(handle.overlay.surface, event);
     }
   };
-  onCleanup(() => handle?.overlay.surface.removeEventListener("keydown", handleKeydown));
+  onSettled(() => () => disconnectKeydown?.());
   const focusInitialControl = () => {
     if (focused) {
       return;
@@ -86,7 +88,7 @@ export function SidebarSessionFilterPopover(props: SidebarSessionFilterPopoverPr
           if (isMobileNavLayout()) {
             value.overlay.surface.setAttribute("aria-modal", "true");
           }
-          value.overlay.surface.addEventListener("keydown", handleKeydown);
+          disconnectKeydown = listen(value.overlay.surface, "keydown", handleKeydown);
         }}
         onOpenChange={(open) => {
           if (open) {
