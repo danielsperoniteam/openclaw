@@ -56,6 +56,16 @@ it("lets OPENCLAW_TYPECHECKER force the tsgo fallback", () => {
   );
 });
 
+it("uses Go profiling without silently ignoring an explicit tsrs request", () => {
+  expect(resolveTypeCheckTool("linux", "x64", {}, ["--pprofDir=profiles"])).toBe("tsgo");
+  expect(() =>
+    resolveTypeCheckTool("linux", "x64", { OPENCLAW_TYPECHECKER: "tsrs" }, [
+      "--pprofDir",
+      "profiles",
+    ]),
+  ).toThrow(/tsrs does not support --pprofDir/);
+});
+
 it("resolves repo tools from the primary checkout for dependency-less worktrees", () => {
   const primaryRoot = createTempDir("openclaw-primary-checkout-");
   const cwd = path.join(primaryRoot, ".codex", "worktrees", "task", "openclaw");

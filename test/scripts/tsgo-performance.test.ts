@@ -192,22 +192,25 @@ it.each([
   },
 );
 
-it("records the compiler version from the supplied environment", async () => {
-  const { cwd, run, evidence } = fixture();
-  fs.writeFileSync(path.join(cwd, "pnpm-workspace.yaml"), "packages: []\n");
-  for (const [name, version] of [
-    ["typescript", "1.2.3"],
-    ["tsrs", "4.5.6"],
-  ] as const) {
-    const directory = path.join(cwd, "node_modules", name);
-    fs.mkdirSync(directory, { recursive: true });
-    fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify({ name, version }));
-  }
-  vi.stubEnv("OPENCLAW_TYPECHECKER", "tsrs");
-  managed.mockResolvedValueOnce(0);
-  await run({ env: { OPENCLAW_TYPECHECKER: "tsgo" } });
-  expect(evidence().compilerVersion).toBe("1.2.3");
-});
+it.each([{ OPENCLAW_TYPECHECKER: "tsgo" }, {}])(
+  "records the compiler version from the supplied environment and profiling args (%j)",
+  async (env) => {
+    const { cwd, run, evidence } = fixture();
+    fs.writeFileSync(path.join(cwd, "pnpm-workspace.yaml"), "packages: []\n");
+    for (const [name, version] of [
+      ["typescript", "1.2.3"],
+      ["tsrs", "4.5.6"],
+    ] as const) {
+      const directory = path.join(cwd, "node_modules", name);
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify({ name, version }));
+    }
+    vi.stubEnv("OPENCLAW_TYPECHECKER", "tsrs");
+    managed.mockResolvedValueOnce(0);
+    await run({ env });
+    expect(evidence().compilerVersion).toBe("1.2.3");
+  },
+);
 
 it("never replaces a managed failure with an evidence result", async () => {
   const { run, evidence } = fixture();

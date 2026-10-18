@@ -16,7 +16,7 @@ const DEFAULT_FAST_LOCAL_CHECK_MIN_CPUS = 12;
 const CI_PARALLEL_MIN_CPUS = 8;
 const DECLARATION_PATH_CACHE_LIMIT = 16_384;
 // Native compilers ship their platform binary behind the package's own getExePath.
-// tsgo (TypeScript 7) still owns declaration emit; tsrs owns type checking.
+// tsgo retains declaration emit and Go profiling; tsrs is the default type checker.
 export const NATIVE_COMPILER_PACKAGES = new Map([
   ["tsgo", "typescript"],
   ["tsrs", "tsrs"],
@@ -171,7 +171,7 @@ export function createDeclarationInputBoundary(cwd: string) {
 }
 
 /**
- * Select the repo type checker: tsrs where it ships a binary, tsgo elsewhere.
+ * Select tsrs by default, retaining tsgo for unsupported platforms and Go profiling.
  * OPENCLAW_TYPECHECKER=tsgo forces the tsgo fallback (full release validation
  * uses it to re-check the release with tsgo).
  */
@@ -179,18 +179,25 @@ export function resolveTypeCheckTool(
   platform = process.platform,
   arch = process.arch,
   env: NodeJS.ProcessEnv = process.env,
+  args: readonly string[] = [],
 ) {
   const requested = env.OPENCLAW_TYPECHECKER?.trim() || undefined;
   const supportsTsrs = TSRS_PLATFORMS.has(`${platform}-${arch}`);
-  if (requested === "tsgo" || (requested === undefined && !supportsTsrs)) {
-    return "tsgo";
-  }
-  if (requested !== undefined && requested !== "tsrs") {
+  const goProfiling = hasFlag(args, "--pprofDir");
+  if (requested !== undefined && requested !== "tsrs" && requested !== "tsgo") {
     throw new Error(`OPENCLAW_TYPECHECKER must be tsrs or tsgo; got ${JSON.stringify(requested)}.`);
+  }
+  if (requested === "tsgo" || (requested === undefined && (!supportsTsrs || goProfiling))) {
+    return "tsgo";
   }
   if (!supportsTsrs) {
     throw new Error(
       `tsrs has no binary for ${platform}-${arch}; unset OPENCLAW_TYPECHECKER to use tsgo.`,
+    );
+  }
+  if (goProfiling) {
+    throw new Error(
+      "tsrs does not support --pprofDir; set OPENCLAW_TYPECHECKER=tsgo or unset it for Go profiling.",
     );
   }
   return "tsrs";
@@ -268,7 +275,7 @@ export function ensureRepoNodeModulesLink(
   return localNodeModules;
 }
 
-function hasFlag(args: string[], name: string) {
+function hasFlag(args: readonly string[], name: string) {
   return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
 }
 

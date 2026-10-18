@@ -56,6 +56,20 @@ it("selects the compiler from the supplied environment instead of the ambient en
   expect(command?.bin).toBe(resolveRepoToolBinPath("tsgo"));
 });
 
+it.each([false, true])(
+  "keeps Go profiling requests on tsgo (environment=%s)",
+  (fromEnvironment) => {
+    const args = fromEnvironment ? ["--version"] : ["--version", "--pprofDir", "profiles"];
+    const command = prepareTsgoCommand(args, {
+      ...process.env,
+      OPENCLAW_LOCAL_CHECK: "1",
+      OPENCLAW_TYPECHECKER: undefined,
+      OPENCLAW_TSGO_PPROF_DIR: fromEnvironment ? "profiles" : undefined,
+    });
+    expect(command?.bin).toBe(resolveRepoToolBinPath("tsgo"));
+  },
+);
+
 it("refuses a shared install without creating dependency links", () => {
   const primary = fs.realpathSync.native(createTempDir("native-primary-install-"));
   const root = path.join(primary, ".claude/worktrees/validation");

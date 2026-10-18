@@ -180,10 +180,10 @@ export function summarizeTsgoBuildInfo(before: Buffer | null, after: Buffer | nu
   }
 }
 
-function provenance(cwd: string, env: NodeJS.ProcessEnv) {
+function provenance(cwd: string, env: NodeJS.ProcessEnv, args: readonly string[]) {
   const root = findRepoRoot(cwd) ?? cwd;
-  const git = (args: string[]) =>
-    spawnSync("git", args, {
+  const git = (gitArgs: string[]) =>
+    spawnSync("git", gitArgs, {
       cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -194,7 +194,7 @@ function provenance(cwd: string, env: NodeJS.ProcessEnv) {
   let compilerVersion: string | null = null;
   try {
     const require = createRequire(path.join(root, "package.json"));
-    const manifest = `${NATIVE_COMPILER_PACKAGES.get(resolveTypeCheckTool(process.platform, process.arch, env))}/package.json`;
+    const manifest = `${NATIVE_COMPILER_PACKAGES.get(resolveTypeCheckTool(process.platform, process.arch, env, args))}/package.json`;
     compilerVersion =
       JSON.parse(fs.readFileSync(require.resolve(manifest), "utf8")).version ?? null;
   } catch {
@@ -221,18 +221,18 @@ function provenance(cwd: string, env: NodeJS.ProcessEnv) {
 /** Keep the managed child as the sole signal/deadline/cleanup owner. Metrics never replace its result. */
 export async function runMeasuredTsgoCommand(command: Command, directory: string) {
   const cwd = command.cwd ?? process.cwd();
+  const args = command.args ?? [];
   let artifact: string;
   let inputs: ReturnType<typeof provenance>;
   try {
     const destination = path.resolve(cwd, directory);
     fs.mkdirSync(destination, { recursive: true });
     artifact = path.join(destination, `tsgo-${randomUUID()}.json`);
-    inputs = provenance(cwd, command.env ?? process.env);
+    inputs = provenance(cwd, command.env ?? process.env, args);
   } catch {
     console.error("[tsgo-metrics] evidence setup unavailable; running compiler without metrics");
     return runManagedCommand(command);
   }
-  const args = command.args ?? [];
   const buildInfoArg = readFlagValue(args, "--tsBuildInfoFile");
   const buildInfo = buildInfoArg ? path.resolve(cwd, buildInfoArg) : undefined;
   const before = readFile(buildInfo);

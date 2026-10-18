@@ -249,7 +249,9 @@ Native dependency policy:
       where tsrs ships no binary. Set `OPENCLAW_TYPECHECKER=tsgo` to use tsgo
       anywhere, for example to compare a suspected tsrs false positive; Full
       Release Validation does this for every release. Declaration emit and
-      `pnpm tsgo:profile` always use tsgo.
+      `pnpm tsgo:profile` always use tsgo. Ordinary `--pprofDir` requests
+      (including `OPENCLAW_TSGO_PPROF_DIR`) also select tsgo; forcing tsrs
+      for that Go-only flag fails with an actionable message.
     - `scripts/run-tsgo.mjs` leaves tsgo unbounded by default, preserving the
       behavior of existing local workflows. Set `OPENCLAW_TSGO_TIMEOUT_MS` to
       a positive millisecond value to make a wedged compiler fail loudly

@@ -70,7 +70,7 @@ export function prepareTsgoCommand(
 
   // Subdirectories share checkout ownership, but another checkout's install never does.
   const compilerPath = resolveRepoToolBinPath(
-    resolveTypeCheckTool(process.platform, process.arch, env),
+    resolveTypeCheckTool(process.platform, process.arch, env, finalArgs),
     {
       cwd: findRepoRoot(cwd) ?? cwd,
     },
