@@ -152,13 +152,8 @@ vi.mock("../plugins/update.js", async (importOriginal) => {
 vi.mock("../commands/doctor/shared/post-core-plugin-convergence.js", () => ({
   runPostCorePluginConvergence: vi.fn(
     async (params: { cfg: OpenClawConfig; baselineInstallRecords?: unknown }) => ({
+      ...postCoreConvergenceResult(),
       config: params.cfg,
-      configChanges: [],
-      installedPluginIdRecovery: new Map(),
-      changes: [],
-      warnings: [],
-      errored: false,
-      smokeFailures: [],
       installRecords: params.baselineInstallRecords ?? {},
     }),
   ),
@@ -207,14 +202,12 @@ export function installDeferredCompletionFixture() {
       defaultRuntime,
     });
   const mockFileBackedPathExists = () => {
-    pathExists.mockImplementation(async (candidate: string) => {
-      try {
-        await fs.access(candidate);
-        return true;
-      } catch {
-        return false;
-      }
-    });
+    pathExists.mockImplementation((candidate: string) =>
+      fs.access(candidate).then(
+        () => true,
+        () => false,
+      ),
+    );
   };
 
   const { configSnapshot, mockPostDoctorSnapshot, mockNoopPostUpdatePluginConvergence } =
@@ -327,13 +320,11 @@ export function installDeferredCompletionFixture() {
     postCoreConvergenceResult,
     syncPluginCall,
     getLogOutput,
-    mockNoopPostUpdatePluginConvergence,
     createCaseDir,
     writeJsonFixture,
     FRESH_POST_UPDATE_ENTRYPOINT,
     configSnapshot,
     stableConfig,
-    baseConfig,
     mockFileBackedPathExists,
     stableWhatsAppConfig,
     mockPostDoctorSnapshot,

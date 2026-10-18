@@ -57,12 +57,11 @@ function expectJson(fields: Record<string, unknown>) {
 }
 
 beforeEach(() => {
-  activation.activate
-    .mockReset()
-    .mockResolvedValue({ status: "succeeded", installation: committedInstallation });
-  activation.recover
-    .mockReset()
-    .mockResolvedValue({ status: "succeeded", installation: committedInstallation });
+  for (const action of Object.values(activation)) {
+    action
+      .mockReset()
+      .mockResolvedValue({ status: "succeeded", installation: committedInstallation });
+  }
   vi.spyOn(shared, "resolveUpdateRoot").mockResolvedValue(installation.currentPath);
   vi.spyOn(immutable, "inspectImmutableInstall").mockResolvedValue(installation);
   vi.spyOn(defaultRuntime, "writeJson").mockImplementation(() => {});
@@ -87,41 +86,55 @@ it("dispatches immutable preparation before mutable admission", async () => {
   expect(activation.activate).not.toHaveBeenCalled();
 });
 
-it("reports preparation failure without entering the mutable update lifecycle", async () => {
-  mockPreparation({
-    status: "error",
-    reason: "candidate-build-failed",
-    installation,
-  });
+it.each([
+  [false, "candidate-build-failed", { activation: "disabled" }],
+  [
+    true,
+    "immutable-activation-failed",
+    { message: expect.stringContaining("returned no generation receipt") },
+  ],
+] as const)(
+  "reports failed preparation/receipt without mutable fallback (enabled=%s)",
+  async (enabled, reason, details) => {
+    const adopted = enabled ? { ...installation, activationEnabled: true } : installation;
+    vi.mocked(immutable.inspectImmutableInstall).mockResolvedValue(adopted);
+    mockPreparation({
+      installation: adopted,
+      ...(enabled ? {} : { status: "error", reason }),
+    });
+    await expect(updateCommand({ json: true })).rejects.toMatchObject({ code: 1 });
+    expectJson({ status: "error", reason, ...details });
+    expect(activation.activate).not.toHaveBeenCalled();
+    expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
+  },
+);
 
-  await expect(updateCommand({ json: true })).rejects.toMatchObject({ code: 1 });
-
-  expectJson({ status: "error", reason: "candidate-build-failed", activation: "disabled" });
-  expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
-});
-
-it("refuses unsupported immutable channel changes before candidate work", async () => {
-  const prepare = vi.spyOn(immutable, "prepareImmutableUpdate");
-
-  await expect(updateCommand({ json: true, channel: "beta" })).rejects.toBeInstanceOf(ExitError);
-
-  expectJson({ status: "error", reason: "immutable-preparation-refused" });
-  expect(prepare).not.toHaveBeenCalled();
-  expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
-});
-
-it("does not fall back to mutable Git when immutable ownership inspection refuses", async () => {
-  vi.mocked(immutable.inspectImmutableInstall).mockRejectedValue(
-    new Error("Unadopted release layout"),
-  );
-  const prepare = vi.spyOn(immutable, "prepareImmutableUpdate");
-
-  await expect(updateCommand({ json: true })).rejects.toBeInstanceOf(ExitError);
-
-  expectJson({ status: "error", message: "Unadopted release layout" });
-  expect(prepare).not.toHaveBeenCalled();
-  expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
-});
+it.each([
+  ["unsupported channel", { channel: "beta" }, { reason: "immutable-preparation-refused" }],
+  ["ownership inspection", {}, { message: "Unadopted release layout" }],
+  [
+    "invalid drain budget",
+    { drainTimeout: "invalid" },
+    { message: "--drain-timeout must be a positive integer (seconds)" },
+  ],
+] as const)(
+  "refuses %s before candidate work or mutable admission",
+  async (name, options, fields) => {
+    if (name === "ownership inspection") {
+      vi.mocked(immutable.inspectImmutableInstall).mockRejectedValue(
+        new Error("Unadopted release layout"),
+      );
+    }
+    const prepare = vi.spyOn(immutable, "prepareImmutableUpdate");
+    const command = updateCommand({ json: true, ...options });
+    await expect(command).rejects.toBeInstanceOf(ExitError);
+    await expect(command).rejects.toMatchObject({ code: 1 });
+    expectJson({ status: "error", ...fields });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(activation.activate).not.toHaveBeenCalled();
+    expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
+  },
+);
 
 it.each([
   ["repair", updateRepairCommand],
@@ -139,25 +152,19 @@ it.each([
 });
 
 it.each([
-  { enabled: true, restart: true, dryRun: false, activates: true },
-  { enabled: true, restart: false, dryRun: false, activates: false },
-  { enabled: true, restart: true, dryRun: true, activates: false },
-])("activates only under enabled adoption and restart policy: %j", async (entry) => {
-  const adopted = { ...installation, activationEnabled: entry.enabled };
+  [true, false, true],
+  [false, false, false],
+  [true, true, false],
+])("activation policy restart=%s dryRun=%s activates=%s", async (restart, dryRun, activates) => {
+  const adopted = { ...installation, activationEnabled: true };
   vi.mocked(immutable.inspectImmutableInstall).mockResolvedValue(adopted);
   mockPreparation({
-    status: entry.dryRun ? "dry-run" : "prepared",
-    installation: entry.dryRun ? adopted : { ...adopted, prepared: preparedReceipt },
+    status: dryRun ? "dry-run" : "prepared",
+    installation: dryRun ? adopted : { ...adopted, prepared: preparedReceipt },
   });
-  await updateCommand({
-    json: true,
-    restart: entry.restart,
-    dryRun: entry.dryRun,
-    timeout: "600",
-    drainTimeout: "30",
-  });
-  expect(activation.activate).toHaveBeenCalledTimes(entry.activates ? 1 : 0);
-  if (entry.activates) {
+  await updateCommand({ json: true, restart, dryRun, timeout: "600", drainTimeout: "30" });
+  expect(activation.activate).toHaveBeenCalledTimes(activates ? 1 : 0);
+  if (activates) {
     expect(activation.activate).toHaveBeenCalledWith(
       expect.objectContaining({
         expectedPrepared: preparedReceipt,
@@ -169,7 +176,7 @@ it.each([
     expect(output).toHaveProperty("installation", committedInstallation);
     expect(output).not.toHaveProperty("installation.prepared");
   }
-  expectJson({ status: entry.activates ? "succeeded" : entry.dryRun ? "dry-run" : "prepared" });
+  expectJson({ status: activates ? "succeeded" : dryRun ? "dry-run" : "prepared" });
   expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
 });
 
@@ -216,29 +223,4 @@ it("refuses a drain budget on a mutable installation before runtime retention", 
     "--drain-timeout requires an adopted immutable installation",
   );
   expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
-});
-
-it("refuses activation when preparation returns no generation receipt", async () => {
-  const adopted = { ...installation, activationEnabled: true };
-  vi.mocked(immutable.inspectImmutableInstall).mockResolvedValue(adopted);
-  mockPreparation({ installation: adopted });
-
-  await expect(updateCommand({ json: true })).rejects.toMatchObject({ code: 1 });
-
-  expect(activation.activate).not.toHaveBeenCalled();
-  expectJson({
-    status: "error",
-    reason: "immutable-activation-failed",
-    message: expect.stringContaining("returned no generation receipt"),
-  });
-});
-
-it("rejects an invalid drain budget before immutable preparation", async () => {
-  const prepare = vi.spyOn(immutable, "prepareImmutableUpdate");
-  await expect(updateCommand({ json: true, drainTimeout: "invalid" })).rejects.toMatchObject({
-    code: 1,
-  });
-  expectJson({ message: "--drain-timeout must be a positive integer (seconds)" });
-  expect(prepare).not.toHaveBeenCalled();
-  expect(activation.activate).not.toHaveBeenCalled();
 });
