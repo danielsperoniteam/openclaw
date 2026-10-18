@@ -141,7 +141,10 @@ describe("UsageInsights", () => {
       () =>
         UsageInsights({
           totals: unpriced,
-          aggregates: { ...aggregates, byProvider: [{ provider: "ollama", totals: unpriced }] },
+          aggregates: {
+            ...aggregates,
+            byProvider: [{ provider: "ollama", count: 1, totals: unpriced }],
+          },
           stats: { durationCount: 0, avgDurationMs: 0, errorRate: 0 },
           showCostHint: false,
           showCostShares: true,
