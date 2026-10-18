@@ -1,16 +1,14 @@
-// Covers gateway restart intent persistence and consumption.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
   closeOpenClawStateDatabaseForTest,
-  closeOpenClawStateDatabaseAsync,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
 import * as stateWorker from "../state/openclaw-state-worker-store.js";
+import { useStateDatabaseTempDirs } from "../test-utils/state-database-temp-dirs.js";
 import { acquireFileLockSync } from "./file-lock-manager.js";
 import { resolveGatewayStateOwnerPath } from "./gateway-state-owner.js";
 import {
@@ -24,40 +22,36 @@ import {
   writeGatewayRestartIntentSync,
 } from "./restart-intent.js";
 
-function consumeGatewayRestartIntentPayload(
-  ...args: Parameters<typeof prepareGatewayRestartIntentConsumption>
-) {
-  return prepareGatewayRestartIntentConsumption(...args)();
+function consumeIntent(now?: number, assertCurrent?: () => void) {
+  return prepareGatewayRestartIntentConsumption(env, now, assertCurrent)();
 }
 
 function expectWrittenIntent(
-  env: NodeJS.ProcessEnv,
   options: Omit<Parameters<typeof writeGatewayRestartIntentSync>[0], "env"> = {},
 ) {
   expect(writeGatewayRestartIntentSync({ targetPid: process.pid, ...options, env })).toBe(true);
 }
 
-const tempDirs: string[] = [];
+let env: NodeJS.ProcessEnv;
+const tempDirs = useStateDatabaseTempDirs();
 type GatewayRestartIntentDatabase = Pick<OpenClawStateKyselyDatabase, "gateway_restart_intent">;
 
 function createIntentEnv(initialize = true): NodeJS.ProcessEnv {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-restart-intent-"));
-  tempDirs.push(dir);
-  const env = {
+  const createdEnv = {
     ...process.env,
-    OPENCLAW_STATE_DIR: dir,
+    OPENCLAW_STATE_DIR: tempDirs.make("openclaw-restart-intent-"),
   };
   if (initialize) {
-    openOpenClawStateDatabase({ env });
+    openOpenClawStateDatabase({ env: createdEnv });
   }
-  return env;
+  return createdEnv;
 }
 
-function legacyIntentPath(env: NodeJS.ProcessEnv): string {
+function legacyIntentPath(): string {
   return path.join(env.OPENCLAW_STATE_DIR ?? "", "gateway-restart-intent.json");
 }
 
-function readIntentRow(env: NodeJS.ProcessEnv) {
+function readIntentRow() {
   const { db } = openOpenClawStateDatabase({ env });
   const stateDb = getNodeSqliteKysely<GatewayRestartIntentDatabase>(db);
   return executeSqliteQueryTakeFirstSync(
@@ -69,7 +63,7 @@ function readIntentRow(env: NodeJS.ProcessEnv) {
   );
 }
 
-function insertIntentRow(env: NodeJS.ProcessEnv, values: { kind?: string; createdAt?: number }) {
+function insertIntentRow(values: { kind?: string; createdAt?: number }) {
   const { db } = openOpenClawStateDatabase({ env });
   const stateDb = getNodeSqliteKysely<GatewayRestartIntentDatabase>(db);
   const now = Date.now();
@@ -89,13 +83,8 @@ function insertIntentRow(env: NodeJS.ProcessEnv, values: { kind?: string; create
 }
 
 describe("gateway restart intent", () => {
-  afterEach(async () => {
-    vi.restoreAllMocks();
-    await closeOpenClawStateDatabaseAsync();
-    closeOpenClawStateDatabaseForTest();
-    for (const dir of tempDirs.splice(0)) {
-      fs.rmSync(dir, { force: true, recursive: true });
-    }
+  beforeEach(() => {
+    env = createIntentEnv();
   });
 
   it("consumes a fresh intent for the current process", async () => {
@@ -109,41 +98,34 @@ describe("gateway restart intent", () => {
   });
 
   it("settles a contended consume exactly once without blocking the signal thread", async () => {
-    const env = createIntentEnv();
-    expectWrittenIntent(env, { reason: "gateway.restart" });
+    expectWrittenIntent({ reason: "gateway.restart" });
     const { path: filename } = openOpenClawStateDatabase({ env });
-    const foreign = new DatabaseSync(filename);
-    try {
-      foreign.exec("BEGIN IMMEDIATE");
-      const consuming = consumeGatewayRestartIntentPayload(env);
-      // The worker can wait for the writer while the signal thread releases it.
-      foreign.exec("COMMIT");
-      expect(await consuming).toEqual({ reason: "gateway.restart" });
-      expect(readIntentRow(env)).toBeUndefined();
-      expect(await consumeGatewayRestartIntentPayload(env)).toBeNull();
-    } finally {
-      foreign.close();
-    }
+    using foreign = new DatabaseSync(filename);
+    foreign.exec("BEGIN IMMEDIATE");
+    const consuming = consumeIntent();
+    // The worker can wait for the writer while the signal thread releases it.
+    foreign.exec("COMMIT");
+    expect(await consuming).toEqual({ reason: "gateway.restart" });
+    expect(readIntentRow()).toBeUndefined();
+    expect(await consumeIntent()).toBeNull();
   });
 
   it("keeps an intent when the captured signal owner retires before admission", async () => {
-    const env = createIntentEnv();
-    expectWrittenIntent(env);
+    expectWrittenIntent();
     let current = true;
-    const consuming = consumeGatewayRestartIntentPayload(env, Date.now(), () => {
+    const consuming = consumeIntent(Date.now(), () => {
       if (!current) {
         throw new Error("signal owner retired");
       }
     });
     current = false;
     await expect(consuming).rejects.toThrow("signal owner retired");
-    expect(readIntentRow(env)).toBeDefined();
-    expect(await consumeGatewayRestartIntentPayload(env)).toEqual({});
+    expect(readIntentRow()).toBeDefined();
+    expect(await consumeIntent()).toEqual({});
   });
 
   it("recovers a committed intent after its ordinary reply is lost without consuming again", async () => {
-    const env = createIntentEnv();
-    expectWrittenIntent(env, { reason: "gateway.restart" });
+    expectWrittenIntent({ reason: "gateway.restart" });
     const execute = stateWorker.runOpenClawStateWorkerOperation;
     vi.spyOn(stateWorker, "runOpenClawStateWorkerOperation").mockImplementationOnce(
       async (...args) => {
@@ -151,16 +133,15 @@ describe("gateway restart intent", () => {
         throw new Error("ordinary reply lost after native settlement");
       },
     );
-    expect(await consumeGatewayRestartIntentPayload(env)).toEqual({ reason: "gateway.restart" });
-    expect(await consumeGatewayRestartIntentPayload(env)).toBeNull();
+    expect(await consumeIntent()).toEqual({ reason: "gateway.restart" });
+    expect(await consumeIntent()).toBeNull();
   });
 
   it("records restart options while an older Gateway owns a pending-migration database", () => {
-    const env = createIntentEnv();
     const database = openOpenClawStateDatabase({ env });
     const filename = database.path;
     closeOpenClawStateDatabaseForTest();
-    const db = new DatabaseSync(filename);
+    using db = new DatabaseSync(filename);
     // The restart table is unchanged across this schema boundary.
     db.exec("PRAGMA user_version=15; UPDATE schema_meta SET schema_version=15");
     const before = db.prepare("SELECT * FROM sqlite_schema ORDER BY name").all();
@@ -176,7 +157,7 @@ describe("gateway restart intent", () => {
       }),
     });
     try {
-      expectWrittenIntent(env, {
+      expectWrittenIntent({
         intent: { reason: "gateway.restart", force: true, waitMs: 12_345 },
       });
       expect(
@@ -197,46 +178,33 @@ describe("gateway restart intent", () => {
       expect(db.prepare("SELECT * FROM sqlite_schema ORDER BY name").all()).toEqual(before);
     } finally {
       owner.release();
-      db.close();
     }
   });
 
   it("skips intent recording instead of bootstrapping missing Gateway state", () => {
-    const env = createIntentEnv(false);
+    env = createIntentEnv(false);
     expect(writeGatewayRestartIntentSync({ env, targetPid: process.pid })).toBe(false);
     expect(fs.readdirSync(env.OPENCLAW_STATE_DIR ?? "")).toEqual([]);
   });
 
   it("rejects an intent for a different process", async () => {
-    const env = createIntentEnv();
+    expectWrittenIntent({ targetPid: process.pid + 1 });
 
-    expectWrittenIntent(env, { targetPid: process.pid + 1 });
-
-    expect(await consumeGatewayRestartIntentPayload(env)).toBeNull();
-    expect(readIntentRow(env)).toBeUndefined();
-    expect(fs.existsSync(legacyIntentPath(env))).toBe(false);
+    expect(await consumeIntent()).toBeNull();
+    expect(readIntentRow()).toBeUndefined();
+    expect(fs.existsSync(legacyIntentPath())).toBe(false);
   });
 
-  it("rejects expired intents before restart", async () => {
-    const env = createIntentEnv();
-    insertIntentRow(env, { createdAt: Date.now() - 120_000 });
-
-    expect(await consumeGatewayRestartIntentPayload(env)).toBeNull();
-    expect(readIntentRow(env)).toBeUndefined();
-  });
-
-  it("drops malformed intent rows before restart", async () => {
-    const env = createIntentEnv();
-    insertIntentRow(env, { kind: "bad-intent" });
-
-    expect(await consumeGatewayRestartIntentPayload(env)).toBeNull();
-    expect(readIntentRow(env)).toBeUndefined();
+  it.each(["expired", "malformed"])("rejects %s intents before restart", async (kind) => {
+    insertIntentRow(
+      kind === "expired" ? { createdAt: Date.now() - 120_000 } : { kind: "bad-intent" },
+    );
+    expect(await consumeIntent()).toBeNull();
+    expect(readIntentRow()).toBeUndefined();
   });
 
   it("round-trips restart options without persisting process-local successor identity", async () => {
-    const env = createIntentEnv();
-
-    expectWrittenIntent(env, {
+    expectWrittenIntent({
       reason: "gateway.restart",
       intent: {
         force: true,
@@ -249,13 +217,13 @@ describe("gateway restart intent", () => {
       },
     });
 
-    expect(await consumeGatewayRestartIntentPayload(env)).toEqual({
+    expect(await consumeIntent()).toEqual({
       reason: "gateway.restart",
       force: true,
       waitMs: 12_345,
     });
-    expect(readIntentRow(env)).toBeUndefined();
-    expect(fs.existsSync(legacyIntentPath(env))).toBe(false);
+    expect(readIntentRow()).toBeUndefined();
+    expect(fs.existsSync(legacyIntentPath())).toBe(false);
   });
 
   it("backs off before an emoji that crosses the persisted reason limit", async () => {
@@ -268,19 +236,18 @@ describe("gateway restart intent", () => {
   });
 
   it("overwrites the previous pending intent row", async () => {
-    const env = createIntentEnv();
-    expectWrittenIntent(env, {
+    expectWrittenIntent({
       targetPid: process.pid + 1,
       reason: "first",
     });
-    expectWrittenIntent(env, { reason: "second" });
+    expectWrittenIntent({ reason: "second" });
 
-    expect(readIntentRow(env)).toMatchObject({
+    expect(readIntentRow()).toMatchObject({
       intent_key: "gateway-restart",
       kind: "gateway-restart",
       pid: process.pid,
       reason: "second",
     });
-    expect(await consumeGatewayRestartIntentPayload(env)).toEqual({ reason: "second" });
+    expect(await consumeIntent()).toEqual({ reason: "second" });
   });
 });

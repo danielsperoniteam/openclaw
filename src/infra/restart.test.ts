@@ -1,4 +1,3 @@
-// Covers gateway restart process and supervisor paths.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   isGatewayWorkAdmissionClosed,
@@ -84,10 +83,8 @@ beforeEach(() => {
   observedArgv.clear();
   execFileMock.mockReset();
   spawnSyncMock.mockReset();
-  resolveLsofCommandSyncMock.mockReset();
-  resolveGatewayPortMock.mockReset();
-  resolveLsofCommandSyncMock.mockReturnValue("/usr/sbin/lsof");
-  resolveGatewayPortMock.mockReturnValue(18789);
+  resolveLsofCommandSyncMock.mockReset().mockReturnValue("/usr/sbin/lsof");
+  resolveGatewayPortMock.mockReset().mockReturnValue(18789);
   vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
 });
 
@@ -133,9 +130,7 @@ describe.runIf(process.platform !== "win32")("findGatewayPidsOnPortSync", () => 
       ].join("\n"),
     });
 
-    const pids = findGatewayPidsOnPortSync(18789);
-
-    expect(pids).toEqual([gatewayPidA, gatewayPidB]);
+    expect(findGatewayPidsOnPortSync(18789)).toEqual([gatewayPidA, gatewayPidB]);
     expectLsofCall(18789);
   });
 });
@@ -157,9 +152,7 @@ describe.runIf(process.platform !== "win32")("cleanStaleGatewayProcessesSync", (
       });
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-    const killed = cleanStaleGatewayProcessesSync(19999);
-
-    expect(killed).toEqual([stalePid]);
+    expect(cleanStaleGatewayProcessesSync(19999)).toEqual([stalePid]);
     expect(resolveGatewayPortMock).not.toHaveBeenCalled();
     const lsofCalls = spawnSyncMock.mock.calls.filter((call) => call[0] === "/usr/sbin/lsof");
     expect(lsofCalls).toHaveLength(2);
@@ -170,62 +163,45 @@ describe.runIf(process.platform !== "win32")("cleanStaleGatewayProcessesSync", (
 });
 
 describe("triggerOpenClawRestart", () => {
-  function withLaunchAgent(bootstrapStatus: number, run: (uid: number) => void) {
+  it.each([0, 37])("handles launchctl bootstrap status %s", (bootstrapStatus) => {
     mockProcessPlatform("darwin");
     withEnv(
       { VITEST: undefined, NODE_ENV: undefined, HOME: "/Users/test", OPENCLAW_PROFILE: "default" },
       () => {
+        const failure = { error: undefined, status: 1, stdout: "" };
         spawnSyncMock.mockImplementation((command: string, args: string[]) => {
-          if (command === "launchctl") {
-            if (args[0] === "kickstart") {
-              return args[1] === "-k"
-                ? { error: undefined, status: 113, stderr: "service not loaded" }
-                : { error: undefined, status: bootstrapStatus === 0 ? 1 : 0, stdout: "" };
-            }
-            if (args[0] === "bootstrap") {
-              return {
-                error: undefined,
-                status: bootstrapStatus,
-                stderr: bootstrapStatus === 0 ? "" : "Operation already in progress",
-              };
-            }
+          if (command !== "launchctl") {
+            return failure;
           }
-          return { error: undefined, status: 1, stdout: "" };
+          if (args[0] === "bootstrap") {
+            return {
+              error: undefined,
+              status: bootstrapStatus,
+              stderr: bootstrapStatus === 0 ? "" : "Operation already in progress",
+            };
+          }
+          if (args[0] !== "kickstart") {
+            return failure;
+          }
+          if (args[1] === "-k") {
+            return { error: undefined, status: 113, stderr: "service not loaded" };
+          }
+          return bootstrapStatus === 0 ? failure : { error: undefined, status: 0, stdout: "" };
         });
-        run(typeof process.getuid === "function" ? process.getuid() : 501);
+        const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+        expect(triggerOpenClawRestart()).toEqual({
+          ok: true,
+          method: "launchctl",
+          tried: [
+            `launchctl kickstart -k gui/${uid}/ai.openclaw.gateway`,
+            `launchctl bootstrap gui/${uid} /Users/test/Library/LaunchAgents/ai.openclaw.gateway.plist`,
+            ...(bootstrapStatus === 37
+              ? [`launchctl kickstart gui/${uid}/ai.openclaw.gateway`]
+              : []),
+          ],
+        });
       },
     );
-  }
-
-  it("does not kickstart after bootstrap registers an unloaded LaunchAgent", () => {
-    withLaunchAgent(0, (uid) => {
-      const result = triggerOpenClawRestart();
-
-      expect(result).toEqual({
-        ok: true,
-        method: "launchctl",
-        tried: [
-          `launchctl kickstart -k gui/${uid}/ai.openclaw.gateway`,
-          `launchctl bootstrap gui/${uid} /Users/test/Library/LaunchAgents/ai.openclaw.gateway.plist`,
-        ],
-      });
-    });
-  });
-
-  it("continues when launchctl bootstrap reports the service is already loaded", () => {
-    withLaunchAgent(37, (uid) => {
-      const result = triggerOpenClawRestart();
-
-      expect(result).toEqual({
-        ok: true,
-        method: "launchctl",
-        tried: [
-          `launchctl kickstart -k gui/${uid}/ai.openclaw.gateway`,
-          `launchctl bootstrap gui/${uid} /Users/test/Library/LaunchAgents/ai.openclaw.gateway.plist`,
-          `launchctl kickstart gui/${uid}/ai.openclaw.gateway`,
-        ],
-      });
-    });
   });
 });
 
@@ -261,9 +237,7 @@ describe("gateway restart delivery and delay", () => {
     vi.useFakeTimers();
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     try {
-      const restart = scheduleGatewayRestart({
-        delayMs: 2_147_153_648,
-      });
+      const restart = scheduleGatewayRestart({ delayMs: 2_147_153_648 });
 
       expect(restart.delayMs).toBe(60_000);
       await vi.advanceTimersByTimeAsync(59_999);

@@ -1,5 +1,4 @@
-// Pins scheduled restart ordering against the reversible host-suspension fence.
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import {
   getActiveGatewayRootWorkCount,
@@ -24,21 +23,35 @@ import {
   setPreRestartDeferralCheck,
 } from "./restart.js";
 
+const resumeScheduling = vi.fn();
+
 function prepareSuspension(
-  requestId: string,
   options: Partial<Parameters<typeof prepareGatewaySuspend>[0]> = {},
+  requestId = "request",
 ) {
   return prepareGatewaySuspend({
     requestId,
+    createSuspensionId: () => "suspension",
     pauseScheduling: vi.fn(),
-    resumeScheduling: vi.fn(),
+    resumeScheduling,
     inspect: inspectors({ getRootRequests: () => getActiveGatewayRootWorkCount() }),
     ...options,
   });
 }
 
-function countRestartSignalEmits(calls: readonly unknown[][]): number {
-  return calls.filter((args) => args[0] === "SIGUSR2").length;
+let emitSpy: MockInstance<typeof process.emit>;
+function expectSignals(count: number) {
+  expect(emitSpy.mock.calls.filter((args) => args[0] === "SIGUSR2")).toHaveLength(count);
+}
+
+async function requestTargetedRestart() {
+  const admission = tryBeginGatewayPreparedRestartRootWorkAdmission();
+  expect(admission?.ownsRoot).toBe(true);
+  const result = await admission?.run(async () =>
+    requestGatewayRestartWithSignalAdmission("gateway.restart", { waitMs: 5_000 }),
+  );
+  admission?.release();
+  return result;
 }
 
 function resetGatewayLifecycleState(): void {
@@ -51,11 +64,13 @@ describe("scheduled restart during gateway suspension", () => {
 
   beforeEach(() => {
     resetGatewayLifecycleState();
+    resumeScheduling.mockReset();
     setGatewayRestartPolicy({ allowExternal: false });
     setPreRestartDeferralCheck(() => 0);
     resetGatewayWorkAdmission();
     vi.useFakeTimers();
     process.on("SIGUSR2", restartSignalHandler);
+    emitSpy = vi.spyOn(process, "emit");
   });
 
   afterEach(() => {
@@ -69,97 +84,66 @@ describe("scheduled restart during gateway suspension", () => {
   });
 
   it("defers a previously scheduled restart until a ready suspension resumes", async () => {
-    const emitSpy = vi.spyOn(process, "emit");
-    scheduleGatewayRestart({
-      delayMs: 1_000,
-      reason: "config.patch",
-    });
+    scheduleGatewayRestart({ delayMs: 1_000, reason: "config.patch" });
 
-    const prepared = prepareSuspension("request-restart-delay", {
-      createSuspensionId: () => "suspension-restart-delay",
-    });
+    const prepared = prepareSuspension();
     expect(prepared.status).toBe("ready");
 
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(0);
+    expectSignals(0);
 
-    expect(resumeGatewaySuspend("suspension-restart-delay")).toMatchObject({
+    expect(resumeGatewaySuspend("suspension")).toMatchObject({
       ok: true,
       resumed: true,
     });
     await vi.advanceTimersByTimeAsync(0);
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(1);
+    expectSignals(1);
   });
 
-  it("lets delivered targeted restart drain retain prepared suspension ownership", async () => {
-    const restartHandler = () => markGatewayRestartDraining();
-    const resumeScheduling = vi.fn();
-    process.on("SIGUSR2", restartHandler);
-    try {
-      const prepared = prepareSuspension("request-targeted-restart", {
-        resumeScheduling,
-        createSuspensionId: () => "suspension-targeted-restart",
-      });
-      expect(prepared).toMatchObject({ status: "ready" });
-      const admission = tryBeginGatewayPreparedRestartRootWorkAdmission();
-      expect(admission?.ownsRoot).toBe(true);
-
-      const result = await admission?.run(async () =>
-        requestGatewayRestartWithSignalAdmission("gateway.restart", { waitMs: 5_000 }),
-      );
-      admission?.release();
-
-      expect(result).toEqual({ status: "emitted" });
-      expect(getGatewaySuspendStatus("suspension-targeted-restart", true)).toMatchObject({
-        status: "draining",
-        ownerId: "request-targeted-restart",
-        phase: "interrupting",
-      });
-      expect(resumeScheduling).not.toHaveBeenCalled();
-      expect(isGatewayWorkAdmissionClosed()).toBe(true);
-    } finally {
-      process.removeListener("SIGUSR2", restartHandler);
-    }
-  });
-
-  it("preserves prepared suspension when targeted restart delivery fails", async () => {
-    const resumeScheduling = vi.fn();
-    const prepared = prepareSuspension("request-failed-targeted-restart", {
-      resumeScheduling,
-      createSuspensionId: () => "suspension-failed-targeted-restart",
-    });
-    expect(prepared).toMatchObject({ status: "ready" });
-    const admission = tryBeginGatewayPreparedRestartRootWorkAdmission();
-    expect(admission?.ownsRoot).toBe(true);
-    const emitSpy = vi.spyOn(process, "emit").mockImplementationOnce(() => {
-      throw new Error("synthetic signal failure");
-    });
-
-    const result = await admission?.run(async () =>
-      requestGatewayRestartWithSignalAdmission("gateway.restart", { waitMs: 5_000 }),
-    );
-    admission?.release();
-
-    expect(result).toEqual({ status: "failed" });
-    expect(emitSpy).toHaveBeenCalledWith("SIGUSR2");
-    expect(getGatewaySuspendStatus("suspension-failed-targeted-restart")).toEqual({
-      status: "ready",
-      expiresAtMs: expect.any(Number),
-      writeCustody: [],
-    });
-    expect(isGatewayWorkAdmissionClosed()).toBe(true);
-    expect(resumeScheduling).not.toHaveBeenCalled();
-    expect(resumeGatewaySuspend("suspension-failed-targeted-restart")).toEqual({
-      ok: true,
-      status: "running",
-      resumed: true,
-    });
-    expect(resumeScheduling).toHaveBeenCalledOnce();
-    expect(isGatewayWorkAdmissionClosed()).toBe(false);
-  });
+  it.each(["emitted", "failed"])(
+    "preserves suspension ownership when targeted restart is %s",
+    async (status) => {
+      expect(prepareSuspension()).toMatchObject({ status: "ready" });
+      const restartHandler = () => markGatewayRestartDraining();
+      if (status === "emitted") {
+        process.on("SIGUSR2", restartHandler);
+      } else {
+        emitSpy.mockImplementationOnce(() => {
+          throw new Error("synthetic signal failure");
+        });
+      }
+      try {
+        expect(await requestTargetedRestart()).toEqual({ status });
+        expect(resumeScheduling).not.toHaveBeenCalled();
+        expect(isGatewayWorkAdmissionClosed()).toBe(true);
+        if (status === "emitted") {
+          expect(getGatewaySuspendStatus("suspension", true)).toMatchObject({
+            status: "draining",
+            ownerId: "request",
+            phase: "interrupting",
+          });
+        } else {
+          expect(emitSpy).toHaveBeenCalledWith("SIGUSR2");
+          expect(getGatewaySuspendStatus("suspension")).toEqual({
+            status: "ready",
+            expiresAtMs: expect.any(Number),
+            writeCustody: [],
+          });
+          expect(resumeGatewaySuspend("suspension")).toEqual({
+            ok: true,
+            status: "running",
+            resumed: true,
+          });
+          expect(resumeScheduling).toHaveBeenCalledOnce();
+          expect(isGatewayWorkAdmissionClosed()).toBe(false);
+        }
+      } finally {
+        process.removeListener("SIGUSR2", restartHandler);
+      }
+    },
+  );
 
   it("reports active work while a due restart is preparing to emit", async () => {
-    const emitSpy = vi.spyOn(process, "emit");
     const { promise: preparation, resolve: releasePreparation } = createDeferred();
     scheduleGatewayRestart({
       delayMs: 0,
@@ -170,33 +154,32 @@ describe("scheduled restart during gateway suspension", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    const prepared = prepareSuspension("request-restart-preparing");
+    const prepared = prepareSuspension();
     expect(prepared).toMatchObject({
       status: "busy",
       reason: "gateway-draining",
       activeCount: 1,
     });
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(0);
+    expectSignals(0);
 
     releasePreparation();
     await vi.advanceTimersByTimeAsync(0);
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(1);
+    expectSignals(1);
 
-    expect(prepareSuspension("request-after-restart-signal")).toMatchObject({
+    expect(prepareSuspension({}, "next-request")).toMatchObject({
       status: "busy",
       reason: "gateway-draining",
     });
   });
 
   it("resets transient restart state and cooldown without dropping live bindings", async () => {
-    const emitSpy = vi.spyOn(process, "emit");
     const preRestartCheck = vi.fn(() => 0);
     setPreRestartDeferralCheck(preRestartCheck);
     setGatewayRestartPolicy({ allowExternal: true });
 
     scheduleGatewayRestart({ delayMs: 0 });
     await vi.advanceTimersByTimeAsync(0);
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(1);
+    expectSignals(1);
     expect(preRestartCheck).toHaveBeenCalledTimes(2);
     expect(isGatewayWorkAdmissionClosed()).toBe(true);
 
@@ -206,39 +189,36 @@ describe("scheduled restart during gateway suspension", () => {
 
     scheduleGatewayRestart({ delayMs: 0 });
     await vi.advanceTimersByTimeAsync(0);
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(2);
+    expectSignals(2);
     expect(preRestartCheck).toHaveBeenCalledTimes(4);
   });
 
   it("cancels delayed restart work during a transient reset", async () => {
-    const emitSpy = vi.spyOn(process, "emit");
     scheduleGatewayRestart({ delayMs: 1_000 });
 
     resetGatewayRestartStateForInProcessRestart();
     await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(0);
+    expectSignals(0);
     expect(isGatewayWorkAdmissionClosed()).toBe(false);
   });
 
   it("cancels a due restart waiting behind a prepared suspension", async () => {
-    const emitSpy = vi.spyOn(process, "emit");
-    expect(prepareSuspension("request-reset-waiting-restart")).toMatchObject({ status: "ready" });
+    expect(prepareSuspension()).toMatchObject({ status: "ready" });
     scheduleGatewayRestart({ delayMs: 0 });
     await vi.advanceTimersByTimeAsync(0);
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(0);
+    expectSignals(0);
 
     resetGatewaySuspendCoordinatorForLifecycleRestart();
     resetGatewayWorkAdmission();
     resetGatewayRestartStateForInProcessRestart();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(0);
+    expectSignals(0);
     expect(isGatewayWorkAdmissionClosed()).toBe(false);
   });
 
   it("rejects prepared hooks that finish after a transient reset", async () => {
-    const emitSpy = vi.spyOn(process, "emit");
     const preparationStarted = vi.fn();
     const afterEmitRejected = vi.fn();
     const { promise: preparation, resolve: releasePreparation } = createDeferred();
@@ -261,18 +241,12 @@ describe("scheduled restart during gateway suspension", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(afterEmitRejected).toHaveBeenCalledOnce();
-    expect(countRestartSignalEmits(emitSpy.mock.calls)).toBe(0);
+    expectSignals(0);
     expect(isGatewayWorkAdmissionClosed()).toBe(false);
   });
 
   it("resumes and clears a prepared suspension during lifecycle reset", () => {
-    const resumeScheduling = vi.fn();
-    expect(
-      prepareSuspension("request-lifecycle-reset", {
-        resumeScheduling,
-        createSuspensionId: () => "suspension-lifecycle-reset",
-      }),
-    ).toMatchObject({ status: "ready" });
+    expect(prepareSuspension()).toMatchObject({ status: "ready" });
 
     markGatewayRestartDraining();
     expect(resumeScheduling).not.toHaveBeenCalled();
@@ -281,7 +255,7 @@ describe("scheduled restart during gateway suspension", () => {
     resetGatewayRestartStateForInProcessRestart();
 
     expect(resumeScheduling).toHaveBeenCalledOnce();
-    expect(getGatewaySuspendStatus("suspension-lifecycle-reset")).toEqual({ status: "running" });
+    expect(getGatewaySuspendStatus("suspension")).toEqual({ status: "running" });
     expect(isGatewayWorkAdmissionClosed()).toBe(false);
   });
 });
