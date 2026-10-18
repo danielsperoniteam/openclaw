@@ -42,7 +42,7 @@ export function ModelSetupWizard(props: WizardViewProps): JSX.Element {
       focusTargets = new Set([...focusTargets].filter((element) => element.isConnected));
       const target = [...focusTargets]
         .filter((element) => element.autofocus)
-        .sort((left, right) =>
+        .toSorted((left, right) =>
           left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1,
         )[0];
       target?.focus({ preventScroll: true });

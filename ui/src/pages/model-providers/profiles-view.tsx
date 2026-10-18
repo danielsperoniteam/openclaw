@@ -604,8 +604,8 @@ function ProviderProfileRow(
                 provider: provider(),
                 row: rowElement,
                 section: props.section(),
-                rows: group().profiles.flatMap((profile) => {
-                  const element = props.rowElements.get(profile.profileId);
+                rows: group().profiles.flatMap((entry) => {
+                  const element = props.rowElements.get(entry.profileId);
                   return element ? [element] : [];
                 }),
                 move: reorder,
