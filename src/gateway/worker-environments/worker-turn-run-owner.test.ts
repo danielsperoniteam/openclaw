@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WorkerLiveEventParams } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
 import {
   isEmbeddedAgentRunHandleActive,
@@ -27,6 +28,7 @@ import { closeStateDatabaseForTest } from "../../test-utils/database-cleanup.js"
 import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import { createWorkerLiveEventReceiver } from "./live-events.js";
 import { projectWorkerSessionTurnClaim } from "./placement-record.js";
+import type { WorkerSessionTurnClaim } from "./placement-record.js";
 import { getWorkerTurnExecutionIdentityCapability } from "./placement-turn-claim-events.js";
 import {
   ENVIRONMENT_ID,
@@ -49,6 +51,46 @@ import {
 } from "./worker-turn-launcher.test-support.js";
 
 afterAll(closeStateDatabaseForTest);
+
+function replyOperation(extra: Partial<Parameters<typeof createReplyOperation>[0]> = {}) {
+  return createReplyOperation({
+    sessionId: SESSION_ID,
+    sessionKey: SESSION_KEY,
+    resetTriggered: false,
+    ...extra,
+  });
+}
+
+function claimInput(runId: string) {
+  return {
+    sessionId: SESSION_ID,
+    sessionKey: SESSION_KEY,
+    agentId: "main",
+    runId,
+    owner: { kind: "worker" as const, environmentId: ENVIRONMENT_ID, ownerEpoch: OWNER_EPOCH },
+  };
+}
+
+async function makeOwner(
+  claim: WorkerSessionTurnClaim,
+  operation: ReturnType<typeof createReplyOperation>,
+  options: Partial<
+    Pick<
+      Parameters<typeof import("./worker-turn-run-owner.js").createWorkerTurnRunOwner>[0],
+      "turn" | "assertCurrent"
+    >
+  > = {},
+) {
+  const { createWorkerTurnRunOwner } = await import("./worker-turn-run-owner.js");
+  return createWorkerTurnRunOwner({
+    placements,
+    claim,
+    sessionKey: SESSION_KEY,
+    isReplyDelivered: () => false,
+    ...options,
+    turn: options.turn ?? { ...turn(claim.runId), replyOperation: operation },
+  });
+}
 
 describe("cloud worker run ownership", () => {
   beforeEach(setupWorkerTurnLauncherTest);
@@ -103,27 +145,21 @@ describe("cloud worker run ownership", () => {
         destroy: vi.fn(async () => attachedEnvironment()),
       };
       const provider = createWorkerSessionTurnPlacementProvider({ environments, placements });
-      const operation = createReplyOperation({
-        sessionId: SESSION_ID,
-        sessionKey: SESSION_KEY,
+      const operation = replyOperation({
         target: captureSessionTarget({
           storeScope: sessionTarget.storePath,
           sessionKey: SESSION_KEY,
           incarnation: SESSION_ID,
         }),
-        resetTriggered: false,
       });
       let otherOperation: ReturnType<typeof createReplyOperation> | undefined;
       const collideSessionId = () => {
-        otherOperation = createReplyOperation({
-          sessionId: SESSION_ID,
-          sessionKey: SESSION_KEY,
+        otherOperation = replyOperation({
           target: captureSessionTarget({
             storeScope: `${sessionTarget.storePath}.other`,
             sessionKey: SESSION_KEY,
             incarnation: SESSION_ID,
           }),
-          resetTriggered: false,
         });
       };
       operation.setPhase("running");
@@ -173,6 +209,13 @@ describe("cloud worker run ownership", () => {
         credentialExpiresAtMs: Date.now() + input.timeoutMs,
       };
       const receiver = createWorkerLiveEventReceiver();
+      const receive = (request: WorkerLiveEventParams, sender = identity) =>
+        receiver.apply({
+          readAckedSeq: () => 0,
+          source: turnCapability,
+          identity: sender,
+          request,
+        });
       now = turnStartedAtMs + firstToolDelayMs;
       const previousDiagnostics = areDiagnosticsEnabledForProcess();
       setDiagnosticsEnabledForProcess(true);
@@ -186,23 +229,18 @@ describe("cloud worker run ownership", () => {
           collideSessionId();
         }
         expect(
-          await receiver.apply({
-            readAckedSeq: () => 0,
-            source: turnCapability,
-            identity,
-            request: {
-              runEpoch: OWNER_EPOCH,
-              lastAckedSeq: 0,
-              seq: 1,
-              runId,
-              event: {
-                kind: "tool",
-                payload: {
-                  phase: "start",
-                  name: "sessions_spawn",
-                  toolCallId: "child-provision",
-                  args: {},
-                },
+          await receive({
+            runEpoch: OWNER_EPOCH,
+            lastAckedSeq: 0,
+            seq: 1,
+            runId,
+            event: {
+              kind: "tool",
+              payload: {
+                phase: "start",
+                name: "sessions_spawn",
+                toolCallId: "child-provision",
+                args: {},
               },
             },
           }),
@@ -243,44 +281,30 @@ describe("cloud worker run ownership", () => {
           const unsubscribe = onAgentEventForRun(runId, lateEvent);
           try {
             expect(
-              await receiver.apply({
-                readAckedSeq: () => 0,
-                source: turnCapability,
-                identity: { ...identity, turnClaim: { ...turnClaim, claimId: "foreign-claim" } },
-                request: finishing,
+              await receive(finishing, {
+                ...identity,
+                turnClaim: { ...turnClaim, claimId: "foreign-claim" },
               }),
             ).toEqual({ ok: false, details: { reason: "invalid-event" } });
-            expect(
-              await receiver.apply({
-                readAckedSeq: () => 0,
-                source: turnCapability,
-                identity,
-                request: finishing,
-              }),
-            ).toEqual({ ok: true, result: { ackedSeq: 2 } });
+            expect(await receive(finishing)).toEqual({ ok: true, result: { ackedSeq: 2 } });
             expect(lateEvent).not.toHaveBeenCalled();
           } finally {
             unsubscribe();
           }
         } else {
           expect(
-            await receiver.apply({
-              readAckedSeq: () => 0,
-              source: turnCapability,
-              identity,
-              request: {
-                runEpoch: OWNER_EPOCH,
-                lastAckedSeq: 1,
-                seq: 2,
-                runId,
-                event: {
-                  kind: "tool",
-                  payload: {
-                    phase: "update",
-                    name: "sessions_spawn",
-                    toolCallId: "child-provision",
-                    partialResult: {},
-                  },
+            await receive({
+              runEpoch: OWNER_EPOCH,
+              lastAckedSeq: 1,
+              seq: 2,
+              runId,
+              event: {
+                kind: "tool",
+                payload: {
+                  phase: "update",
+                  name: "sessions_spawn",
+                  toolCallId: "child-provision",
+                  partialResult: {},
                 },
               },
             }),
@@ -318,32 +342,19 @@ describe("cloud worker run ownership", () => {
   );
 
   it("uses accepted approval expiry and live custody without trusting worker events", async () => {
-    const { captureWorkerTurnLiveEventOwner, createWorkerTurnRunOwner } =
-      await import("./worker-turn-run-owner.js");
+    const { captureWorkerTurnLiveEventOwner } = await import("./worker-turn-run-owner.js");
     const now = Date.now();
     const clock = vi.spyOn(Date, "now").mockReturnValue(now);
     await seedActivePlacement();
     const runId = "worker-approval-wait";
     const claim = await placements.claimTurn({
-      sessionId: SESSION_ID,
-      sessionKey: SESSION_KEY,
-      agentId: "main",
-      runId,
+      ...claimInput(runId),
       claimId: "approval-wait-claim",
-      owner: { kind: "worker", environmentId: ENVIRONMENT_ID, ownerEpoch: OWNER_EPOCH },
     });
-    const operation = createReplyOperation({
-      sessionId: SESSION_ID,
-      sessionKey: SESSION_KEY,
-      resetTriggered: false,
-    });
+    const operation = replyOperation();
     operation.setPhase("running");
-    const worker = await createWorkerTurnRunOwner({
-      placements,
-      claim,
-      sessionKey: SESSION_KEY,
+    const worker = await makeOwner(claim, operation, {
       turn: { ...turn(runId), timeoutMs: 30 * 60_000, replyOperation: operation },
-      isReplyDelivered: () => false,
     });
     const owner = captureWorkerTurnLiveEventOwner({ sessionId: SESSION_ID, turnClaim: claim });
     expect(
@@ -396,24 +407,12 @@ describe("cloud worker run ownership", () => {
   ] as const)(
     "fences retained event recorders after $closure, cancelled: $cancelled",
     async ({ closure, cancelled }) => {
-      const { captureWorkerTurnLiveEventOwner, createWorkerTurnRunOwner } =
-        await import("./worker-turn-run-owner.js");
+      const { captureWorkerTurnLiveEventOwner } = await import("./worker-turn-run-owner.js");
       await seedActivePlacement();
       const runId = "reused-worker-run";
-      const claimInput = {
-        sessionId: SESSION_ID,
-        sessionKey: SESSION_KEY,
-        agentId: "main",
-        runId,
-        owner: { kind: "worker" as const, environmentId: ENVIRONMENT_ID, ownerEpoch: OWNER_EPOCH },
-      };
-      const firstClaim = await placements.claimTurn({ ...claimInput, claimId: "first-claim" });
-      const operation = createReplyOperation({
-        sessionKey: SESSION_KEY,
-        sessionId: SESSION_ID,
-        agentId: "main",
-        resetTriggered: false,
-      });
+      const input = claimInput(runId);
+      const firstClaim = await placements.claimTurn({ ...input, claimId: "first-claim" });
+      const operation = replyOperation({ agentId: "main" });
       let assertSettlementCurrent: (() => void) | undefined;
       const first = await withGatewayToolCallerIdentity(
         {
@@ -430,14 +429,7 @@ describe("cloud worker run ownership", () => {
             };
           },
         },
-        () =>
-          createWorkerTurnRunOwner({
-            placements,
-            claim: firstClaim,
-            turn: { ...turn(runId), replyOperation: operation },
-            isReplyDelivered: () => false,
-            sessionKey: SESSION_KEY,
-          }),
+        () => makeOwner(firstClaim, operation),
       );
       expect(assertSettlementCurrent).toBeTypeOf("function");
       assertSettlementCurrent?.();
@@ -468,7 +460,7 @@ describe("cloud worker run ownership", () => {
           args: {},
         },
       };
-      let replacement: Awaited<ReturnType<typeof createWorkerTurnRunOwner>> | undefined;
+      let replacement: Awaited<ReturnType<typeof makeOwner>> | undefined;
       let replacementOperation: ReturnType<typeof createReplyOperation> | undefined;
 
       try {
@@ -482,49 +474,27 @@ describe("cloud worker run ownership", () => {
           operation.complete();
           await operation.ownerSettlement;
           const readmittedClaim = await placements.claimTurn({
-            ...claimInput,
+            ...input,
             claimId: firstClaim.claimId,
           });
-          replacementOperation = createReplyOperation({
-            sessionKey: SESSION_KEY,
-            sessionId: SESSION_ID,
-            agentId: "main",
-            resetTriggered: false,
-          });
-          replacement = await createWorkerTurnRunOwner({
-            placements,
-            claim: readmittedClaim,
-            turn: { ...turn(runId), replyOperation: replacementOperation },
-            isReplyDelivered: () => false,
-            sessionKey: SESSION_KEY,
-          });
+          replacementOperation = replyOperation({ agentId: "main" });
+          replacement = await makeOwner(readmittedClaim, replacementOperation);
           expect(captureWorkerTurnLiveEventOwner(identity)).not.toBe(eventOwner);
         } else {
           await placements.releaseTurn(firstClaim);
           if (closure === "same-claim readmission") {
-            await placements.claimTurn({ ...claimInput, claimId: firstClaim.claimId });
+            await placements.claimTurn({ ...input, claimId: firstClaim.claimId });
           } else if (closure === "replacement") {
             first.dispose();
             operation.complete();
             await operation.ownerSettlement;
 
             const nextClaim = await placements.claimTurn({
-              ...claimInput,
+              ...input,
               claimId: "replacement-claim",
             });
-            replacementOperation = createReplyOperation({
-              sessionKey: SESSION_KEY,
-              sessionId: SESSION_ID,
-              agentId: "main",
-              resetTriggered: false,
-            });
-            replacement = await createWorkerTurnRunOwner({
-              placements,
-              claim: nextClaim,
-              turn: { ...turn(runId), replyOperation: replacementOperation },
-              isReplyDelivered: () => false,
-              sessionKey: SESSION_KEY,
-            });
+            replacementOperation = replyOperation({ agentId: "main" });
+            replacement = await makeOwner(nextClaim, replacementOperation);
             expect(captureWorkerTurnLiveEventOwner(identity)).toBeUndefined();
             const current = captureWorkerTurnLiveEventOwner({
               ...identity,
@@ -557,31 +527,15 @@ describe("cloud worker run ownership", () => {
   it.each(["caller", "abort", "lifecycle", "claim snapshot"] as const)(
     "retains exact construction ownership after delayed preparation: %s",
     async (outcome) => {
-      const { captureWorkerTurnLiveEventOwner, createWorkerTurnRunOwner } =
-        await import("./worker-turn-run-owner.js");
+      const { captureWorkerTurnLiveEventOwner } = await import("./worker-turn-run-owner.js");
       await seedActivePlacement();
       const runId = "run-preparing-worker-owner";
       const claim = await placements.claimTurn({
-        sessionId: SESSION_ID,
-        sessionKey: SESSION_KEY,
-        agentId: "main",
-        runId,
+        ...claimInput(runId),
         claimId: "preparing-claim",
-        owner: { kind: "worker", environmentId: ENVIRONMENT_ID, ownerEpoch: OWNER_EPOCH },
       });
-      const operation = createReplyOperation({
-        sessionKey: SESSION_KEY,
-        sessionId: SESSION_ID,
-        agentId: "main",
-        resetTriggered: false,
-      });
-      const first = await createWorkerTurnRunOwner({
-        placements,
-        claim,
-        turn: { ...turn(runId), replyOperation: operation },
-        isReplyDelivered: () => false,
-        sessionKey: SESSION_KEY,
-      });
+      const operation = replyOperation({ agentId: "main" });
+      const first = await makeOwner(claim, operation);
       const previous = resolveActiveEmbeddedRunOwner(SESSION_ID);
       const prepared =
         createDeferred<Awaited<ReturnType<typeof placements.prepareTurnClaimAuthority>>>();
@@ -599,13 +553,9 @@ describe("cloud worker run ownership", () => {
       const controller = new AbortController();
       const requested = structuredClone(claim);
       let callerCurrent = true;
-      let created: Awaited<ReturnType<typeof createWorkerTurnRunOwner>> | undefined;
-      const attempt = createWorkerTurnRunOwner({
-        placements,
-        claim: requested,
+      let created: Awaited<ReturnType<typeof makeOwner>> | undefined;
+      const attempt = makeOwner(requested, operation, {
         turn: { ...turn(runId), abortSignal: controller.signal, replyOperation: operation },
-        isReplyDelivered: () => false,
-        sessionKey: SESSION_KEY,
         assertCurrent: () => {
           if (!callerCurrent) {
             throw new Error("caller authority closed");

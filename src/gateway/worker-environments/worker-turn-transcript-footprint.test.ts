@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { awaitGateBeforeSettlement } from "../../../test/helpers/promise.js";
 import { SessionManager } from "../../agents/sessions/session-manager.js";
 import {
   makeAgentAssistantMessage,
@@ -114,30 +115,26 @@ describe("Gateway worker-turn selected transcript preparation", () => {
           : { suppressNextUserMessagePersistence: true }),
         abortSignal: fixtureAbort.signal,
       };
-      let credentialCalls = 0;
-      let tunnelCalls = 0;
-      let localCalls = 0;
-      let destroyCalls = 0;
+      const calls = { credential: 0, tunnel: 0, local: 0, destroy: 0, context: 0 };
       const environments: WorkerTurnEnvironmentService = {
         ...unusedEnvironments(),
         get: () => attachedEnvironment(),
         acquireTurnCredential: async () => {
-          credentialCalls++;
+          calls.credential++;
           reachedCredential.resolve();
           await releaseCredential.promise;
           throw deliberateStop;
         },
         startTunnel: async () => {
-          tunnelCalls++;
+          calls.tunnel++;
           throw new Error("Fixture must stop before tunnel creation");
         },
         destroy: async () => {
-          destroyCalls++;
+          calls.destroy++;
           throw new Error("Pre-launch refusal must preserve the active placement");
         },
       };
       const provider = createWorkerSessionTurnPlacementProvider({ environments, placements });
-      let contextCalls = 0;
       let observation:
         | {
             loadedMessages: number;
@@ -160,7 +157,7 @@ describe("Gateway worker-turn selected transcript preparation", () => {
         value(this: SessionManager) {
           const result = originalContext.call(this);
           const loaded = this.getEntries().filter((entry) => entry.type === "message");
-          contextCalls++;
+          calls.context++;
           observation = {
             loadedMessages: loaded.length,
             inactiveLoadedMessages: loaded.filter((entry) =>
@@ -180,7 +177,7 @@ describe("Gateway worker-turn selected transcript preparation", () => {
           { sessionId: SESSION_ID, sessionKey: SESSION_KEY, agentId: "main", runId: request.runId },
           request,
           async () => {
-            localCalls++;
+            calls.local++;
             throw new Error("Fixture must use Gateway worker-turn orchestration");
           },
         )
@@ -188,67 +185,50 @@ describe("Gateway worker-turn selected transcript preparation", () => {
           () => ({ kind: "resolved" as const }),
           (error: unknown) => ({ kind: "rejected" as const, error }),
         );
-      const failures: unknown[] = [];
       let outcome: Awaited<typeof pending> | undefined;
       try {
-        await Promise.race([
+        await awaitGateBeforeSettlement(
           reachedCredential.promise,
-          pending.then(() => {
-            throw new Error("Turn settled before reaching credential acquisition");
-          }),
-        ]);
-        expect(contextCalls).toBe(1);
-        expect(observation?.contextMessages).toBe(expectedMessages);
-        expect(observation?.inactiveContextMessages).toBe(0);
-        expect(credentialCalls).toBe(1);
-        expect(tunnelCalls).toBe(0);
-        expect(localCalls).toBe(0);
+          pending,
+          "Turn settled before reaching credential acquisition",
+        );
+        expect(calls).toEqual({ credential: 1, context: 1, tunnel: 0, local: 0, destroy: 0 });
+        expect(observation).toEqual({
+          contextMessages: expectedMessages,
+          inactiveContextMessages: 0,
+          loadedMessages: expectedMessages,
+          inactiveLoadedMessages: 0,
+        });
         if (recorder) {
           expect(recorder.hasPersisted()).toBe(true);
           expect(recorder.getAdmissionReceipt()?.entryId).toEqual(expect.any(String));
         }
-        expect(observation?.inactiveLoadedMessages).toBe(0);
-        expect(observation?.loadedMessages).toBe(expectedMessages);
-      } catch (error) {
-        failures.push(error);
       } finally {
         releaseCredential.resolve();
         fixtureAbort.abort(deliberateStop);
+        outcome = await pending;
+        hasUnjoinedOwner = false;
         try {
-          outcome = await pending;
-          hasUnjoinedOwner = false;
+          request.preparedRunAdmission.close();
         } finally {
-          try {
-            request.preparedRunAdmission.close();
-          } finally {
-            if (ownContextDescriptor) {
-              Object.defineProperty(
-                SessionManager.prototype,
-                "buildSessionContext",
-                ownContextDescriptor,
-              );
-            } else {
-              delete (SessionManager.prototype as Partial<SessionManager>).buildSessionContext;
-            }
+          if (ownContextDescriptor) {
+            Object.defineProperty(
+              SessionManager.prototype,
+              "buildSessionContext",
+              ownContextDescriptor,
+            );
+          } else {
+            delete (SessionManager.prototype as Partial<SessionManager>).buildSessionContext;
           }
         }
       }
-      try {
-        expect(outcome?.kind).toBe("rejected");
-        if (outcome?.kind === "rejected") {
-          expect(outcome.error).toBe(deliberateStop);
-        }
-        if (outcome) {
-          expect(placements.get(SESSION_ID)).toMatchObject({ state: "active", turnClaim: null });
-          expect(await placements.listPendingWorkspaceResultsAsync()).toHaveLength(0);
-        }
-        expect(destroyCalls).toBe(0);
-      } catch (error) {
-        failures.push(error);
+      expect(outcome?.kind).toBe("rejected");
+      if (outcome?.kind === "rejected") {
+        expect(outcome.error).toBe(deliberateStop);
       }
-      if (failures.length > 0) {
-        throw new AggregateError(failures, "Worker selected-transcript preparation failed");
-      }
+      expect(placements.get(SESSION_ID)).toMatchObject({ state: "active", turnClaim: null });
+      expect(await placements.listPendingWorkspaceResultsAsync()).toHaveLength(0);
+      expect(calls.destroy).toBe(0);
     },
   );
 });

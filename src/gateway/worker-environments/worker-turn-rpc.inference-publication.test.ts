@@ -6,6 +6,7 @@ import {
   type WorkerInferenceTerminalFrame,
   type WorkerInferenceTerminalOutcome,
 } from "../../../packages/gateway-protocol/src/schema/worker-inference.js";
+import { awaitGateBeforeSettlement } from "../../../test/helpers/promise.js";
 import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
 import {
   claimAgentRunDelegatedAuthority,
@@ -183,12 +184,11 @@ describe("worker inference inventory publication", () => {
           warn: vi.fn(),
         });
         expect(respond).toHaveBeenCalledExactlyOnceWith(true, { status: "accepted" });
-        const providerSignal = await Promise.race([
+        const providerSignal = await awaitGateBeforeSettlement(
           entered.promise,
-          terminalDelivered.promise.then(() => {
-            throw new Error("Inference terminated before provider execution");
-          }),
-        ]);
+          terminalDelivered.promise,
+          "Inference terminated before provider execution",
+        );
         delivery.command =
           mutationKind === "diagnostic"
             ? "workerEnvironments.recordError"
@@ -205,12 +205,11 @@ describe("worker inference inventory publication", () => {
                 error: "unrelated provider diagnostic",
               })
             : store.revokeEnvironmentCredential(environmentId);
-        await Promise.race([
+        await awaitGateBeforeSettlement(
           committed.promise,
-          mutation.then(() => {
-            throw new Error("Inventory mutation finished before its publication gate");
-          }),
-        ]);
+          mutation,
+          "Inventory mutation finished before its publication gate",
+        );
         continueProvider.resolve();
         const terminal = await terminalDelivered.promise;
         expect(providerSignal.aborted).toBe(mutationKind !== "diagnostic");

@@ -4,7 +4,6 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { makeTextToolResult } from "../../../test/helpers/text-tool-result.js";
 import { isAgentRunRestartAbortReason } from "../../agents/run-termination.js";
-import { makeAgentAssistantMessage } from "../../agents/test-helpers/agent-message-fixtures.js";
 import { waitForGatewayActiveWork } from "../../infra/gateway-active-work.js";
 import {
   markGatewayRestartDraining,
@@ -108,15 +107,12 @@ it("accepts an interrupted worker's completed edit before a fresh turn reuses it
       };
     },
   };
-  const environments = {
-    ...fixture.unusedEnvironments(),
+  const environments = fixture.workerTurnEnvironments(tunnel, {
     get: () => environment,
-    acquireTurnCredential: async () => fixture.credential(),
     acknowledgeCredentialDelivery: async () => true,
-    startTunnel: async () => tunnel,
     stopTunnel: vi.fn(async () => {}),
     destroy: vi.fn(async () => environment),
-  };
+  });
   const resolveWorkspace = async () => ({ kind: "local" as const, path: accepted });
   const execute = async (store: typeof placements, runId: string) => {
     const turn = fixture.turn(runId);
@@ -127,11 +123,7 @@ it("accepts an interrupted worker's completed edit before a fresh turn reuses it
           placements: store,
           resolveWorkspace,
         })
-        .executeTurn(
-          { sessionId: SESSION_ID, sessionKey: SESSION_KEY, agentId: "main", runId },
-          turn,
-          unexpected,
-        );
+        .executeTurn(fixture.workerTurnRequest(runId), turn, unexpected);
     } finally {
       turn.preparedRunAdmission.close();
     }
@@ -234,39 +226,26 @@ it("lets a worker turn that committed its terminal outcome finish through restar
     workerSignal = request.signal;
     launched.resolve();
     await finish.promise;
-    const leafId = await (
-      await fixture.openSessionManager()
-    ).appendMessageAsync(
-      makeAgentAssistantMessage({
-        content: [{ type: "text", text: "finished during drain" }],
-        timestamp: 41,
-      }),
-    );
+    const leafId = await fixture.appendWorkerReply("finished during drain", 41);
     return fixture.acknowledgeCompletedWorkerTurn(request.turnClaim, leafId);
   });
-  const environments = {
-    ...fixture.unusedEnvironments(),
-    get: () => fixture.attachedEnvironment(),
-    acquireTurnCredential: async () => fixture.credential(),
-    acknowledgeCredentialDelivery: async () => true,
-    startTunnel: async () =>
-      fixture.createWorkerTurnTunnel({
-        launchTurn,
-        reconcileWorkspace: fixture.reconcileUnchangedLocalWorkspace,
-      }),
-    stopTunnel: vi.fn(async () => {}),
-    destroy: vi.fn(async () => fixture.attachedEnvironment()),
-  };
+  const environments = fixture.workerTurnEnvironments(
+    fixture.createWorkerTurnTunnel({
+      launchTurn,
+      reconcileWorkspace: fixture.reconcileUnchangedLocalWorkspace,
+    }),
+    {
+      acknowledgeCredentialDelivery: async () => true,
+      stopTunnel: vi.fn(async () => {}),
+      destroy: vi.fn(async () => fixture.attachedEnvironment()),
+    },
+  );
   const runId = "finishing-turn";
   const turn = fixture.turn(runId);
   const attempt = runWithGatewayIndependentRootWorkAdmission(() =>
     fixture
       .createWorkerSessionTurnPlacementProvider({ environments, placements })
-      .executeTurn(
-        { sessionId: SESSION_ID, sessionKey: SESSION_KEY, agentId: "main", runId },
-        turn,
-        unexpected,
-      ),
+      .executeTurn(fixture.workerTurnRequest(runId), turn, unexpected),
   ).catch((error: unknown) => error);
   try {
     await launched.promise;

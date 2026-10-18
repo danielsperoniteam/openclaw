@@ -23,6 +23,54 @@ import { claimWorkerPlacement } from "./worker-turn-rpc.test-support.js";
 
 type WorkerEnvironmentServiceOptions = support.WorkerEnvironmentServiceOptions;
 
+async function seedClaim(environmentId: string, sessionId: string, runId?: string) {
+  const environmentIdentity = await support.seedAttachedIdentity(environmentId, sessionId);
+  const placement = await claimWorkerPlacement({
+    environmentId,
+    sessionId,
+    runId,
+    ownerEpoch: environmentIdentity.ownerEpoch,
+  });
+  return { ...placement, environmentIdentity };
+}
+
+function claimAdmission(claim: WorkerSessionTurnClaim, credential: string) {
+  if (claim.owner.kind !== "worker") {
+    throw new Error("Expected a worker-owned fixture claim");
+  }
+  return {
+    environmentId: claim.owner.environmentId,
+    ownerEpoch: claim.owner.ownerEpoch,
+    sessionId: claim.sessionId,
+    runId: claim.runId,
+    credential,
+    rpcSetVersion: 1,
+    handshake: support.BOOTSTRAP_RECEIPT,
+  };
+}
+
+function bindOwner(
+  store: Awaited<ReturnType<typeof claimWorkerPlacement>>["store"],
+  claim: WorkerSessionTurnClaim,
+  instance: Parameters<typeof bindWorkerTurnOwner>[3],
+  token?: Parameters<typeof bindWorkerTurnOwner>[2],
+  assertCurrent = () => {},
+) {
+  return bindWorkerTurnOwner(
+    store,
+    claim,
+    token,
+    instance,
+    {
+      agentId: "main",
+      sessionId: claim.sessionId,
+      sessionKey: `agent:main:${claim.sessionId}`,
+      storePath: path.join(support.testState.root, "sessions.json"),
+    },
+    assertCurrent,
+  );
+}
+
 describe("worker environment service", () => {
   support.setupWorkerEnvironmentServiceSuite();
 
@@ -88,44 +136,23 @@ describe("worker environment service", () => {
   it("records credential, build, owner-epoch, and successful worker admission gates", async () => {
     const environmentId = "worker-sensitive-environment";
     const sessionId = "session-sensitive-worker";
-    const environmentIdentity = await support.seedAttachedIdentity(environmentId, sessionId);
-    const { claim, store } = await claimWorkerPlacement({
-      environmentId,
-      ownerEpoch: environmentIdentity.ownerEpoch,
-      runId: "run-worker-receipts",
-      sessionId,
-    });
+    const { claim, store } = await seedClaim(environmentId, sessionId, "run-worker-receipts");
     const operationalRun = createOperationalRunInstanceRef(claim.runId);
     const delegatedAuthority = claimAgentRunDelegatedAuthority(operationalRun);
-    await bindWorkerTurnOwner(
+    await bindOwner(
       store,
       claim,
+      operationalRun,
       createExecutionIdentityAdmissionToken(claim.runId, {
         contextId: "context-worker-receipts",
         executionId: "execution-worker-receipts",
         now: 100,
       }),
-      operationalRun,
-      {
-        agentId: "main",
-        sessionId,
-        sessionKey: `agent:main:${sessionId}`,
-        storePath: path.join(support.testState.root, "sessions.json"),
-      },
-      () => {},
     );
     const gate = createWorkerSessionPlacementGate(store);
     const workerService = support.createService(support.createProvider(), { placementStore: gate });
     const credential = await workerService.acquireTurnCredential(claim);
-    const admission = {
-      environmentId,
-      credential: credential.credential,
-      sessionId,
-      runId: claim.runId,
-      ownerEpoch: environmentIdentity.ownerEpoch,
-      rpcSetVersion: 1,
-      handshake: support.BOOTSTRAP_RECEIPT,
-    };
+    const admission = claimAdmission(claim, credential.credential);
     const receipts: DecisionReceiptV1[] = [];
     const clear = configureRuntimeActionDecisionSink((receipt) => {
       receipts.push(receipt);
@@ -169,31 +196,22 @@ describe("worker environment service", () => {
   it("does not attribute a late admission result to a replacement using the same run id", async () => {
     const environmentId = "worker-admission-replacement";
     const sessionId = "session-admission-replacement";
-    const environmentIdentity = await support.seedAttachedIdentity(environmentId, sessionId);
-    const { claim: first, store } = await claimWorkerPlacement({
-      environmentId,
-      ownerEpoch: environmentIdentity.ownerEpoch,
-      runId: "run-admission-replacement",
-      sessionId,
-    });
+    const {
+      claim: first,
+      store,
+      environmentIdentity,
+    } = await seedClaim(environmentId, sessionId, "run-admission-replacement");
     const firstOperationalRun = createOperationalRunInstanceRef(first.runId);
     const firstAuthority = claimAgentRunDelegatedAuthority(firstOperationalRun);
-    await bindWorkerTurnOwner(
+    await bindOwner(
       store,
       first,
+      firstOperationalRun,
       createExecutionIdentityAdmissionToken(first.runId, {
         contextId: "context-admission-first",
         executionId: "execution-admission-first",
         now: 100,
       }),
-      firstOperationalRun,
-      {
-        agentId: "main",
-        sessionId,
-        sessionKey: `agent:main:${sessionId}`,
-        storePath: path.join(support.testState.root, "sessions.json"),
-      },
-      () => {},
     );
     const installation = createDeferredCore<typeof support.BUNDLE_ARTIFACT>();
     support.testState.prepareInstallation = vi.fn(() => installation.promise);
@@ -205,15 +223,7 @@ describe("worker environment service", () => {
       receipts.push(receipt);
       return true;
     });
-    const admission = {
-      environmentId,
-      credential: firstCredential.credential,
-      sessionId,
-      runId: first.runId,
-      ownerEpoch: environmentIdentity.ownerEpoch,
-      rpcSetVersion: 1,
-      handshake: support.BOOTSTRAP_RECEIPT,
-    };
+    const admission = claimAdmission(first, firstCredential.credential);
     let secondAuthority: ReturnType<typeof claimAgentRunDelegatedAuthority> | undefined;
     const pendingAdmission = workerService.admitWorker(admission);
     try {
@@ -234,22 +244,15 @@ describe("worker environment service", () => {
       });
       const secondOperationalRun = createOperationalRunInstanceRef(second.runId);
       secondAuthority = claimAgentRunDelegatedAuthority(secondOperationalRun);
-      await bindWorkerTurnOwner(
+      await bindOwner(
         store,
         second,
+        secondOperationalRun,
         createExecutionIdentityAdmissionToken(second.runId, {
           contextId: "context-admission-second",
           executionId: "execution-admission-second",
           now: 101,
         }),
-        secondOperationalRun,
-        {
-          agentId: "main",
-          sessionId,
-          sessionKey: `agent:main:${sessionId}`,
-          storePath: path.join(support.testState.root, "sessions.json"),
-        },
-        () => {},
       );
       installation.resolve(support.BUNDLE_ARTIFACT);
 
@@ -271,12 +274,7 @@ describe("worker environment service", () => {
     async (source) => {
       const environmentId = "worker-inherited-claim";
       const sessionId = "session-inherited-claim";
-      const environmentIdentity = await support.seedAttachedIdentity(environmentId, sessionId);
-      const { claim, store } = await claimWorkerPlacement({
-        environmentId,
-        ownerEpoch: environmentIdentity.ownerEpoch,
-        sessionId,
-      });
+      const { claim, store, environmentIdentity } = await seedClaim(environmentId, sessionId);
       await store.authorizeWorkerTurnTools(claim, ["sessions_send"]);
       await store.updateAckCursors({ claim, liveEvent: 1 });
       const preRestartService = support.createService(support.createProvider(), {
@@ -310,15 +308,7 @@ describe("worker environment service", () => {
         runId: claim.runId,
         turnClaim: claim,
       };
-      const admission = {
-        environmentId,
-        credential: recoveryCredential.credential,
-        sessionId,
-        runId: claim.runId,
-        ownerEpoch: identity.ownerEpoch,
-        rpcSetVersion: 1,
-        handshake: support.BOOTSTRAP_RECEIPT,
-      };
+      const admission = claimAdmission(claim, recoveryCredential.credential);
 
       expect(restartedStore.validateTurnClaim(claim)).toBe(true);
       expect(await restartedStore.listPendingWorkspaceResultsAsync()).toHaveLength(1);
@@ -328,40 +318,35 @@ describe("worker environment service", () => {
       });
       expect(await workerService.acknowledgeCredentialDelivery(recoveryCredential)).toBe(false);
       expect(workerService.validateWorkerConnection(identity)).toBe("placement-mismatch");
-      await expect(
-        workerService.commitTranscript(identity, support.transcriptRequest(identity, "stale")),
-      ).resolves.toEqual({ ok: false, closeReason: "placement-mismatch" });
-      await expect(
-        workerService.pushLiveEvent(identity, support.assistantEvent(identity, "stale")),
-      ).resolves.toEqual({ ok: false, closeReason: "placement-mismatch" });
-      expect(
-        await workerService.startInference(identity, support.inferenceRequest(identity), {
-          connectionId: "inherited-claim",
-          send: vi.fn(),
-        }),
-      ).toEqual({ ok: false, closeReason: "placement-mismatch" });
-      await expect(
-        workerService.invokeGatewayTool(
-          identity,
-          {
+      for (const request of [
+        () =>
+          workerService.commitTranscript(identity, support.transcriptRequest(identity, "stale")),
+        () => workerService.pushLiveEvent(identity, support.assistantEvent(identity, "stale")),
+        () =>
+          workerService.startInference(identity, support.inferenceRequest(identity), {
+            connectionId: "inherited-claim",
+            send: vi.fn(),
+          }),
+        () =>
+          workerService.invokeGatewayTool(
+            identity,
+            {
+              generation: "stale-surface",
+              toolId: "send",
+              toolCallId: "inherited-tool",
+              arguments: { sessionKey: "agent:main:target", message: "stale" },
+            },
+            { send: vi.fn() },
+          ),
+        () => workerService.getToolSurface(identity),
+        () =>
+          workerService.cancelGatewayTool(identity, {
             generation: "stale-surface",
-            toolId: "send",
             toolCallId: "inherited-tool",
-            arguments: { sessionKey: "agent:main:target", message: "stale" },
-          },
-          { send: vi.fn() },
-        ),
-      ).resolves.toEqual({ ok: false, closeReason: "placement-mismatch" });
-      await expect(workerService.getToolSurface(identity)).resolves.toEqual({
-        ok: false,
-        closeReason: "placement-mismatch",
-      });
-      await expect(
-        workerService.cancelGatewayTool(identity, {
-          generation: "stale-surface",
-          toolCallId: "inherited-tool",
-        }),
-      ).resolves.toEqual({ ok: false, closeReason: "placement-mismatch" });
+          }),
+      ]) {
+        await expect(request()).resolves.toEqual({ ok: false, closeReason: "placement-mismatch" });
+      }
       expect(executeInference).not.toHaveBeenCalled();
       expect(createGatewayTools).not.toHaveBeenCalled();
     },
@@ -370,24 +355,11 @@ describe("worker environment service", () => {
   it("binds credentials and reconnect identities to the exact replacement claim", async () => {
     const environmentId = "worker-claim-credential";
     const sessionId = "session-claim-credential";
-    const environmentIdentity = await support.seedAttachedIdentity(environmentId, sessionId);
-    const { claim: first, store } = await claimWorkerPlacement({
-      environmentId,
-      ownerEpoch: environmentIdentity.ownerEpoch,
-      sessionId,
-    });
+    const { claim: first, store, environmentIdentity } = await seedClaim(environmentId, sessionId);
     const gate = createWorkerSessionPlacementGate(store);
     const workerService = support.createService(support.createProvider(), { placementStore: gate });
     const firstCredential = await workerService.acquireTurnCredential(first);
-    const admission = {
-      environmentId,
-      credential: firstCredential.credential,
-      sessionId,
-      runId: first.runId,
-      ownerEpoch: environmentIdentity.ownerEpoch,
-      rpcSetVersion: 1,
-      handshake: support.BOOTSTRAP_RECEIPT,
-    };
+    const admission = claimAdmission(first, firstCredential.credential);
     await expect(
       workerService.admitWorker({
         ...admission,
@@ -444,12 +416,7 @@ describe("worker environment service", () => {
   it("keeps exact-claim inference live past TTL and aborts promptly on claim closure", async () => {
     const environmentId = "worker-claim-inference";
     const sessionId = "session-claim-inference";
-    const environmentIdentity = await support.seedAttachedIdentity(environmentId, sessionId);
-    const { claim: first, store } = await claimWorkerPlacement({
-      environmentId,
-      ownerEpoch: environmentIdentity.ownerEpoch,
-      sessionId,
-    });
+    const { claim: first, store, environmentIdentity } = await seedClaim(environmentId, sessionId);
     const signals: AbortSignal[] = [];
     const executeInference = vi.fn<WorkerEnvironmentServiceOptions["executeInference"]>(
       async ({ signal }) => {
@@ -474,33 +441,15 @@ describe("worker environment service", () => {
         }
         releaseAgentRunDelegatedAuthority(authority);
       });
-      await bindWorkerTurnOwner(
-        store,
-        claim,
-        undefined,
-        instance,
-        {
-          agentId: "main",
-          sessionId,
-          sessionKey: `agent:main:${sessionId}`,
-          storePath: path.join(support.testState.root, "sessions.json"),
-        },
-        () => {
-          if (!store.validateTurnClaim(claim)) {
-            throw new Error("inference fixture claim is no longer current");
-          }
-        },
-      );
-      const credential = await workerService.acquireTurnCredential(claim);
-      const admitted = await workerService.admitWorker({
-        environmentId,
-        credential: credential.credential,
-        sessionId,
-        runId: claim.runId,
-        ownerEpoch: environmentIdentity.ownerEpoch,
-        rpcSetVersion: 1,
-        handshake: support.BOOTSTRAP_RECEIPT,
+      await bindOwner(store, claim, instance, undefined, () => {
+        if (!store.validateTurnClaim(claim)) {
+          throw new Error("inference fixture claim is no longer current");
+        }
       });
+      const credential = await workerService.acquireTurnCredential(claim);
+      const admitted = await workerService.admitWorker(
+        claimAdmission(claim, credential.credential),
+      );
       if (!admitted.ok) {
         throw new Error(`worker admission failed: ${admitted.reason}`);
       }

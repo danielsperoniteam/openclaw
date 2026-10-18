@@ -79,17 +79,13 @@ describe("worker live ACK ownership", () => {
     "withholds terminal authority for seq=$seq, durable=$ackedSeq, transcriptFirst=$transcriptFirst",
     async ({ ackedSeq, seq, lastAckedSeq, transcriptFirst }) => {
       const { identity, placements, workerService } = await recoveredTurn(ackedSeq);
+      const push = workerService.pushLiveEvent.bind(workerService, identity);
       if (transcriptFirst) {
         await expect(
           workerService.commitTranscript(identity, support.transcriptRequest(identity, "current")),
         ).resolves.toMatchObject({ ok: true });
       }
-      await expect(
-        workerService.pushLiveEvent(
-          identity,
-          support.terminalEvent(identity, { seq, lastAckedSeq }),
-        ),
-      ).resolves.toEqual(
+      await expect(push(support.terminalEvent(identity, { seq, lastAckedSeq }))).resolves.toEqual(
         lastAckedSeq > ackedSeq
           ? {
               ok: false,
@@ -101,10 +97,7 @@ describe("worker live ACK ownership", () => {
       expect(placements.get(identity.sessionId!)?.lastLiveEventAckCursor).toBe(ackedSeq);
       if (lastAckedSeq === ackedSeq) {
         await expect(
-          workerService.pushLiveEvent(
-            identity,
-            support.assistantEvent(identity, "still active", { seq: 6, lastAckedSeq: 5 }),
-          ),
+          push(support.assistantEvent(identity, "still active", { seq: 6, lastAckedSeq: 5 })),
         ).resolves.toEqual({ ok: true, result: { ackedSeq: 6 } });
       }
     },
@@ -112,35 +105,24 @@ describe("worker live ACK ownership", () => {
 
   it("discards buffered terminal authority when the receiver requests resync", async () => {
     const { identity, placements, workerService } = await recoveredTurn();
+    const push = workerService.pushLiveEvent.bind(workerService, identity);
     await expect(
-      workerService.pushLiveEvent(
-        identity,
-        support.terminalEvent(identity, { seq: 7, lastAckedSeq: 5 }),
-      ),
+      push(support.terminalEvent(identity, { seq: 7, lastAckedSeq: 5 })),
     ).resolves.toEqual({ ok: true, result: { ackedSeq: 5 } });
     await expect(
-      workerService.pushLiveEvent(
-        identity,
-        support.assistantEvent(identity, "resync", { seq: 6, lastAckedSeq: 6 }),
-      ),
+      push(support.assistantEvent(identity, "resync", { seq: 6, lastAckedSeq: 6 })),
     ).resolves.toEqual({
       ok: false,
       details: { reason: "resync-required", ackedSeq: 5, expectedSeq: 6 },
     });
     for (const seq of [6, 7]) {
       await expect(
-        workerService.pushLiveEvent(
-          identity,
-          support.assistantEvent(identity, "replayed", { seq, lastAckedSeq: seq - 1 }),
-        ),
+        push(support.assistantEvent(identity, "replayed", { seq, lastAckedSeq: seq - 1 })),
       ).resolves.toEqual({ ok: true, result: { ackedSeq: seq } });
     }
     expect(await placements.listPendingWorkspaceResultsAsync()).toEqual([]);
     await expect(
-      workerService.pushLiveEvent(
-        identity,
-        support.terminalEvent(identity, { seq: 8, lastAckedSeq: 7 }),
-      ),
+      push(support.terminalEvent(identity, { seq: 8, lastAckedSeq: 7 })),
     ).resolves.toEqual({ ok: true, result: { ackedSeq: 8 } });
     expect(placements.get(identity.sessionId!)?.lastLiveEventAckCursor).toBe(8);
     expect(await placements.listPendingWorkspaceResultsAsync()).toHaveLength(1);
@@ -212,37 +194,33 @@ describe("worker ACK ordering", () => {
     const { identity, placementStore, workerService } = await support.placementHarness(
       "worker-placement-gap",
       "session-placement-gap",
-      {
-        applyTranscriptCommit,
-        liveEvents,
-      },
+      { applyTranscriptCommit, liveEvents },
     );
+    const push = workerService.pushLiveEvent.bind(workerService, identity);
+    const commit = workerService.commitTranscript.bind(workerService, identity);
 
-    await expect(
-      workerService.pushLiveEvent(identity, support.terminalEvent(identity, { seq: 2 })),
-    ).resolves.toEqual({ ok: true, result: { ackedSeq: 0 } });
+    await expect(push(support.terminalEvent(identity, { seq: 2 }))).resolves.toEqual({
+      ok: true,
+      result: { ackedSeq: 0 },
+    });
     expect(placementStore.updateAckCursors).not.toHaveBeenCalled();
 
-    await expect(
-      workerService.pushLiveEvent(identity, support.assistantEvent(identity, "fills gap")),
-    ).resolves.toEqual({ ok: true, result: { ackedSeq: 2 } });
+    await expect(push(support.assistantEvent(identity, "fills gap"))).resolves.toEqual({
+      ok: true,
+      result: { ackedSeq: 2 },
+    });
     expect(placementStore.updateAckCursors).toHaveBeenCalledOnce();
     expect(placementStore.updateAckCursors).toHaveBeenCalledWith({
       claim: identity.turnClaim,
       liveSeq: 2,
       assertCurrent: expect.any(Function),
     });
+    await expect(commit(support.transcriptRequest(identity, "late transcript"))).resolves.toEqual({
+      ok: false,
+      closeReason: "placement-mismatch",
+    });
     await expect(
-      workerService.commitTranscript(
-        identity,
-        support.transcriptRequest(identity, "late transcript"),
-      ),
-    ).resolves.toEqual({ ok: false, closeReason: "placement-mismatch" });
-    await expect(
-      workerService.pushLiveEvent(
-        identity,
-        support.assistantEvent(identity, "late", { lastAckedSeq: 2, seq: 3 }),
-      ),
+      push(support.assistantEvent(identity, "late", { lastAckedSeq: 2, seq: 3 })),
     ).resolves.toEqual({ ok: false, closeReason: "placement-mismatch" });
     expect(applyTranscriptCommit).not.toHaveBeenCalled();
     expect(liveApply).toHaveBeenCalledTimes(2);
@@ -283,21 +261,10 @@ describe("worker ACK ordering", () => {
     ackSettled.resolve();
     await expect(commit).resolves.toMatchObject({ ok: true });
     await expect(terminal).resolves.toEqual({ ok: true, result: { ackedSeq: 1 } });
+    const cursor = { claim: identity.turnClaim, assertCurrent: expect.any(Function) };
     expect(placementStore.updateAckCursors.mock.calls).toEqual([
-      [
-        {
-          claim: identity.turnClaim,
-          transcriptSeq: 1,
-          assertCurrent: expect.any(Function),
-        },
-      ],
-      [
-        {
-          claim: identity.turnClaim,
-          liveSeq: 1,
-          assertCurrent: expect.any(Function),
-        },
-      ],
+      [{ ...cursor, transcriptSeq: 1 }],
+      [{ ...cursor, liveSeq: 1 }],
     ]);
   });
 });
