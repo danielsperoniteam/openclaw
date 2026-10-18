@@ -7,12 +7,12 @@ import { createConfigIoContext } from "../config/io.context.js";
 import { readConfigFileSnapshotFromContext } from "../config/io.snapshot.js";
 import { clearRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import { withEnvAsync } from "../test-utils/env.js";
+import { cliEnv, registerCli, writeJson } from "./cli-lifetime.test-support.js";
 import {
   createPluginCliLoadSession,
   loadPluginCliDescriptors,
   resolvePluginCliRootOwnerIds,
 } from "./cli-registry-loader.js";
-import { registerPluginCliCommandsFromValidatedConfig } from "./cli.js";
 import { getCurrentPluginMetadataSnapshot } from "./current-plugin-metadata-snapshot.js";
 import * as discovery from "./discovery.js";
 import {
@@ -55,16 +55,11 @@ describe("CLI config producer lifetime", () => {
       );
       const manifestPath = path.join(plugin.dir, "openclaw.plugin.json");
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-      fs.writeFileSync(
-        manifestPath,
-        JSON.stringify({
-          ...manifest,
-          enabledByDefault: true,
-          cliCommands: [
-            { name: "prepared", description: "Prepared command", hasSubcommands: false },
-          ],
-        }),
-      );
+      writeJson(manifestPath, {
+        ...manifest,
+        enabledByDefault: true,
+        cliCommands: [{ name: "prepared", description: "Prepared command", hasSubcommands: false }],
+      });
       if (kind.includes("provider")) {
         const owner = writePlugin({
           id: "defaults-owner",
@@ -75,14 +70,11 @@ describe("CLI config producer lifetime", () => {
           filename: "index.cjs",
           body: 'throw new Error("provider runtime must not load for config defaults");',
         });
-        fs.writeFileSync(
-          path.join(owner.dir, "openclaw.plugin.json"),
-          JSON.stringify({
-            id: owner.id,
-            providers: ["anthropic"],
-            configSchema: { type: "object", properties: {} },
-          }),
-        );
+        writeJson(path.join(owner.dir, "openclaw.plugin.json"), {
+          id: owner.id,
+          providers: ["anthropic"],
+          configSchema: { type: "object", properties: {} },
+        });
         fs.writeFileSync(
           path.join(owner.dir, "provider-policy-api.js"),
           'exports.applyConfigDefaults = ({ config }) => ({ ...config, agents: { ...config.agents, defaults: { ...config.agents.defaults, contextPruning: { mode: "cache-ttl", ttl: "7m" } } } });',
@@ -125,19 +117,14 @@ describe("CLI config producer lifetime", () => {
           // The normal test harness disables unspecified plugins. Select this generated
           // plugin explicitly after proving missing/empty defaults, without changing the env.
           const enabledConfig = { ...read.config, plugins: { enabled: true, allow: [plugin.id] } };
-          fs.writeFileSync(configPath, JSON.stringify({ plugins: enabledConfig.plugins }));
+          writeJson(configPath, { plugins: enabledConfig.plugins });
           const params = { cfg: enabledConfig, session, primaryCommand: "prepared" };
           const descriptors = await loadPluginCliDescriptors(params);
           expect(descriptors[0]?.machineOutput?.({ argv: [], stdoutIsTTY: true })).toBe(true);
           expect(await resolvePluginCliRootOwnerIds(params)).toEqual([plugin.id]);
           expect(await resolvePluginCliRootOwnerIds(params)).toEqual([plugin.id]);
           const program = new Command();
-          expect(
-            await registerPluginCliCommandsFromValidatedConfig(program, undefined, undefined, {
-              primary: "prepared",
-              session,
-            }),
-          ).not.toBeNull();
+          expect(await registerCli(program, { primary: "prepared", session })).not.toBeNull();
           expect(program.commands.map((command) => command.name())).toEqual(["prepared"]);
           session.close();
           program.hook("preAction", () => clearPluginMetadataLifecycleCaches());
@@ -184,53 +171,35 @@ describe("CLI config producer lifetime", () => {
       `module.exports = { legacyConfigRules: [${JSON.stringify(rule)}] };`,
     );
     const configPath = path.join(root, "openclaw.json");
-    fs.writeFileSync(
-      configPath,
-      JSON.stringify({
-        plugins: {
-          load: { paths: [plugin.dir] },
-          allow: [plugin.id],
-          entries: { [plugin.id]: { config: { label: 17 } } },
-        },
-      }),
-    );
-    await withEnvAsync(
-      {
-        OPENCLAW_HOME: root,
-        OPENCLAW_STATE_DIR: path.join(root, "state"),
-        OPENCLAW_CONFIG_PATH: configPath,
-        OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
+    writeJson(configPath, {
+      plugins: {
+        load: { paths: [plugin.dir] },
+        allow: [plugin.id],
+        entries: { [plugin.id]: { config: { label: 17 } } },
       },
-      async () => {
-        const discover = vi.spyOn(discovery, "discoverOpenClawPlugins");
-        const session = createPluginCliLoadSession();
-        const read = await session.readConfig(() =>
-          readBestEffortConfigSnapshot({ observe: false, skipPluginValidation: true }),
-        );
-        expect(read.configDiagnostics).toBeNull();
-        expect(discover).not.toHaveBeenCalled();
-        const invalid = await session.readConfig(() =>
-          readConfigFileSnapshotFromContext(createConfigIoContext({ env: process.env })),
-        );
-        expect(invalid.valid).toBe(false);
-        expect(invalid.legacyIssues).toEqual([
-          { path: rule.path.join("."), message: rule.message },
-        ]);
-        expect(getCurrentPluginMetadataSnapshot()).toBeUndefined();
-        const program = new Command();
-        await expect(
-          registerPluginCliCommandsFromValidatedConfig(program, undefined, undefined, {
-            session,
-            primary: "prepared",
-          }),
-        ).rejects.toMatchObject({
-          code: "INVALID_CONFIG",
-          details: expect.stringContaining("plugins.entries.invalid-cli.config.label"),
-        });
-        expect(program.commands).toEqual([]);
-        session.close();
-      },
-    );
+    });
+    await withEnvAsync({ ...cliEnv(root), OPENCLAW_HOME: root }, async () => {
+      const discover = vi.spyOn(discovery, "discoverOpenClawPlugins");
+      const session = createPluginCliLoadSession();
+      const read = await session.readConfig(() =>
+        readBestEffortConfigSnapshot({ observe: false, skipPluginValidation: true }),
+      );
+      expect(read.configDiagnostics).toBeNull();
+      expect(discover).not.toHaveBeenCalled();
+      const invalid = await session.readConfig(() =>
+        readConfigFileSnapshotFromContext(createConfigIoContext({ env: process.env })),
+      );
+      expect(invalid.valid).toBe(false);
+      expect(invalid.legacyIssues).toEqual([{ path: rule.path.join("."), message: rule.message }]);
+      expect(getCurrentPluginMetadataSnapshot()).toBeUndefined();
+      const program = new Command();
+      await expect(registerCli(program, { session, primary: "prepared" })).rejects.toMatchObject({
+        code: "INVALID_CONFIG",
+        details: expect.stringContaining("plugins.entries.invalid-cli.config.label"),
+      });
+      expect(program.commands).toEqual([]);
+      session.close();
+    });
   });
   it("publishes validated config before plugin CLI registration reads it", async () => {
     const root = fs.realpathSync(makePluginLoaderTempDir());
@@ -251,42 +220,26 @@ describe("CLI config producer lifetime", () => {
     });
     const manifestPath = path.join(plugin.dir, "openclaw.plugin.json");
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    fs.writeFileSync(
-      manifestPath,
-      JSON.stringify({
-        ...manifest,
-        cliCommands: [
-          { name: "live-config", description: "Live config command", hasSubcommands: false },
-        ],
-      }),
-    );
+    writeJson(manifestPath, {
+      ...manifest,
+      cliCommands: [
+        { name: "live-config", description: "Live config command", hasSubcommands: false },
+      ],
+    });
     const configPath = path.join(root, "openclaw.json");
-    fs.writeFileSync(
-      configPath,
-      JSON.stringify({
-        plugins: {
-          enabled: true,
-          load: { paths: [plugin.dir] },
-          allow: [id],
-          entries: { [id]: { enabled: true, config: { command: "live-config" } } },
-        },
-      }),
-    );
-    await withEnvAsync(
-      {
-        OPENCLAW_HOME: root,
-        OPENCLAW_STATE_DIR: path.join(root, "state"),
-        OPENCLAW_CONFIG_PATH: configPath,
-        OPENCLAW_DISABLE_BUNDLED_PLUGINS: "1",
+    writeJson(configPath, {
+      plugins: {
+        enabled: true,
+        load: { paths: [plugin.dir] },
+        allow: [id],
+        entries: { [id]: { enabled: true, config: { command: "live-config" } } },
       },
-      async () => {
-        clearRuntimeConfigSnapshot();
-        const program = new Command();
-        await registerPluginCliCommandsFromValidatedConfig(program, undefined, undefined, {
-          primary: "live-config",
-        });
-        expect(program.commands.map((command) => command.name())).toEqual(["live-config"]);
-      },
-    );
+    });
+    await withEnvAsync({ ...cliEnv(root), OPENCLAW_HOME: root }, async () => {
+      clearRuntimeConfigSnapshot();
+      const program = new Command();
+      await registerCli(program, { primary: "live-config" });
+      expect(program.commands.map((command) => command.name())).toEqual(["live-config"]);
+    });
   });
 });

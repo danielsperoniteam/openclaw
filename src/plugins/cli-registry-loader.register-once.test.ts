@@ -24,13 +24,8 @@ import { createPluginCache, retirePluginCache } from "./plugin-cache.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
 import { hasRetainedPluginRuntimeCloseError } from "./runtime-close-error.js";
 
-afterEach(() => {
-  resetPluginLoaderTestStateForTest();
-});
-
-afterAll(() => {
-  cleanupPluginLoaderFixturesForTest();
-});
+afterEach(resetPluginLoaderTestStateForTest);
+afterAll(cleanupPluginLoaderFixturesForTest);
 
 function countRegisterRuns(markerPath: string): number {
   return fs.existsSync(markerPath)
@@ -66,7 +61,7 @@ module.exports = {
         load: { paths: [path.join(pluginDir, "index.cjs")] },
         allow: ["counting-cli"],
       },
-    } as OpenClawConfig,
+    },
     markerPath,
   };
 }
@@ -175,8 +170,7 @@ describe("plugin CLI metadata registration", () => {
         }),
       ]);
       expect(released).toBe(false);
-      expect(disposals).toBe(1);
-      expect(siblingDisposals).toBe(0);
+      expect([disposals, siblingDisposals]).toEqual([1, 0]);
       finishRemoval.resolve();
       const result = await outcome;
       if (failure) {
@@ -194,8 +188,7 @@ describe("plugin CLI metadata registration", () => {
         expect(result).toEqual({ ok: true });
       }
       expect(resources.release()).toBe(releasing);
-      expect(disposals).toBe(1);
-      expect(siblingDisposals).toBe(1);
+      expect([disposals, siblingDisposals]).toEqual([1, 1]);
     } finally {
       finishRemoval.resolve();
       session.close();
@@ -208,25 +201,14 @@ describe("plugin CLI metadata registration", () => {
 
   it("runs a legacy external plugin register once across CLI bootstrap stages", async () => {
     const { config, markerPath } = setupCountingCliPlugin();
-
     const session = createPluginCliLoadSession();
     onTestFinished(() => session.close());
     // Stage order mirrors one `openclaw counting-cli --help` invocation: the unowned-primary
     // guard resolves plugin CLI root ownership, then command registration resolves descriptors
     // for the same primary. The CLI carries one preparation session through both stages.
-    const ownerIds = await resolvePluginCliRootOwnerIds({
-      cfg: config,
-      env: process.env,
-      primaryCommand: "counting-cli",
-      session,
-    });
-    const descriptors = await loadPluginCliDescriptors({
-      cfg: config,
-      env: process.env,
-      primaryCommand: "counting-cli",
-      session,
-    });
-
+    const params = { cfg: config, env: process.env, primaryCommand: "counting-cli", session };
+    const ownerIds = await resolvePluginCliRootOwnerIds(params);
+    const descriptors = await loadPluginCliDescriptors(params);
     expect(ownerIds).toEqual(["counting-cli"]);
     expect(descriptors.map((entry) => entry.name)).toContain("counting-cli");
     expect(countRegisterRuns(markerPath)).toBe(1);
@@ -238,7 +220,6 @@ describe("plugin CLI metadata registration", () => {
     // its narrower scope must not be served the full-scope registry (or vice versa).
     await loadPluginCliDescriptors({ cfg: config, env: process.env });
     await getPluginCliCommandDescriptors(config, process.env);
-
     expect(countRegisterRuns(markerPath)).toBe(2);
   });
 });
