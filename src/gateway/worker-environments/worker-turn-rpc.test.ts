@@ -5,6 +5,7 @@ import { createExecutionIdentityAdmissionToken } from "../../audit/execution-ide
 import { configureRuntimeActionDecisionSink } from "../../audit/runtime-action-decision.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
+import type { WorkerConnectionIdentity } from "./connection-identity.js";
 import { hashWorkerCredential } from "./credential.js";
 import { getWorkerInferenceSessionControl } from "./inference-control-internal.js";
 import type { WorkerSessionTurnClaim } from "./placement-record.js";
@@ -26,6 +27,34 @@ type WorkerEnvironmentServiceOptions = support.WorkerEnvironmentServiceOptions;
 const fenced = { ok: false, closeReason: "placement-mismatch" };
 const invalidCredential = { ok: false, reason: "invalid-credential" };
 const inferenceSink = (connectionId: string) => ({ connectionId, send: vi.fn() });
+
+function captureReceipts() {
+  const receipts: DecisionReceiptV1[] = [];
+  const clear = configureRuntimeActionDecisionSink((receipt) => {
+    receipts.push(receipt);
+    return true;
+  });
+  return { receipts, clear };
+}
+
+function admissionToken(runId: string, name: string, now = 100) {
+  return createExecutionIdentityAdmissionToken(runId, {
+    contextId: `context-${name}`,
+    executionId: `execution-${name}`,
+    now,
+  });
+}
+
+function renewCredential(identity: WorkerConnectionIdentity, credentialHash: string) {
+  return support.testState.store.renewCredential({
+    environmentId: identity.environmentId,
+    expectedOwnerEpoch: identity.ownerEpoch,
+    sessionId: identity.sessionId,
+    rpcSetVersion: identity.rpcSetVersion,
+    expiresAtMs: identity.credentialExpiresAtMs,
+    credentialHash,
+  });
+}
 
 const providerFailure = {
   type: "error",
@@ -99,20 +128,12 @@ describe("worker environment service", () => {
     const sessionId = "session-sensitive-worker";
     const { claim, store } = await seedClaim(environmentId, sessionId, "run-worker-receipts");
     const owner = await bindClaimOwner(store, claim, {
-      token: createExecutionIdentityAdmissionToken(claim.runId, {
-        contextId: "context-worker-receipts",
-        executionId: "execution-worker-receipts",
-        now: 100,
-      }),
+      token: admissionToken(claim.runId, "worker-receipts"),
     });
     const workerService = claimService(store);
     const credential = await workerService.acquireTurnCredential(claim);
     const admission = claimAdmission(claim, credential.credential);
-    const receipts: DecisionReceiptV1[] = [];
-    const clear = configureRuntimeActionDecisionSink((receipt) => {
-      receipts.push(receipt);
-      return true;
-    });
+    const { receipts, clear } = captureReceipts();
     try {
       await expect(
         workerService.admitWorker({ ...admission, credential: "credential-must-not-leak" }),
@@ -139,10 +160,9 @@ describe("worker environment service", () => {
       ["worker_admission_gate_allowed", "enforced"],
     ]);
     const serialized = JSON.stringify(receipts);
-    expect(serialized).not.toContain("credential-must-not-leak");
-    expect(serialized).not.toContain("b".repeat(64));
-    expect(serialized).not.toContain(environmentId);
-    expect(serialized).not.toContain(sessionId);
+    for (const secret of ["credential-must-not-leak", "b".repeat(64), environmentId, sessionId]) {
+      expect(serialized).not.toContain(secret);
+    }
   });
 
   it("does not attribute a late admission result to a replacement using the same run id", async () => {
@@ -154,21 +174,13 @@ describe("worker environment service", () => {
       "run-admission-replacement",
     );
     const firstOwner = await bindClaimOwner(store, first, {
-      token: createExecutionIdentityAdmissionToken(first.runId, {
-        contextId: "context-admission-first",
-        executionId: "execution-admission-first",
-        now: 100,
-      }),
+      token: admissionToken(first.runId, "admission-first"),
     });
     const installation = createDeferredCore<typeof support.BUNDLE_ARTIFACT>();
     support.testState.prepareInstallation = vi.fn(() => installation.promise);
     const workerService = claimService(store);
     const firstCredential = await workerService.acquireTurnCredential(first);
-    const receipts: DecisionReceiptV1[] = [];
-    const clear = configureRuntimeActionDecisionSink((receipt) => {
-      receipts.push(receipt);
-      return true;
-    });
+    const { receipts, clear } = captureReceipts();
     const admission = claimAdmission(first, firstCredential.credential);
     let secondOwner: Awaited<ReturnType<typeof bindClaimOwner>> | undefined;
     const pendingAdmission = workerService.admitWorker(admission);
@@ -181,11 +193,7 @@ describe("worker environment service", () => {
       firstOwner.release();
       const second = await replaceClaim(store, first, "claim-admission-replacement");
       secondOwner = await bindClaimOwner(store, second, {
-        token: createExecutionIdentityAdmissionToken(second.runId, {
-          contextId: "context-admission-second",
-          executionId: "execution-admission-second",
-          now: 101,
-        }),
+        token: admissionToken(second.runId, "admission-second", 101),
       });
       installation.resolve(support.BUNDLE_ARTIFACT);
 
@@ -442,10 +450,8 @@ describe("worker environment service", () => {
     await expect(workerService.commitTranscript(identity, transcript)).resolves.toMatchObject({
       ok: true,
     });
-    await expect(rpc.terminal()).resolves.toEqual({
-      ok: true,
-      result: { ackedSeq: 1 },
-    });
+    const terminalAck = { ok: true, result: { ackedSeq: 1 } };
+    await expect(rpc.terminal()).resolves.toEqual(terminalAck);
 
     await expect(workerService.commitTranscript(identity, transcript)).resolves.toMatchObject({
       ok: true,
@@ -455,10 +461,7 @@ describe("worker environment service", () => {
     ).resolves.toEqual(fenced);
     expect(applyTranscriptCommit).toHaveBeenCalledTimes(2);
 
-    await expect(rpc.terminal()).resolves.toEqual({
-      ok: true,
-      result: { ackedSeq: 1 },
-    });
+    await expect(rpc.terminal()).resolves.toEqual(terminalAck);
     await expect(rpc.assistant("late", { seq: 2 })).resolves.toEqual(fenced);
     expect(liveApply).toHaveBeenCalledTimes(2);
 
@@ -477,14 +480,7 @@ describe("worker environment service", () => {
     const rotatedCredentialHash = hashWorkerCredential(
       ["rotated", identity.environmentId, identity.sessionId].join("-"),
     );
-    await support.testState.store.renewCredential({
-      environmentId: identity.environmentId,
-      expectedOwnerEpoch: identity.ownerEpoch,
-      sessionId: identity.sessionId,
-      rpcSetVersion: identity.rpcSetVersion,
-      expiresAtMs: identity.credentialExpiresAtMs,
-      credentialHash: rotatedCredentialHash,
-    });
+    await renewCredential(identity, rotatedCredentialHash);
     const rotatedIdentity = { ...identity, credentialHash: rotatedCredentialHash };
     await expect(
       workerService.commitTranscript(rotatedIdentity, { ...transcript, seq: 2 }),
@@ -522,14 +518,10 @@ describe("worker environment service", () => {
       send,
     });
     assert(started.ok === true, "inference fixture failed to start");
-    await support.testState.store.renewCredential({
-      environmentId: identity.environmentId,
-      expectedOwnerEpoch: identity.ownerEpoch,
-      sessionId: identity.sessionId,
-      rpcSetVersion: identity.rpcSetVersion,
-      expiresAtMs: identity.credentialExpiresAtMs,
-      credentialHash: hashWorkerCredential(["replacement", identity.environmentId].join("-")),
-    });
+    await renewCredential(
+      identity,
+      hashWorkerCredential(["replacement", identity.environmentId].join("-")),
+    );
     started.launch();
     await support.waitForFast(() => expect(send).toHaveBeenCalledOnce());
     expect(executeInference).not.toHaveBeenCalled();

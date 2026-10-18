@@ -14,6 +14,10 @@ import {
 } from "./worker-turn-rpc-fixtures.test-support.js";
 
 const ack = (ackedSeq: number) => ({ ok: true, result: { ackedSeq } });
+const resync = (ackedSeq: number) => ({
+  ok: false,
+  details: { reason: "resync-required", ackedSeq, expectedSeq: ackedSeq + 1 },
+});
 const fenced = { ok: false, closeReason: "placement-mismatch" };
 
 async function recoveredTurn(ackedSeq = 5) {
@@ -75,12 +79,7 @@ describe("worker ACK ownership and ordering", () => {
         await expect(rpc.transcript("current")).resolves.toMatchObject({ ok: true });
       }
       await expect(rpc.terminal({ seq, lastAckedSeq })).resolves.toEqual(
-        lastAckedSeq > ackedSeq
-          ? {
-              ok: false,
-              details: { reason: "resync-required", ackedSeq, expectedSeq: ackedSeq + 1 },
-            }
-          : ack(ackedSeq),
+        lastAckedSeq > ackedSeq ? resync(ackedSeq) : ack(ackedSeq),
       );
       expect(await placements.listPendingWorkspaceResultsAsync()).toEqual([]);
       expect(placements.get(identity.sessionId!)?.lastLiveEventAckCursor).toBe(ackedSeq);
@@ -96,10 +95,7 @@ describe("worker ACK ownership and ordering", () => {
     const { identity, placements, workerService } = await recoveredTurn();
     const rpc = turnRequests(identity, workerService);
     await expect(rpc.terminal({ seq: 7, lastAckedSeq: 5 })).resolves.toEqual(ack(5));
-    await expect(rpc.assistant("resync", { seq: 6, lastAckedSeq: 6 })).resolves.toEqual({
-      ok: false,
-      details: { reason: "resync-required", ackedSeq: 5, expectedSeq: 6 },
-    });
+    await expect(rpc.assistant("resync", { seq: 6, lastAckedSeq: 6 })).resolves.toEqual(resync(5));
     for (const seq of [6, 7]) {
       await expect(rpc.assistant("replayed", { seq, lastAckedSeq: seq - 1 })).resolves.toEqual(
         ack(seq),
@@ -110,8 +106,6 @@ describe("worker ACK ownership and ordering", () => {
     expect(placements.get(identity.sessionId!)?.lastLiveEventAckCursor).toBe(8);
     expect(await placements.listPendingWorkspaceResultsAsync()).toHaveLength(1);
   });
-  type WorkerEnvironmentServiceOptions = support.WorkerEnvironmentServiceOptions;
-
   it.each(["transcript", "terminal"] as const)(
     "does not return a successful %s ACK when persistence rejects",
     async (kind) => {
@@ -133,7 +127,7 @@ describe("worker ACK ownership and ordering", () => {
 
   it("advances the transcript cursor when a stale-base commit consumes its sequence", async () => {
     const applyTranscriptCommit = vi
-      .fn<NonNullable<WorkerEnvironmentServiceOptions["applyTranscriptCommit"]>>()
+      .fn<NonNullable<support.WorkerEnvironmentServiceOptions["applyTranscriptCommit"]>>()
       .mockResolvedValueOnce({ ok: false, reason: "stale-base-leaf" })
       .mockResolvedValueOnce({ ok: false, reason: "invalid-batch" });
     const { identity, placementStore, workerService } = await support.placementHarness(
@@ -164,9 +158,7 @@ describe("worker ACK ownership and ordering", () => {
 
   it("fences after a buffered terminal event becomes acknowledged by a gap fill", async () => {
     const applyTranscriptCommit = support.successfulTranscriptCommit("entry-after-terminal-gap");
-    const { apply: liveApply, liveEvents } = support.sequencedLiveEvents((seq) =>
-      seq === 1 ? 2 : 0,
-    );
+    const { apply, liveEvents } = support.sequencedLiveEvents((seq) => (seq === 1 ? 2 : 0));
     const { identity, placementStore, workerService } = await support.placementHarness(
       "worker-placement-gap",
       "session-placement-gap",
@@ -186,7 +178,7 @@ describe("worker ACK ownership and ordering", () => {
     await expect(rpc.transcript("late transcript")).resolves.toEqual(fenced);
     await expect(rpc.assistant("late", { lastAckedSeq: 2, seq: 3 })).resolves.toEqual(fenced);
     expect(applyTranscriptCommit).not.toHaveBeenCalled();
-    expect(liveApply).toHaveBeenCalledTimes(2);
+    expect(apply).toHaveBeenCalledTimes(2);
   });
 
   it("holds terminal events behind transcript commit and delayed durable ACK settlement", async () => {

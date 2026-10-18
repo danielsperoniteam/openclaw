@@ -8,20 +8,7 @@ import {
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { WorkerRunnerUnavailableError } from "./tunnel-contract.js";
-import {
-  SESSION_ID,
-  SESSION_KEY,
-  attachedEnvironment,
-  cleanupWorkerTurnLauncherTest,
-  createWorkerSessionTurnPlacementProvider,
-  placements,
-  seedActivePlacement,
-  sessionTarget,
-  setupWorkerTurnLauncherTest,
-  turn,
-  unusedEnvironments,
-  type WorkerTurnEnvironmentService,
-} from "./worker-turn-launcher.test-support.js";
+import * as fixture from "./worker-turn-launcher.test-support.js";
 
 const INACTIVE_MARKER = "inactive fixture message ";
 const INPUT_TEXT = "Inspect this workspace";
@@ -30,7 +17,7 @@ const isInactive = (message: unknown) =>
   JSON.stringify(message)?.includes(INACTIVE_MARKER) ?? false;
 
 function seedBranchedHistory(persistCurrentInput: boolean): number {
-  const manager = SessionManager.open(sessionTarget);
+  const manager = SessionManager.open(fixture.sessionTarget);
   const user = (content: string, timestamp: number) =>
     manager.appendMessage(makeAgentUserMessage({ content, timestamp }));
   const assistant = (text: string, timestamp: number) =>
@@ -57,11 +44,11 @@ describe("Gateway worker-turn selected transcript preparation", () => {
     if (hasUnjoinedOwner) {
       throw new Error("Prior worker fixture remains unjoined; retained state must not be replaced");
     }
-    await setupWorkerTurnLauncherTest();
+    await fixture.setupWorkerTurnLauncherTest();
   });
   afterEach(async () => {
     if (!hasUnjoinedOwner) {
-      await cleanupWorkerTurnLauncherTest();
+      await fixture.cleanupWorkerTurnLauncherTest();
     }
   });
 
@@ -69,7 +56,7 @@ describe("Gateway worker-turn selected transcript preparation", () => {
     "does not hydrate inactive branches for %s input",
     async (persistence) => {
       const expectedMessages = seedBranchedHistory(persistence === "already-persisted");
-      await seedActivePlacement();
+      await fixture.seedActivePlacement();
       const reachedCredential = createDeferredCore();
       const releaseCredential = createDeferredCore();
       const deliberateStop = new WorkerRunnerUnavailableError();
@@ -77,12 +64,12 @@ describe("Gateway worker-turn selected transcript preparation", () => {
       const recorder =
         persistence === "recorder-owned"
           ? createUserTurnTranscriptRecorder({
-              target: { ...sessionTarget, sessionEntry: undefined },
+              target: { ...fixture.sessionTarget, sessionEntry: undefined },
               input: { text: INPUT_TEXT },
             })
           : undefined;
       const request = {
-        ...turn(`selected-context-${persistence}`),
+        ...fixture.turn(`selected-context-${persistence}`),
         prompt: INPUT_TEXT,
         ...(recorder
           ? { userTurnTranscriptRecorder: recorder }
@@ -90,9 +77,9 @@ describe("Gateway worker-turn selected transcript preparation", () => {
         abortSignal: fixtureAbort.signal,
       };
       const calls = { credential: 0, tunnel: 0, local: 0, destroy: 0, context: 0 };
-      const environments: WorkerTurnEnvironmentService = {
-        ...unusedEnvironments(),
-        get: () => attachedEnvironment(),
+      const environments: fixture.WorkerTurnEnvironmentService = {
+        ...fixture.unusedEnvironments(),
+        get: fixture.attachedEnvironment,
         acquireTurnCredential: async () => {
           calls.credential++;
           reachedCredential.resolve();
@@ -108,7 +95,10 @@ describe("Gateway worker-turn selected transcript preparation", () => {
           throw new Error("Pre-launch refusal must preserve the active placement");
         },
       };
-      const provider = createWorkerSessionTurnPlacementProvider({ environments, placements });
+      const provider = fixture.createWorkerSessionTurnPlacementProvider({
+        environments,
+        placements: fixture.placements,
+      });
       let observation = {
         loadedMessages: 0,
         inactiveLoadedMessages: 0,
@@ -141,14 +131,10 @@ describe("Gateway worker-turn selected transcript preparation", () => {
       });
       hasUnjoinedOwner = true;
       const pending = provider
-        .executeTurn(
-          { sessionId: SESSION_ID, sessionKey: SESSION_KEY, agentId: "main", runId: request.runId },
-          request,
-          async () => {
-            calls.local++;
-            throw new Error("Fixture must use Gateway worker-turn orchestration");
-          },
-        )
+        .executeTurn(fixture.workerTurnRequest(request.runId), request, async () => {
+          calls.local++;
+          throw new Error("Fixture must use Gateway worker-turn orchestration");
+        })
         .then(
           () => undefined,
           (error: unknown) => error,
@@ -191,8 +177,11 @@ describe("Gateway worker-turn selected transcript preparation", () => {
         }
       }
       expect(outcome).toBe(deliberateStop);
-      expect(placements.get(SESSION_ID)).toMatchObject({ state: "active", turnClaim: null });
-      expect(await placements.listPendingWorkspaceResultsAsync()).toHaveLength(0);
+      expect(fixture.placements.get(fixture.SESSION_ID)).toMatchObject({
+        state: "active",
+        turnClaim: null,
+      });
+      expect(await fixture.placements.listPendingWorkspaceResultsAsync()).toHaveLength(0);
       expect(calls.destroy).toBe(0);
     },
   );
