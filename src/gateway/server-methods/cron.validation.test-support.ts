@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { expectDefined } from "@openclaw/normalization-core";
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
-import { expect, vi } from "vitest";
+import { expect, onTestFinished, vi } from "vitest";
 import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -8,6 +9,10 @@ import { resolveCronListSnapshotRevision } from "../../cron/list-snapshot-revisi
 import type { CronRuntimeAuthority } from "../../cron/runtime-authority.js";
 import type { CronService } from "../../cron/service.js";
 import type { CronJob } from "../../cron/types.js";
+import {
+  claimAgentRunDelegatedAuthority,
+  releaseAgentRunDelegatedAuthority,
+} from "../../infra/agent-run-registry.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
 import {
@@ -337,7 +342,13 @@ export function createCronCallerClient(
   currentJobId?: string,
   currentJobExpiresAtMs = Date.now() + 60_000,
 ): GatewayClient {
-  const operationalRunInstance = createOperationalRunInstanceRef("run-cron-validation");
+  const operationalRunInstance = createOperationalRunInstanceRef(
+    `run-cron-validation-${randomUUID()}`,
+  );
+  const authority = claimAgentRunDelegatedAuthority(operationalRunInstance);
+  onTestFinished(() => {
+    releaseAgentRunDelegatedAuthority(authority);
+  });
   return {
     connect: {} as GatewayClient["connect"],
     internal: {
@@ -346,12 +357,7 @@ export function createCronCallerClient(
         agentId,
         sessionKey: sessionKey ?? `agent:${agentId}:main`,
         operationalRunInstance,
-        delegatedAuthority: {
-          kind: "local",
-          operationalRunInstance,
-          lifecycleGeneration: "test-generation",
-          claimId: "test-claim",
-        },
+        delegatedAuthority: { kind: "local", ...authority },
         ...(accountId ? { turnSourceAccountId: accountId } : {}),
         ...(currentJobId
           ? {

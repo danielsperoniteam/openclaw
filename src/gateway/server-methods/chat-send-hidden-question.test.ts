@@ -123,7 +123,7 @@ it.each(
           },
           session: {
             agentId: "main",
-            cfg: {},
+            cfg: { messages: { queue: { allowCollaborativeSteering: true } } },
             entry: undefined,
             sessionKey,
             storePath,
