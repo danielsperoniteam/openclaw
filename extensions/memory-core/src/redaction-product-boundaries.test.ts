@@ -63,20 +63,20 @@ async function seedInteractiveTranscript(params: {
   await upsertSessionEntry({ agentId, sessionKey, storePath, entry });
 }
 
-function promotionCandidate(params: {
-  key: string;
-  line: number;
-  originClass: "agent" | "owner" | "untrusted";
-  path: string;
-  snippet: string;
-}): PromotionCandidate {
+function promotionCandidate(
+  key: string,
+  line: number,
+  originClass: "agent" | "owner" | "untrusted",
+  sourcePath: string,
+  snippet: string,
+): PromotionCandidate {
   return {
-    key: params.key,
-    path: params.path,
-    startLine: params.line,
-    endLine: params.line,
+    key,
+    path: sourcePath,
+    startLine: line,
+    endLine: line,
     source: "memory",
-    snippet: params.snippet,
+    snippet,
     recallCount: 3,
     signalCount: 3,
     avgScore: 0.95,
@@ -97,7 +97,7 @@ function promotionCandidate(params: {
       conceptual: 0.2,
     },
     provenance: {
-      originClass: params.originClass,
+      originClass,
       sessionKind: "interactive",
       observedAt: Date.parse("2026-08-02T18:00:00.000Z"),
     },
@@ -114,27 +114,20 @@ describe("memory-core transcript and promotion boundaries", () => {
   it("preserves sensitive interactive transcript content during dreaming ingestion", async () => {
     const workspaceDir = await createWorkspace("redaction-dreaming-");
     const safeControlText = "Safe control text survives transcript ingestion.";
+    const dreaming = {
+      enabled: true,
+      timezone: "UTC",
+      phases: {
+        light: { enabled: true, limit: 20, lookbackDays: 7 },
+        rem: { enabled: false, limit: 0, lookbackDays: 7 },
+      },
+    };
     const cfg: OpenClawConfig = {
       agents: {
         defaults: { workspace: workspaceDir, userTimezone: "UTC" },
         entries: { main: { workspace: workspaceDir } },
       },
-      plugins: {
-        entries: {
-          "memory-core": {
-            config: {
-              dreaming: {
-                enabled: true,
-                timezone: "UTC",
-                phases: {
-                  light: { enabled: true, limit: 20, lookbackDays: 7 },
-                  rem: { enabled: false, limit: 0, lookbackDays: 7 },
-                },
-              },
-            },
-          },
-        },
-      },
+      plugins: { entries: { "memory-core": { config: { dreaming } } } },
     };
     setRuntimeConfigSnapshot(cfg);
     await seedInteractiveTranscript({
@@ -186,27 +179,9 @@ describe("memory-core transcript and promotion boundaries", () => {
     const applied = await applyShortTermPromotions({
       workspaceDir,
       candidates: [
-        promotionCandidate({
-          key: cleanKey,
-          line: 1,
-          originClass: "owner",
-          path: sourcePath,
-          snippet: cleanText,
-        }),
-        promotionCandidate({
-          key: contaminatedKey,
-          line: 2,
-          originClass: "agent",
-          path: sourcePath,
-          snippet: contaminatedText,
-        }),
-        promotionCandidate({
-          key: untrustedKey,
-          line: 3,
-          originClass: "untrusted",
-          path: sourcePath,
-          snippet: untrustedText,
-        }),
+        promotionCandidate(cleanKey, 1, "owner", sourcePath, cleanText),
+        promotionCandidate(contaminatedKey, 2, "agent", sourcePath, contaminatedText),
+        promotionCandidate(untrustedKey, 3, "untrusted", sourcePath, untrustedText),
       ],
       limit: 3,
       minScore: 0.9,
