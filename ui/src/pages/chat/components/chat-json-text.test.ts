@@ -1,15 +1,18 @@
 /* @vitest-environment jsdom */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { readMarkdownCodeBlockCopyText } from "../../../components/markdown-code-blocks.ts";
 import { TOOL_OUTPUT_PREVIEW_CHARS } from "../../../lib/chat/tool-output.ts";
 import { mountSolid } from "../../../test-helpers/solid-render.tsx";
-import { GroupedMessage } from "./chat-message-bubble-view.tsx";
-import { MessageGroup } from "./chat-message-group-view.tsx";
+import type { NativeMessageGroupOptions } from "./chat-message-group-view.tsx";
 import { prepareChatMessageRender } from "./chat-message-markdown-view.tsx";
+import {
+  createGroupedMessageHarness,
+  createMessageGroupHarness,
+} from "./chat-message-native.test-support.tsx";
 import { createMessageGroup } from "./chat-message.test-support.ts";
 import type { SidebarContent } from "./chat-sidebar-content-types.ts";
-import { ChatToolCard } from "./chat-tool-cards.solid.tsx";
+import { mountCard } from "./chat-tool-cards.test-support.tsx";
 import { ChatToolOutput } from "./chat-tool-output-view.tsx";
 import { settleToolBridges } from "./chat-tool-render.test-support.ts";
 
@@ -23,62 +26,43 @@ const jsonSources = [
   { name: "array lexemes", text: "[9007199254740993,1e400,0.1234567890123456789,-0]" },
 ];
 
-const containers: HTMLElement[] = [];
-
 function createContainer() {
-  const container = document.createElement("div");
-  document.body.append(container);
-  containers.push(container);
+  const container = document.body.appendChild(document.createElement("div"));
+  onTestFinished(() => container.remove());
   return container;
 }
-
-afterEach(() => {
-  for (const container of containers.splice(0)) {
-    container.remove();
-  }
-});
 
 describe.each(["user", "assistant", "toolResult"])("%s JSON message text", (role) => {
   async function renderMessage(text: string, isStreaming = false) {
     const container = createContainer();
-    mountSolid(
-      GroupedMessage,
-      {
-        preparation: prepareChatMessageRender({
-          role,
-          content: text,
-          ...(role === "toolResult" ? { toolName: "lookup", toolCallId: "json-result" } : {}),
-        }),
-        messageKey: "json-message",
-        options: { isStreaming, showReasoning: false, isToolMessageExpanded: () => true },
-      },
-      container,
+    createGroupedMessageHarness(container).render(
+      prepareChatMessageRender({
+        role,
+        content: text,
+        ...(role === "toolResult" ? { toolName: "lookup", toolCallId: "json-result" } : {}),
+      }),
+      "json-message",
+      { isStreaming, showReasoning: false, isToolMessageExpanded: () => true },
     );
     await settleToolBridges(container);
     return container;
   }
 
   it.each([
-    ...(role === "assistant" ? jsonSources : jsonSources.slice(0, 1)).map(({ name, text }) => ({
-      name,
-      text,
-      fenced: false,
-      tree: true,
-    })),
-    ...[20_000, 20_001].map((size) => ({
-      name: `${size}-character boundary`,
-      text: '{"text":"' + "x".repeat(size - 11) + '"}',
-      fenced: false,
-      tree: size === 20_000,
-    })),
-    {
-      name: "explicit fence",
-      text: '{"id":9007199254740993,"text":"**stars**"}',
-      fenced: true,
-      tree: true,
-    },
-  ])("preserves $name in literal code and copy", async (scenario) => {
-    const { text, fenced, tree } = scenario;
+    ...(role === "assistant" ? jsonSources : jsonSources.slice(0, 1)).map(
+      ({ name, text }) => [name, text, false, true] as const,
+    ),
+    ...[20_000, 20_001].map(
+      (size) =>
+        [
+          `${size}-character boundary`,
+          '{"text":"' + "x".repeat(size - 11) + '"}',
+          false,
+          size === 20_000,
+        ] as const,
+    ),
+    ["explicit fence", '{"id":9007199254740993,"text":"**stars**"}', true, true] as const,
+  ])("preserves %s in literal code and copy", async (_name, text, fenced, tree) => {
     const source = fenced ? "```json\n" + text + "\n```" : text;
     const displayed = fenced ? (role === "toolResult" ? source : text + "\n") : text;
     const container = await renderMessage(source);
@@ -128,22 +112,11 @@ describe.each(["user", "assistant", "toolResult"])("%s JSON message text", (role
 
 describe("tool JSON details", () => {
   async function openToolDetails(text: string) {
-    const container = createContainer();
     const openSidebar = vi.fn<(content: SidebarContent) => void>();
-    mountSolid(
-      ChatToolCard,
-      {
-        card: { id: "json-tool", name: "lookup", outputText: text, completed: true },
-        options: {
-          messageKey: "test-message",
-          expanded: true,
-          onToggleExpanded: vi.fn(),
-          onOpenSidebar: openSidebar,
-        },
-      },
-      container,
+    const container = await mountCard(
+      { id: "json-tool", name: "lookup", outputText: text, completed: true },
+      { onOpenSidebar: openSidebar },
     );
-    await settleToolBridges(container);
     expect(container.querySelector(".chat-tool-card__block code")?.textContent).toBe(
       text.slice(0, TOOL_OUTPUT_PREVIEW_CHARS),
     );
@@ -197,28 +170,23 @@ function expectJsonMode(container: Element, mode: string, pressed: boolean) {
 
 function jsonMessageGroup(message: unknown, role: string) {
   const container = createContainer();
-  let view: ReturnType<typeof mountSolid<Parameters<typeof MessageGroup>[0]>> | undefined;
+  const view = createMessageGroupHarness(container);
   return {
     container,
-    render(options: Partial<Parameters<typeof MessageGroup>[0]["options"]>) {
-      const props = {
-        group: createMessageGroup(message, role, {
+    render(options: Partial<NativeMessageGroupOptions>) {
+      view.render(
+        createMessageGroup(message, role, {
           key: role + "-group",
           messages: [{ key: role + "-message", message }],
         }),
-        options: {
+        {
           showReasoning: true,
           showToolCalls: true,
           assistantName: "OpenClaw",
           assistantAvatar: null,
           ...options,
         },
-      };
-      if (view) {
-        view.update(props);
-      } else {
-        view = mountSolid(MessageGroup, props, container);
-      }
+      );
     },
   };
 }
