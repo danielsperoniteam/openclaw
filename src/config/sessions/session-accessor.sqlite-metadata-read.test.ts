@@ -32,27 +32,23 @@ import { createTranscriptEventInserter } from "./transcript-payload.js";
 
 afterEach(() => vi.restoreAllMocks());
 
+const mutation = (observedAt: number | null, updatedAt: number | null) => ({
+  observedAt,
+  updatedAt,
+});
+const stats = (eventCount: number, sizeBytes: number, observedAt?: number, updatedAt?: number) => ({
+  eventCount,
+  maxSeq: 0,
+  sizeBytes,
+  ...(observedAt === undefined ? {} : { lastObservedMutationAtMs: observedAt }),
+  ...(updatedAt === undefined ? {} : { lastMutationAtMs: updatedAt }),
+});
+const hotStats = stats(1, Buffer.byteLength('{"type":"session"}'), 10, 20);
+
 it("preserves hot, cold, missing and repeated IDs across metadata batch boundaries", async () => {
   await withOpenClawTestState({ label: "transcript-stats-batches" }, async (state) => {
     const { database } = createFixture(state);
-    const expected = [
-      {
-        eventCount: 1,
-        maxSeq: 0,
-        sizeBytes: Buffer.byteLength('{"type":"session"}'),
-        lastObservedMutationAtMs: 10,
-        lastMutationAtMs: 20,
-      },
-      {
-        eventCount: 1,
-        maxSeq: 0,
-        sizeBytes: 1,
-        lastObservedMutationAtMs: 30,
-        lastMutationAtMs: 40,
-      },
-      { eventCount: 0, maxSeq: 0, sizeBytes: 0, lastObservedMutationAtMs: 1 },
-      { eventCount: 0, maxSeq: 0, sizeBytes: 0 },
-    ];
+    const expected = [hotStats, stats(1, 1, 30, 40), stats(0, 0, 1), stats(0, 0)];
     const names = ["hot", "cold", "empty", "missing"];
     for (const count of [4, 11, 401]) {
       const ids = Array.from({ length: count }, (_, index) => names[index % names.length]!);
@@ -159,10 +155,10 @@ it("reads physical hot and cold presence with mutation pairs off-thread without 
         );
       }
       expect(values).toEqual([
-        { present: true, observedAt: 10, updatedAt: 20 },
-        { present: true, observedAt: 30, updatedAt: 40 },
-        { present: false, observedAt: 1, updatedAt: null },
-        { present: false, observedAt: null, updatedAt: null },
+        { present: true, ...mutation(10, 20) },
+        { present: true, ...mutation(30, 40) },
+        { present: false, ...mutation(1, null) },
+        { present: false, ...mutation(null, null) },
       ]);
       expect(
         observation.queries.filter((query) =>
@@ -185,11 +181,11 @@ it.each(["presence", "mutation"] as const)(
       const expected = {
         presence: [true, true, false, false],
         mutation: [
-          { observedAt: 10, updatedAt: 20 },
-          { observedAt: 30, updatedAt: 40 },
+          mutation(10, 20),
+          mutation(30, 40),
           // Entry creation records updatedAt before any transcript mutation.
-          { observedAt: 1, updatedAt: null },
-          { observedAt: null, updatedAt: null },
+          mutation(1, null),
+          mutation(null, null),
         ],
       }[kind];
       const ids = ["hot", "cold", "empty", "missing"];
@@ -220,7 +216,7 @@ it.each(["presence", "mutation"] as const)(
       if (kind === "presence") {
         expect(ids.map((id) => read(scope(id)))).toEqual([false, true, true, false]);
       } else {
-        expect(read(scope("hot"))).toEqual({ observedAt: null, updatedAt: 50 });
+        expect(read(scope("hot"))).toEqual(mutation(null, 50));
         expect(readTranscriptMutationAtSync(scope("hot"))).toBe(50);
       }
       expect(compile).not.toHaveBeenCalled();
@@ -232,42 +228,33 @@ it("reads each in-transaction fence advance and restores the prior pair on rollb
   await withOpenClawTestState({ label: "prepared-transcript-rollback" }, async (state) => {
     const { database, options, scope } = createFixture(state);
     const read = () => readTranscriptMutationStateInTransaction(database, "hot");
-    expect(read()).toEqual({ observedAt: 10, updatedAt: 20 });
+    expect(read()).toEqual(mutation(10, 20));
     expect(() =>
       runOpenClawAgentWriteTransaction((current) => {
         advanceTranscriptMutationAtInTransaction(current, "hot", 1);
-        expect(read()).toEqual({ observedAt: 10, updatedAt: 20 });
+        expect(read()).toEqual(mutation(10, 20));
         advanceTranscriptMutationAtInTransaction(current, "hot", 25.9);
-        expect(read()).toEqual({ observedAt: 10, updatedAt: 25 });
+        expect(read()).toEqual(mutation(10, 25));
         advanceTranscriptMutationAtInTransaction(current, "empty", 0);
-        expect(readTranscriptMutationStateInTransaction(current, "empty")).toEqual({
-          observedAt: 1,
-          updatedAt: 0,
-        });
+        expect(readTranscriptMutationStateInTransaction(current, "empty")).toEqual(mutation(1, 0));
         advanceTranscriptMutationAtInTransaction(current, "empty", 0, { strictly: true });
-        expect(readTranscriptMutationStateInTransaction(current, "empty")).toEqual({
-          observedAt: 1,
-          updatedAt: 2,
-        });
+        expect(readTranscriptMutationStateInTransaction(current, "empty")).toEqual(mutation(1, 2));
         current.db
           .prepare("UPDATE session_windows SET transcript_observed_at = 100 WHERE session_id = ?")
           .run("hot");
         advanceTranscriptMutationAtInTransaction(current, "hot", 1, { strictly: true });
-        expect(read()).toEqual({ observedAt: 100, updatedAt: 101 });
+        expect(read()).toEqual(mutation(100, 101));
         advanceTranscriptMutationAtInTransaction(current, "hot", 1, { strictly: true });
-        expect(readTranscriptMutationStateSync(scope("hot"))).toEqual({
-          observedAt: 100,
-          updatedAt: 102,
-        });
+        expect(readTranscriptMutationStateSync(scope("hot"))).toEqual(mutation(100, 102));
         throw new Error("rollback fixture");
       }, options),
     ).toThrow("rollback fixture");
-    expect(read()).toEqual({ observedAt: 10, updatedAt: 20 });
+    expect(read()).toEqual(mutation(10, 20));
     expect(readTranscriptMutationAtSync(scope("hot"))).toBe(20);
     runOpenClawAgentWriteTransaction((current) => {
       advanceTranscriptMutationAtInTransaction(current, "hot", 1, { strictly: true });
     }, options);
-    expect(read()).toEqual({ observedAt: 10, updatedAt: 21 });
+    expect(read()).toEqual(mutation(10, 21));
   });
 });
 
@@ -275,20 +262,10 @@ it("uses statement snapshots for point metadata reads and preserves a caller's W
   await withOpenClawTestState({ label: "prepared-transcript-snapshot" }, async (state) => {
     const { database, scope } = createFixture(state);
     const readStats = () => readTranscriptStatsFromDatabase(database, "hot");
-    const originalStats = {
-      eventCount: 1,
-      maxSeq: 0,
-      sizeBytes: Buffer.byteLength('{"type":"session"}'),
-      lastObservedMutationAtMs: 10,
-      lastMutationAtMs: 20,
-    };
     const exec = vi.spyOn(database.db, "exec");
     expect(hasSessionTranscriptEventsSync(scope("hot"))).toBe(true);
-    expect(readTranscriptMutationStateSync(scope("hot"))).toEqual({
-      observedAt: 10,
-      updatedAt: 20,
-    });
-    expect(readStats()).toEqual(originalStats);
+    expect(readTranscriptMutationStateSync(scope("hot"))).toEqual(mutation(10, 20));
+    expect(readStats()).toEqual(hotStats);
     expect(
       exec.mock.calls.filter(([sql]) =>
         /^(?:BEGIN|COMMIT|SAVEPOINT|RELEASE|ROLLBACK)\b/iu.test(sql),
@@ -298,11 +275,8 @@ it("uses statement snapshots for point metadata reads and preserves a caller's W
     const peer = new DatabaseSync(database.path);
     try {
       runSqliteDeferredTransactionSync(database.db, () => {
-        expect(readTranscriptMutationStateSync(scope("hot"))).toEqual({
-          observedAt: 10,
-          updatedAt: 20,
-        });
-        expect(readStats()).toEqual(originalStats);
+        expect(readTranscriptMutationStateSync(scope("hot"))).toEqual(mutation(10, 20));
+        expect(readStats()).toEqual(hotStats);
         peer.exec(`
           BEGIN IMMEDIATE;
           DELETE FROM transcript_events WHERE session_id = 'hot';
@@ -311,24 +285,12 @@ it("uses statement snapshots for point metadata reads and preserves a caller's W
           COMMIT;
         `);
         expect(hasSessionTranscriptEventsSync(scope("hot"))).toBe(true);
-        expect(readTranscriptMutationStateSync(scope("hot"))).toEqual({
-          observedAt: 10,
-          updatedAt: 20,
-        });
-        expect(readStats()).toEqual(originalStats);
+        expect(readTranscriptMutationStateSync(scope("hot"))).toEqual(mutation(10, 20));
+        expect(readStats()).toEqual(hotStats);
       });
       expect(hasSessionTranscriptEventsSync(scope("hot"))).toBe(false);
-      expect(readTranscriptMutationStateSync(scope("hot"))).toEqual({
-        observedAt: 100,
-        updatedAt: 200,
-      });
-      expect(readStats()).toEqual({
-        eventCount: 0,
-        maxSeq: 0,
-        sizeBytes: 0,
-        lastObservedMutationAtMs: 100,
-        lastMutationAtMs: 200,
-      });
+      expect(readTranscriptMutationStateSync(scope("hot"))).toEqual(mutation(100, 200));
+      expect(readStats()).toEqual(stats(0, 0, 100, 200));
     } finally {
       peer.close();
     }
@@ -346,15 +308,9 @@ it("isolates identical session IDs by native handle and reopens without using a 
     `);
     for (let repeat = 0; repeat < 2; repeat += 1) {
       expect(hasSessionTranscriptEventsSync(first.scope("hot"))).toBe(true);
-      expect(readTranscriptMutationStateSync(first.scope("hot"))).toEqual({
-        observedAt: 10,
-        updatedAt: 20,
-      });
+      expect(readTranscriptMutationStateSync(first.scope("hot"))).toEqual(mutation(10, 20));
       expect(hasSessionTranscriptEventsSync(second.scope("hot"))).toBe(false);
-      expect(readTranscriptMutationStateSync(second.scope("hot"))).toEqual({
-        observedAt: 30,
-        updatedAt: 40,
-      });
+      expect(readTranscriptMutationStateSync(second.scope("hot"))).toEqual(mutation(30, 40));
     }
     expect(closeOpenClawAgentDatabaseByPath(first.database.path, "main")).toBe(true);
     expect(() => readTranscriptMutationStateInTransaction(first.database, "hot")).toThrow();
@@ -367,13 +323,7 @@ it("isolates identical session IDs by native handle and reopens without using a 
         WHERE session_id = 'hot';
     `);
     expect(hasSessionTranscriptEventsSync(first.scope("hot"))).toBe(false);
-    expect(readTranscriptMutationStateSync(first.scope("hot"))).toEqual({
-      observedAt: 50,
-      updatedAt: 60,
-    });
-    expect(readTranscriptMutationStateSync(second.scope("hot"))).toEqual({
-      observedAt: 30,
-      updatedAt: 40,
-    });
+    expect(readTranscriptMutationStateSync(first.scope("hot"))).toEqual(mutation(50, 60));
+    expect(readTranscriptMutationStateSync(second.scope("hot"))).toEqual(mutation(30, 40));
   });
 });

@@ -34,6 +34,23 @@ function createScope(name: string) {
   };
 }
 
+function creationStamp(createdAt: number) {
+  return {
+    createdVia: "operator" as const,
+    createdActor: { type: "human" as const, source: "profile" as const, id: "profile-creator" },
+    createdAt,
+    sandbox: "required" as const,
+  };
+}
+
+function readRow(scope: ReturnType<typeof createScope>) {
+  return openOpenClawAgentDatabase(scope)
+    .db.prepare(
+      "SELECT created_actor_type, created_actor_id, created_via, created_at, entry_json FROM session_nodes WHERE session_key = ?",
+    )
+    .get(scope.sessionKey);
+}
+
 beforeEach(() => setRuntimeConfigSnapshot({}));
 
 afterEach(async () => {
@@ -77,12 +94,7 @@ describe("SQLite session row persistence", () => {
   });
 
   it("bounds saved-prompt decoding while publishing identity changes", async () => {
-    const env = {
-      ...process.env,
-      OPENCLAW_STATE_DIR: fs.realpathSync(tempDirs.make("session-identity-decode-")),
-    };
-    const sessionKey = "agent:main:identity-decode";
-    const scope = { agentId: "main", env, sessionKey };
+    const scope = createScope("identity-decode");
     const skillsSnapshot = {
       prompt: "identity-decode-payload:" + "x".repeat(16_384),
       skills: [],
@@ -92,7 +104,7 @@ describe("SQLite session row persistence", () => {
     const unsubscribe = onSessionIdentityMutation((mutation) => {
       if (
         mutation.kind !== "delete" &&
-        mutation.current.sessionKeys.includes(sessionKey) &&
+        mutation.current.sessionKeys.includes(scope.sessionKey) &&
         mutation.current.sessionId
       ) {
         identities.push(mutation.current.sessionId);
@@ -178,11 +190,7 @@ describe("SQLite session row persistence", () => {
   });
 
   it("isolates the existing-entry context when first read during the update", async () => {
-    const env = {
-      ...process.env,
-      OPENCLAW_STATE_DIR: fs.realpathSync(tempDirs.make("session-context-copy-")),
-    };
-    const scope = { agentId: "main", env, sessionKey: "agent:main:context-copy" };
+    const scope = createScope("context-copy");
     const skillsSnapshot = { prompt: "Saved prompt", skills: [] };
     replaceSessionEntrySync(scope, { sessionId: "existing", updatedAt: 1, skillsSnapshot });
     let readContext: () => InternalSessionEntry | undefined = () => undefined;
@@ -207,12 +215,7 @@ describe("SQLite session row persistence", () => {
 
   it("protects required profile provenance and an absent surface during replacement", async () => {
     const scope = createScope("stamp");
-    const stamp = {
-      createdVia: "operator" as const,
-      createdActor: { type: "human" as const, source: "profile" as const, id: "profile-creator" },
-      createdAt: 10,
-      sandbox: "required" as const,
-    };
+    const stamp = creationStamp(10);
     await upsertSessionEntryCore(scope, { sessionId: "original", updatedAt: 10, ...stamp });
     const replacement: InternalSessionEntry = {
       sessionId: "replacement",
@@ -227,33 +230,21 @@ describe("SQLite session row persistence", () => {
     ).toMatchObject(stamp);
     expect(loadSessionEntry(scope)).toMatchObject({ sessionId: "replacement", ...stamp });
     expect(loadSessionEntry(scope)?.createdSurface).toBeUndefined();
-    const row = openOpenClawAgentDatabase(scope)
-      .db.prepare(
-        "SELECT created_actor_type, created_actor_id, created_via, created_at, entry_json FROM session_nodes WHERE session_key = ?",
-      )
-      .get(scope.sessionKey);
+    const row = readRow(scope);
     expect(row).toMatchObject({
       created_actor_type: "human",
       created_actor_id: "profile-creator",
       created_via: "operator",
       created_at: 10,
     });
-    expect(JSON.parse(String(row?.entry_json))).toMatchObject(stamp);
-    expect(JSON.parse(String(row?.entry_json)).createdSurface).toBeUndefined();
+    const persisted = JSON.parse(String(row?.entry_json));
+    expect(persisted).toMatchObject(stamp);
+    expect(persisted.createdSurface).toBeUndefined();
   });
 
   it("keeps new required provenance with a fallback", async () => {
-    const env = {
-      ...process.env,
-      OPENCLAW_STATE_DIR: fs.realpathSync(tempDirs.make("session-stamp-fallback-")),
-    };
-    const scope = { agentId: "main", env, sessionKey: "agent:main:fallback" };
-    const stamp = {
-      createdVia: "operator" as const,
-      createdActor: { type: "human" as const, source: "profile" as const, id: "profile-creator" },
-      createdAt: 20,
-      sandbox: "required" as const,
-    };
+    const scope = createScope("fallback");
+    const stamp = creationStamp(20);
     const result = await patchSessionEntryCore(scope, () => stamp, {
       fallbackEntry: { sessionId: "fallback", updatedAt: 10 },
       preserveActivity: true,
@@ -263,11 +254,7 @@ describe("SQLite session row persistence", () => {
   });
 
   it("does not mint creator authority when replacing an unstamped node", async () => {
-    const env = {
-      ...process.env,
-      OPENCLAW_STATE_DIR: fs.realpathSync(tempDirs.make("session-unstamped-")),
-    };
-    const scope = { agentId: "main", env, sessionKey: "agent:main:unstamped" };
+    const scope = createScope("unstamped");
     await upsertSessionEntryCore(scope, {
       sessionId: "original",
       updatedAt: 10,
@@ -294,9 +281,7 @@ describe("SQLite session row persistence", () => {
   });
 
   it("persists private workspace intent but excludes runtime-only resolved skills from SQLite JSON", async () => {
-    const stateDir = fs.realpathSync(tempDirs.make("openclaw-sqlite-session-skills-"));
-    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
-    const sessionKey = "agent:main:runtime-skills";
+    const scope = createScope("runtime-skills");
     const resolvedSkills = [
       createCanonicalFixtureSkill({
         name: "demo",
@@ -306,6 +291,12 @@ describe("SQLite session row persistence", () => {
         source: "# Demo\n\n" + "runtime skill content ".repeat(100),
       }),
     ];
+    const savedSkills = {
+      prompt: "compact skill prompt",
+      skills: [{ name: "demo" }],
+      skillFilter: ["demo"],
+      version: 7,
+    };
     const entry: InternalSessionEntry = {
       sessionId: "runtime-skills-session",
       updatedAt: 42,
@@ -315,35 +306,22 @@ describe("SQLite session row persistence", () => {
         titleSource: "Start work",
       },
       skillsSnapshot: {
-        prompt: "compact skill prompt",
-        skills: [{ name: "demo" }],
-        skillFilter: ["demo"],
+        ...savedSkills,
         resolvedSkills,
         discoverySkills: resolvedSkills,
-        version: 7,
       },
     };
 
-    await upsertSessionEntryCore({ agentId: "main", env, sessionKey }, entry);
-
-    const database = openOpenClawAgentDatabase({ agentId: "main", env });
-    const row = database.db
-      .prepare("SELECT entry_json FROM session_nodes WHERE session_key = ?")
-      .get(sessionKey) as { entry_json: string };
-    const persisted = JSON.parse(row.entry_json) as InternalSessionEntry;
+    await upsertSessionEntryCore(scope, entry);
+    const persisted = JSON.parse(String(readRow(scope)?.entry_json)) as InternalSessionEntry;
     for (const key of ["pendingProjectGitUrl", "pendingWorktree"] as const) {
       expect(persisted[key]).toEqual(entry[key]);
-      expect(loadSessionEntry({ agentId: "main", env, sessionKey })?.[key]).toEqual(entry[key]);
+      expect(loadSessionEntry(scope)?.[key]).toEqual(entry[key]);
       expect(projectPublicSessionEntry(entry)).not.toHaveProperty(key);
       expect(projectPublicSessionEntryPatch(entry)).not.toHaveProperty(key);
     }
     expect(persisted.skillsSnapshot).toBeUndefined();
-    expect(loadSessionEntry({ agentId: "main", env, sessionKey })?.skillsSnapshot).toEqual({
-      prompt: "compact skill prompt",
-      skills: [{ name: "demo" }],
-      skillFilter: ["demo"],
-      version: 7,
-    });
+    expect(loadSessionEntry(scope)?.skillsSnapshot).toEqual(savedSkills);
     expect(entry.skillsSnapshot?.resolvedSkills).toBe(resolvedSkills);
     expect(entry.skillsSnapshot?.discoverySkills).toBe(resolvedSkills);
   });

@@ -90,13 +90,31 @@ function createFixture() {
     );
   }
   const database = openOpenClawAgentDatabase(options);
-  return { database, databaseOptions: { ...options, path: database.path } };
+  return {
+    database,
+    databaseOptions: { ...options, path: database.path },
+    freePages: () => Number(database.db.prepare("PRAGMA freelist_count").get()?.freelist_count),
+  };
+}
+
+function targetsDatabase(facts: unknown, pathKey: string) {
+  return (
+    isRecord(facts) &&
+    isRecord(facts.identity) &&
+    typeof facts.identity.nativeLocation === "string" &&
+    sqliteReaderDatabasePathKey(facts.identity.nativeLocation) === pathKey
+  );
+}
+
+function expectReclaimed(pages: number, limit: number) {
+  expect(pages).toBeGreaterThan(0);
+  expect(pages).toBeLessThanOrEqual(limit);
 }
 
 test.each(["reclaim", "resource-close", "shared-state-close"] as const)(
   "reclaims pages off-thread and applies current checkpoint receipts (%s)",
   async (recovery) => {
-    const { database, databaseOptions } = createFixture();
+    const { database, databaseOptions, freePages } = createFixture();
     const databasePathKey = sqliteReaderDatabasePathKey(database.path);
     database.db.exec(`INSERT INTO cache_entries(scope, key, blob, updated_at)
     VALUES ('wal-proof', 'pages', zeroblob(4194304), 1);
@@ -104,8 +122,6 @@ test.each(["reclaim", "resource-close", "shared-state-close"] as const)(
     expect(database.walMaintenance.checkpoint()).toBe(true);
     const { DatabaseSync } = requireNodeSqlite();
     const reader = new DatabaseSync(database.path, { readOnly: true });
-    const freePages = () =>
-      Number(database.db.prepare("PRAGMA freelist_count").get()?.freelist_count);
     const parentReclaim = vi.spyOn(database.walMaintenance, "reclaimFreePages");
     const ordering: string[] = [];
     const params = {
@@ -116,13 +132,7 @@ test.each(["reclaim", "resource-close", "shared-state-close"] as const)(
     const budget = getBudgetKickState(params.storePath, params.maintenance);
     let commitRequestedAtNs: bigint | undefined;
     const observeAdmission = probe.admission(workerAdmission, (request, grant, admit) => {
-      if (
-        request.stage === "commit" &&
-        isRecord(request.facts) &&
-        isRecord(request.facts.identity) &&
-        typeof request.facts.identity.nativeLocation === "string" &&
-        sqliteReaderDatabasePathKey(request.facts.identity.nativeLocation) === databasePathKey
-      ) {
+      if (request.stage === "commit" && targetsDatabase(request.facts, databasePathKey)) {
         commitRequestedAtNs = process.hrtime.bigint();
       }
       admit(request, grant);
@@ -192,8 +202,7 @@ test.each(["reclaim", "resource-close", "shared-state-close"] as const)(
               assert(commitRequestedAtNs !== undefined);
               assert(completed.checkpoint);
               expect(completed.checkpoint.observedAtNs).toBeGreaterThanOrEqual(commitRequestedAtNs);
-              expect(original - freePages()).toBeGreaterThan(0);
-              expect(original - freePages()).toBeLessThanOrEqual(7);
+              expectReclaimed(original - freePages(), 7);
             }
             expect(ordering).toEqual(["archive-start"]);
             ordering.push("archive-complete");
@@ -216,7 +225,6 @@ test.each(["reclaim", "resource-close", "shared-state-close"] as const)(
           }
         });
         let closing: Promise<void> | undefined;
-        let closeSettled = false;
         try {
           reader.exec("ROLLBACK");
           reader.close();
@@ -234,11 +242,7 @@ test.each(["reclaim", "resource-close", "shared-state-close"] as const)(
               async () => undefined,
             );
           }
-          closing = closing.then(() => {
-            closeSettled = true;
-          });
           await closing;
-          expect(closeSettled).toBe(true);
           const walPath = `${database.path}-wal`;
           expect(fs.existsSync(walPath) ? fs.statSync(walPath).size : 0).toBe(0);
           expect(observed).toContain("complete");
@@ -265,13 +269,11 @@ test.each(["reclaim", "resource-close", "shared-state-close"] as const)(
 );
 
 test("periodic vacuum waits for an admitted reclamation to settle", async () => {
-  const { database, databaseOptions } = createFixture();
+  const { database, databaseOptions, freePages } = createFixture();
   // sqlite-allow-raw -- Disposable free pages exercise the real incremental vacuum.
   database.db.exec(`CREATE TABLE reclamation_fixture (payload BLOB);
       INSERT INTO reclamation_fixture VALUES (zeroblob(8388608));
       DROP TABLE reclamation_fixture;`);
-  const freePages = () =>
-    Number(database.db.prepare("PRAGMA freelist_count").get()?.freelist_count);
   const before = freePages();
   expect(before).toBeGreaterThan(512);
   const plan = createLifecycleArtifactReclamationPlan({
@@ -320,15 +322,9 @@ test("periodic vacuum waits for an admitted reclamation to settle", async () => 
   const observeAdmission = probe.admission(workerAdmission, (request, grant, admit) => {
     if (
       (request.stage === "transaction" || request.stage === "commit") &&
-      isRecord(request.facts) &&
-      isRecord(request.facts.identity) &&
-      typeof request.facts.identity.nativeLocation === "string" &&
-      sqliteReaderDatabasePathKey(request.facts.identity.nativeLocation) === databasePathKey
+      targetsDatabase(request.facts, databasePathKey)
     ) {
-      maintenanceAdmissions.push({
-        stage: request.stage,
-        nativeSettled,
-      });
+      maintenanceAdmissions.push({ stage: request.stage, nativeSettled });
     }
     admit(request, grant);
   });
@@ -350,19 +346,14 @@ test("periodic vacuum waits for an admitted reclamation to settle", async () => 
     periodicWork.push(Promise.resolve(periodic()));
   };
   try {
-    const reclamation = runSqliteSessionReclamation({
-      plan,
-    });
+    const reclamation = runSqliteSessionReclamation({ plan });
     await expect(reclamation).resolves.toMatchObject({
       kind: "lifecycle-artifacts",
       value: { removedEntries: 0 },
     });
     expect(periodicWork.length).toBeGreaterThan(0);
     await Promise.all(periodicWork);
-    expect(maintenanceAdmissions[0]).toEqual({
-      stage: "transaction",
-      nativeSettled: true,
-    });
+    expect(maintenanceAdmissions[0]).toEqual({ stage: "transaction", nativeSettled: true });
     expect(maintenanceAdmissions.some((request) => request.stage === "commit")).toBe(true);
     expect(maintenanceAdmissions.every((request) => request.nativeSettled)).toBe(true);
     expect(
@@ -380,9 +371,7 @@ test("periodic vacuum waits for an admitted reclamation to settle", async () => 
       databaseOptions,
     );
     assert.ok(remaining.found);
-    const reclaimed = before - remaining.value;
-    expect(reclaimed).toBeGreaterThan(0);
-    expect(reclaimed).toBeLessThanOrEqual(512);
+    expectReclaimed(before - remaining.value, 512);
     expect(maintenanceErrors).toEqual([]);
   } finally {
     process.off("worker", observeWorker);

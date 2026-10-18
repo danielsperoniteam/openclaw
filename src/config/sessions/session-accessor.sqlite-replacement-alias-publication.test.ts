@@ -23,6 +23,7 @@ import { recordSessionParticipant } from "./session-accessor.sqlite-participants
 import {
   applySessionEntryCanonicalReplacements,
   applySessionEntryExactReplacements,
+  type SessionEntryCanonicalReplacement,
 } from "./session-accessor.sqlite-replacement-projection.js";
 import { listSessionMembersInDatabase } from "./session-sharing-store.kernel.js";
 import { addSessionMember } from "./session-sharing-store.native.js";
@@ -30,6 +31,29 @@ import { addSessionMember } from "./session-sharing-store.native.js";
 const { getReplacementPublicationDelivery } =
   await import("./session-accessor.sqlite-replacement-publication.test-support.js");
 const delivery = getReplacementPublicationDelivery();
+
+function observePublication(sessionKey: string) {
+  let published: ReturnType<typeof readPreparedSessionEntryChange>;
+  const stop = sessionChanges.subscribeFacts((change) => {
+    if ("sessionKey" in change && change.sessionKey === sessionKey) {
+      published = readPreparedSessionEntryChange(change, sessionKey);
+    }
+  });
+  return { stop, read: () => published };
+}
+
+const replacements = (rows: SessionEntryCanonicalReplacement[]) => () => ({
+  result: undefined,
+  replacements: rows,
+});
+
+const participantIdentity = (id: string) => ({
+  type: "remote" as const,
+  pluginId: "test-channel",
+  domain: "workspace",
+  idKind: "user",
+  id,
+});
 
 it("persists and publishes a snapshot restored by a later canonical replacement", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
@@ -41,12 +65,7 @@ it("persists and publishes a snapshot restored by a later canonical replacement"
       skillsSnapshot: { prompt: "old", skills: [] },
     };
     replaceSessionEntrySync({ agentId: "main", storePath: database.path, sessionKey }, entry);
-    let published: ReturnType<typeof readPreparedSessionEntryChange>;
-    const stop = sessionChanges.subscribeFacts((change) => {
-      if ("sessionKey" in change && change.sessionKey === sessionKey) {
-        published = readPreparedSessionEntryChange(change, sessionKey);
-      }
-    });
+    const publication = observePublication(sessionKey);
     try {
       await applySessionEntryExactReplacements({
         storePath: database.path,
@@ -65,18 +84,13 @@ it("persists and publishes a snapshot restored by a later canonical replacement"
           ],
         }),
       });
-      expect(published?.fullEntry).toMatchObject({
-        label: "final",
-        skillsSnapshot: { prompt: "old" },
-      });
+      const expected = { label: "final", skillsSnapshot: { prompt: "old" } };
+      expect(publication.read()?.fullEntry).toMatchObject(expected);
       await closeOpenClawAgentDatabaseByPathAsync(database.path);
       const reopened = openOpenClawAgentDatabase({ agentId: "main", path: database.path });
-      expect(readExactSessionEntryRow(reopened, sessionKey)?.entry).toMatchObject({
-        label: "final",
-        skillsSnapshot: { prompt: "old" },
-      });
+      expect(readExactSessionEntryRow(reopened, sessionKey)?.entry).toMatchObject(expected);
     } finally {
-      stop();
+      publication.stop();
     }
   });
 });
@@ -98,17 +112,14 @@ it("preserves shared-window exclusion provenance across canonical replacements",
     await applySessionEntryCanonicalReplacements({
       storePath: database.path,
       sessionKeys: [a, b],
-      update: () => ({
-        result: undefined,
-        replacements: [
-          {
-            sessionKey: a,
-            previousSessionKeys: [],
-            entry: { ...entry, updatedAt: 20, hookExternalContentSource: "gmail" },
-          },
-          { sessionKey: b, previousSessionKeys: [], entry: { ...entry, updatedAt: 21 } },
-        ],
-      }),
+      update: replacements([
+        {
+          sessionKey: a,
+          previousSessionKeys: [],
+          entry: { ...entry, updatedAt: 20, hookExternalContentSource: "gmail" },
+        },
+        { sessionKey: b, previousSessionKeys: [], entry: { ...entry, updatedAt: 21 } },
+      ]),
     });
     expect(
       database.db
@@ -159,13 +170,7 @@ it.each([false, true])(
         recordSessionParticipant(
           { agentId: "main", storePath: database.path, sessionKey: key },
           {
-            identity: {
-              type: "remote",
-              pluginId: "test-channel",
-              domain: "workspace",
-              idKind: "user",
-              id: identityId,
-            },
+            identity: participantIdentity(identityId),
             promptedAt: key === sessionKey ? 1 : 2,
           },
         );
@@ -183,12 +188,7 @@ it.each([false, true])(
         ),
       });
       expect(sharing.readCurrent()?.membership).toEqual(new Set(["target-member"]));
-      let published: ReturnType<typeof readPreparedSessionEntryChange>;
-      const stop = sessionChanges.subscribeFacts((change) => {
-        if ("sessionKey" in change && change.sessionKey === sessionKey) {
-          published = readPreparedSessionEntryChange(change, sessionKey);
-        }
-      });
+      const publication = observePublication(sessionKey);
       delivery.afterResult = () => {
         if (newerNative) {
           replaceSessionEntrySync(
@@ -202,10 +202,7 @@ it.each([false, true])(
         await applySessionEntryCanonicalReplacements({
           storePath: database.path,
           sessionKeys: [sessionKey, aliasKey],
-          update: () => ({
-            result: undefined,
-            replacements: [{ sessionKey, previousSessionKeys: [aliasKey], entry }],
-          }),
+          update: replacements([{ sessionKey, previousSessionKeys: [aliasKey], entry }]),
         });
         expect(readExactSessionEntryRow(database, aliasKey)).toBeUndefined();
         expect(readExactSessionEntryRow(database, sessionKey)?.entry.visibility).toBe(
@@ -223,22 +220,16 @@ it.each([false, true])(
               },
         );
         if (!newerNative) {
-          expect(published?.entry).toMatchObject({
+          expect(publication.read()?.entry).toMatchObject({
             participants: ["target-member", "alias-member"].map((id) => ({
-              identity: {
-                type: "remote",
-                pluginId: "test-channel",
-                domain: "workspace",
-                idKind: "user",
-                id,
-              },
+              identity: participantIdentity(id),
             })),
             participantCount: 2,
           });
         }
       } finally {
         delivery.afterResult = undefined;
-        stop();
+        publication.stop();
         sharing.release();
       }
     });
@@ -292,10 +283,7 @@ it.each([false, true])(
         await applySessionEntryCanonicalReplacements({
           storePath: database.path,
           sessionKeys: [key, alias],
-          update: () => ({
-            result: undefined,
-            replacements: [{ sessionKey: key, previousSessionKeys: [alias], entry }],
-          }),
+          update: replacements([{ sessionKey: key, previousSessionKeys: [alias], entry }]),
         });
         if (recreated) {
           expect(seen[0]).toEqual({

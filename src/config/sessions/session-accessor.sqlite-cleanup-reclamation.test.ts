@@ -20,7 +20,6 @@ import {
   replaceSessionEntry,
   replaceSessionEntrySync,
 } from "./session-accessor.js";
-import type { SqliteLifecycleTargetSnapshot } from "./session-accessor.sqlite-entry-equality.js";
 import * as reclamation from "./session-accessor.sqlite-reclamation-run.js";
 import { replaceTranscriptEvents } from "./session-accessor.sqlite-transcript-write.test-support.js";
 import { resolveSqliteTargetFromSessionStorePath } from "./session-sqlite-target.js";
@@ -97,10 +96,13 @@ describe("SQLite lifecycle cleanup reclamation", () => {
       const entry = { sessionId: current.sessionId, updatedAt: Date.now() };
       await replaceSessionEntry(current, entry);
       await closeOpenClawAgentDatabaseByPathAsync(database().path);
-      const target = { canonicalKey: current.sessionKey, storeKeys: [current.sessionKey] };
+      const deletionParams = {
+        archiveTranscript: false,
+        storePath,
+        target: { canonicalKey: current.sessionKey, storeKeys: [current.sessionKey] },
+      };
       const entered = createDeferred();
       const prepared = createDeferred();
-      let preparedTargetSnapshot: SqliteLifecycleTargetSnapshot | undefined;
       const prepare = reclamation.runSessionDeletionPlanning;
       vi.spyOn(reclamation, "runSessionDeletionPlanning").mockImplementationOnce(
         async (...args) => {
@@ -108,8 +110,9 @@ describe("SQLite lifecycle cleanup reclamation", () => {
           if (result.operation !== "entry" || result.value.kind !== "ready") {
             throw new Error("Expected the original entry to finish deletion planning");
           }
-          preparedTargetSnapshot = result.value.value.targetSnapshot;
-          expect(preparedTargetSnapshot).toMatchObject([{ sessionKey: current.sessionKey, entry }]);
+          expect(result.value.value.targetSnapshot).toMatchObject([
+            { sessionKey: current.sessionKey, entry },
+          ]);
           prepared.resolve();
           return result;
         },
@@ -126,21 +129,14 @@ describe("SQLite lifecycle cleanup reclamation", () => {
               label: "changed by the preceding owner",
             });
           } else {
-            expect(
-              (await deleteSessionEntryLifecycle({ archiveTranscript: false, storePath, target }))
-                .deleted,
-            ).toBe(true);
+            expect((await deleteSessionEntryLifecycle(deletionParams)).deleted).toBe(true);
           }
         },
       });
       let deletion: ReturnType<typeof deleteSessionEntryLifecycle> | undefined;
       try {
         await entered.promise;
-        deletion = deleteSessionEntryLifecycle({
-          archiveTranscript: false,
-          storePath,
-          target,
-        });
+        deletion = deleteSessionEntryLifecycle(deletionParams);
         // Preparation observes the old row while the preceding lifecycle owner is held.
         await Promise.race([
           previous,
@@ -153,7 +149,6 @@ describe("SQLite lifecycle cleanup reclamation", () => {
           deleted: false,
           expectedEntryMismatch: true,
         });
-        expect(preparedTargetSnapshot).toBeDefined();
         if (mutation === "replace") {
           expect(loadSessionEntry(current)).toMatchObject({
             ...entry,
@@ -318,11 +313,6 @@ describe("SQLite lifecycle cleanup reclamation", () => {
       }
     }
     const maxGapMs = Math.max(...samples);
-    if (process.env.OPENCLAW_TEST_RECLAMATION_LOG === "1") {
-      process.stdout.write(
-        `${JSON.stringify({ owner: "lifecycle-cleanup", rows, maxGapMs, result })}\n`,
-      );
-    }
     expect(result).toEqual({ removedEntries: 1, archivedTranscriptArtifacts: 1 });
     expect(samples.length).toBeGreaterThan(0);
     expect(maxGapMs).toBeLessThan(500);

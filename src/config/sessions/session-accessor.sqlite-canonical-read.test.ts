@@ -30,6 +30,7 @@ import { resolveSqliteTranscriptScope } from "./session-accessor.sqlite-scope.js
 import { ensureTranscriptSessionRoot } from "./session-accessor.sqlite-transcript-state.js";
 import { appendTranscriptEventsInTransaction } from "./session-accessor.sqlite-transcript-store.js";
 import { markCanonicalSessionValidationPending } from "./session-canonical-key.js";
+import type { SessionEntry } from "./types.js";
 
 const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
   afterEach(async () => {
@@ -44,34 +45,36 @@ const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
 
 beforeEach(() => setRuntimeConfigSnapshot({}));
 
+function createFixture(sessionKey = "agent:main:plain") {
+  const env = { OPENCLAW_STATE_DIR: tempDirs.make("canonical-metadata-") };
+  const scope = { agentId: "main", env, sessionKey };
+  const put = (key: string, entry: Partial<SessionEntry> = {}) =>
+    replaceSessionEntrySync(
+      { ...scope, sessionKey: key },
+      { sessionId: key, updatedAt: 1, ...entry },
+    );
+  return { scope, put };
+}
+
 describe("canonical SQLite metadata reads", () => {
   it("omits saved prompts from metadata reads and transcript batches", async () => {
-    const sessionKey = "agent:main:plain";
-    const env = { OPENCLAW_STATE_DIR: tempDirs.make("canonical-metadata-") };
-    const scope = { agentId: "main", env, sessionKey };
+    const { scope, put } = createFixture();
+    const { sessionKey } = scope;
     expect(loadSessionEntryReadOnly({ ...scope, projection: "list" })).toBeUndefined();
     expect(fs.existsSync(resolveOpenClawAgentSqlitePath(scope))).toBe(false);
     const savedPrompt = "saved prompt ".repeat(40_000);
-    const keys = [...new Set([sessionKey, sessionKey.toLowerCase()])];
-    for (const key of keys) {
-      replaceSessionEntrySync(
-        { ...scope, sessionKey: key },
-        {
-          sessionId: key,
-          updatedAt: 1,
-          lifecycleRevision: "original",
-          skillsSnapshot: { prompt: savedPrompt, skills: [] },
-          systemPromptReport: {
-            source: "run",
-            generatedAt: 1,
-            systemPrompt: { chars: 1, projectContextChars: 0, nonProjectContextChars: 1 },
-            injectedWorkspaceFiles: [],
-            skills: { promptChars: 1, entries: [] },
-            tools: { listChars: 0, schemaChars: 0, entries: [] },
-          },
-        },
-      );
-    }
+    put(sessionKey, {
+      lifecycleRevision: "original",
+      skillsSnapshot: { prompt: savedPrompt, skills: [] },
+      systemPromptReport: {
+        source: "run",
+        generatedAt: 1,
+        systemPrompt: { chars: 1, projectContextChars: 0, nonProjectContextChars: 1 },
+        injectedWorkspaceFiles: [],
+        skills: { promptChars: 1, entries: [] },
+        tools: { listChars: 0, schemaChars: 0, entries: [] },
+      },
+    });
     assignSessionOwner(scope, {
       owner: { type: "agent", id: "owner" },
       assignedBy: { type: "human", id: "assigner" },
@@ -128,12 +131,11 @@ describe("canonical SQLite metadata reads", () => {
   });
 
   it("validates a folded sibling before selecting or preparing the exact opaque target", async () => {
-    const env = { OPENCLAW_STATE_DIR: tempDirs.make("canonical-metadata-sibling-") };
     const sessionKey = "agent:main:matrix:channel:!Mixed:example.org";
-    const scope = { agentId: "main", env, sessionKey };
+    const { scope, put } = createFixture(sessionKey);
     const sibling = sessionKey.toLowerCase();
     for (const key of [sessionKey, sibling]) {
-      replaceSessionEntrySync({ ...scope, sessionKey: key }, { sessionId: key, updatedAt: 1 });
+      put(key);
     }
     loadSessionEntryReadOnly(scope);
     const database = openOpenClawAgentDatabase(scope);
@@ -181,29 +183,23 @@ describe("canonical SQLite metadata reads", () => {
 
 describe("current session ID entry reads", () => {
   it("preserves visible listing order and excludes retained generations", () => {
-    const env = { OPENCLAW_STATE_DIR: tempDirs.make("openclaw-session-by-id-") };
-    const scope = { agentId: "main", env, projection: "list" as const };
+    const fixture = createFixture();
+    const scope = {
+      agentId: fixture.scope.agentId,
+      env: fixture.scope.env,
+      projection: "list" as const,
+    };
     for (const name of ["z-shared", "a-shared", "internal-session-effects:shared"]) {
-      replaceSessionEntrySync(
-        { ...scope, sessionKey: `agent:main:${name}` },
-        {
-          sessionId: "shared",
-          updatedAt: 1,
-          label: name,
-          spawnDepth: 2,
-          skillsSnapshot: { prompt: "saved prompt", skills: [] },
-        },
-      );
+      fixture.put(`agent:main:${name}`, {
+        sessionId: "shared",
+        label: name,
+        spawnDepth: 2,
+        skillsSnapshot: { prompt: "saved prompt", skills: [] },
+      });
     }
-    replaceSessionEntrySync(
-      { ...scope, sessionKey: "agent:main:internal-session-effects:hidden" },
-      { sessionId: "hidden", updatedAt: 1 },
-    );
+    fixture.put("agent:main:internal-session-effects:hidden", { sessionId: "hidden" });
     for (const sessionId of ["previous", "current"]) {
-      replaceSessionEntrySync(
-        { ...scope, sessionKey: "agent:main:rolled-over" },
-        { sessionId, updatedAt: 1 },
-      );
+      fixture.put("agent:main:rolled-over", { sessionId });
     }
     runOpenClawAgentWriteTransaction((database) => {
       ensureTranscriptSessionRoot(
@@ -255,32 +251,29 @@ it("preserves delivery JSON semantics, retained windows, and invalid-row failure
     });
     const entry = { sessionId: "source", updatedAt: 1, delivery, groupId: "!Opaque:example.org" };
     const json = JSON.stringify(entry);
-    const cases = [
-      { name: "ordinary", json },
-      {
-        name: "duplicate",
-        json: json
+    const cases: Array<[name: string, json: string]> = [
+      ["ordinary", json],
+      [
+        "duplicate",
+        json
           .replace('"sessionId":"source"', '"sessionId":"discarded","sessionId":"source"')
           .replace('"delivery":', '"delivery":null,"delivery":'),
-      },
-      {
-        name: "deep",
-        json: json.slice(0, -1) + ',"unused":' + "[".repeat(1100) + "0" + "]".repeat(1100) + "}",
-      },
-      { name: "null", json: JSON.stringify({ ...entry, delivery: null, groupId: false }) },
-      { name: "escaped", json: JSON.stringify({ ...entry, groupId: "opaque-\ud800" }) },
-      { name: "absent", json: '{"sessionId":"source","updatedAt":1}' },
+      ],
+      ["deep", json.slice(0, -1) + ',"unused":' + "[".repeat(1100) + "0" + "]".repeat(1100) + "}"],
+      ["null", JSON.stringify({ ...entry, delivery: null, groupId: false })],
+      ["escaped", JSON.stringify({ ...entry, groupId: "opaque-\ud800" })],
+      ["absent", '{"sessionId":"source","updatedAt":1}'],
     ];
     const database = openOpenClawAgentDatabase(scope);
-    for (const item of cases) {
-      const sessionKey = `agent:main:${item.name}`;
+    for (const [name] of cases) {
+      const sessionKey = `agent:main:${name}`;
       replaceSessionEntrySync({ ...scope, sessionKey }, entry);
     }
     const retained = "agent:main:retained";
     runOpenClawAgentWriteTransaction((db) => {
       ensureTranscriptSessionRoot(db, { ...scope, sessionKey: retained, sessionId: "retained" }, 1);
     }, scope);
-    const keys = [...cases.map(({ name }) => `agent:main:${name}`), retained, "agent:main:missing"];
+    const keys = [...cases.map(([name]) => `agent:main:${name}`), retained, "agent:main:missing"];
     const read = (projection: "list" | "delivery") =>
       readExactSessionEntryCandidatesInDatabase(
         database,
@@ -289,25 +282,24 @@ it("preserves delivery JSON semantics, retained windows, and invalid-row failure
       );
     expect(read("delivery").every((result) => result.ok)).toBe(true);
     // Admitted readers preserve raw metadata parsing; cold admission still rejects uncertified rows.
-    for (const [index, item] of cases.entries()) {
+    for (const [index, [, stored]] of cases.entries()) {
       database.db
         .prepare("UPDATE session_nodes SET entry_json = ? WHERE session_key = ?")
-        .run(item.json, keys[index]!);
+        .run(stored, keys[index]!);
     }
     expect(read("delivery")).toEqual([
-      ...cases.map(({ json: stored }, index) => {
-        const { sessionId, updatedAt, delivery: route, groupId } = JSON.parse(stored);
+      ...cases.map(([, stored], index) => {
+        const fields: Record<string, unknown> = JSON.parse(stored);
         return {
           ok: true,
           value: [
             {
               sessionKey: keys[index],
-              entry: {
-                sessionId,
-                updatedAt,
-                ...(route !== undefined ? { delivery: route } : {}),
-                ...(groupId !== undefined ? { groupId } : {}),
-              },
+              entry: Object.fromEntries(
+                Object.entries(fields).filter(([key]) =>
+                  ["sessionId", "updatedAt", "delivery", "groupId"].includes(key),
+                ),
+              ),
             },
           ],
         };
