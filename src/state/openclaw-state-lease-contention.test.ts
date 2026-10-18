@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 import { setImmediate as yieldImmediate } from "node:timers/promises";
 import { expect, it, vi } from "vitest";
 import * as backoff from "../infra/backoff.js";
@@ -39,18 +39,28 @@ it.each([
       let entered = 0;
       let cleanupRelease: Promise<void> | undefined;
       const clock = vi.spyOn(performance, "now").mockReturnValue(0);
-      const exec = database.db.exec.bind(database.db);
-      const nativeExec = vi.spyOn(database.db, "exec").mockImplementation((sql) => {
-        try {
-          return exec(sql);
-        } catch (error) {
-          if (ending === "delayed-cleanup" && sql === "BEGIN IMMEDIATE") {
-            // The writer still owns its lock when a delayed cleanup exhausts its retry budget.
-            clock.mockReturnValue(2_001);
-          }
-          throw error;
-        }
-      });
+      let delayedCleanupFailures = 0;
+      // oxlint-disable-next-line typescript/unbound-method -- The proxy preserves the native receiver.
+      const run = StatementSync.prototype.run;
+      const nativeRun = vi.spyOn(StatementSync.prototype, "run").mockImplementation(
+        new Proxy(run, {
+          apply(target, receiver: StatementSync, args) {
+            try {
+              return Reflect.apply(target, receiver, args);
+            } catch (error) {
+              if (
+                ending === "delayed-cleanup" &&
+                /^delete from "state_leases"(?:\s|$)/i.test(receiver.sourceSQL)
+              ) {
+                // The failed autocommit DELETE consumes the cleanup retry budget while locked.
+                delayedCleanupFailures += 1;
+                clock.mockReturnValue(2_001);
+              }
+              throw error;
+            }
+          },
+        }),
+      );
       const retry = vi.spyOn(backoff, "sleepWithAbort").mockImplementation(async () => {
         if (ending === "release") {
           writer?.release();
@@ -104,6 +114,7 @@ it.each([
           expect(entered).toBe(1);
         }
         expect(retry).toHaveBeenCalledTimes(ending === "timeout" || cleanup ? 0 : 1);
+        expect(delayedCleanupFailures).toBe(ending === "delayed-cleanup" ? 1 : 0);
         expect(
           database.db
             .prepare("SELECT owner FROM state_leases WHERE scope = ? AND lease_key = ?")
@@ -111,7 +122,7 @@ it.each([
         ).toEqual([]);
       } finally {
         retry.mockRestore();
-        nativeExec.mockRestore();
+        nativeRun.mockRestore();
         clock.mockRestore();
         vi.useRealTimers();
         writer?.release();
