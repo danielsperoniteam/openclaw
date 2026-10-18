@@ -34,18 +34,25 @@ type BackgroundSnapshot = Extract<UsersBackgroundResult, { status: "ok" }>;
 type BackgroundScope = { client: GatewayBrowserClient; profileId: string };
 
 async function readFileBase64(file: File): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result !== "string") {
-        reject(new Error("Image could not be read"));
-        return;
-      }
-      resolve(reader.result.slice(reader.result.indexOf(",") + 1));
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("Image could not be read"));
-    reader.readAsDataURL(file);
-  });
+  const reader = new FileReader();
+  const stops: Array<() => void> = [];
+  try {
+    return await new Promise((resolve, reject) => {
+      stops.push(
+        listen(reader, "load", () => {
+          if (typeof reader.result !== "string") {
+            reject(new Error("Image could not be read"));
+            return;
+          }
+          resolve(reader.result.slice(reader.result.indexOf(",") + 1));
+        }),
+        listen(reader, "error", () => reject(reader.error ?? new Error("Image could not be read"))),
+      );
+      reader.readAsDataURL(file);
+    });
+  } finally {
+    stops.forEach((stop) => stop());
+  }
 }
 
 export function createAppearanceBackground(
