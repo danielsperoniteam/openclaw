@@ -110,6 +110,34 @@ it("reports preparation failure without entering the mutable update lifecycle", 
   expect(retainedRuntime.withRetainedUpdateRuntime).not.toHaveBeenCalled();
 });
 
+it.each([false, true])("retains build warnings when activation throws (JSON: %s)", async (json) => {
+  const warning = "Built without the isolated build account";
+  vi.spyOn(immutable, "inspectImmutableInstall").mockResolvedValue({
+    ...installation,
+    activationEnabled: true,
+  });
+  vi.spyOn(immutable, "prepareImmutableUpdate").mockResolvedValue({
+    status: "prepared",
+    installation: { ...installation, prepared: preparedReceipt },
+    targetSha,
+    steps: [],
+    warnings: [warning],
+  });
+  const error = vi.spyOn(defaultRuntime, "error").mockImplementation(() => {});
+  activation.activate.mockRejectedValueOnce(new Error("Activation failed"));
+  await expect(updateCommand({ json })).rejects.toBeInstanceOf(ExitError);
+  if (json) {
+    expect(defaultRuntime.writeJson).toHaveBeenCalledWith(
+      expect.objectContaining({ warnings: [warning] }),
+    );
+    expect(error).not.toHaveBeenCalled();
+  } else {
+    expect(error.mock.calls.filter(([message]) => message === `Warning: ${warning}`)).toHaveLength(
+      1,
+    );
+  }
+});
+
 it("refuses unsupported immutable channel changes before candidate work", async () => {
   const prepare = vi.spyOn(immutable, "prepareImmutableUpdate");
 
