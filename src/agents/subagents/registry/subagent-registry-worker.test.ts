@@ -14,10 +14,6 @@ import { SqliteWorkerError } from "../../../infra/sqlite-worker-contract.js";
 import * as operationAdmission from "../../../infra/sqlite-worker-operation-admission.js";
 import { sqliteWorkerOwnerProbe as probe } from "../../../infra/sqlite-worker-owner-probe.test-support.js";
 import {
-  withSqliteWorkerReservationObservation,
-  type SqliteWorkerReservationObservation,
-} from "../../../infra/worker-request-diagnostics.js";
-import {
   bindGatewayContextResolver,
   getGatewayContextResolver,
 } from "../../../plugins/runtime/gateway-context-binding.js";
@@ -395,16 +391,12 @@ it("publishes overlapping durable and runtime-only mutations in FIFO order", asy
   }
 });
 
-it("persists an unchanged prepared-only registration in one implicit transaction", async () => {
+it("persists an unchanged prepared-only registration", async () => {
   await register(entry("warm-registration"));
   const prepared = entry("prepared-registration");
-  const observation: SqliteWorkerReservationObservation = { operations: new Set() };
-  await withSqliteWorkerReservationObservation(observation, () =>
-    mutateSubagentRuns([prepared.runId], (rows) => ({ value: undefined, postimages: rows }), {
-      preparedRows: () => new Map([[prepared.runId, prepared]]),
-    }),
-  );
-  expect(observation.transactionCount).toBe(0);
+  await mutateSubagentRuns([prepared.runId], (rows) => ({ value: undefined, postimages: rows }), {
+    preparedRows: () => new Map([[prepared.runId, prepared]]),
+  });
   expect(subagentRuns.has(prepared.runId)).toBe(true);
   expect(loadSubagentRegistryFromSqlite().has(prepared.runId)).toBe(true);
 });

@@ -21,7 +21,6 @@ import {
   openOpenClawStateReadConnection,
 } from "../../../state/openclaw-state-db-read-connection.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../../../state/openclaw-state-db.generated.js";
-import { runOpenClawStateWriteTransaction } from "../../../state/openclaw-state-db.js";
 import type {
   OpenClawStateReadCommand,
   OpenClawStateReadResult,
@@ -29,10 +28,7 @@ import type {
 } from "../../../state/openclaw-state-read.types.js";
 import type { WorkerWriteOperationContext } from "../../../state/worker-operation-registry.js";
 import { rowToSubagentRunRecord } from "./subagent-registry.store.codec.js";
-import {
-  prepareSingleSubagentRunUpsert,
-  writeSubagentRunValuesInDatabase,
-} from "./subagent-registry.store.kernel.js";
+import { writeSubagentRunValuesInDatabase } from "./subagent-registry.store.kernel.js";
 import {
   loadSubagentMaintenanceRunsInDatabase,
   loadSubagentRunsForSessionsInDatabase,
@@ -161,35 +157,7 @@ export const subagentRegistryOperations = {
   ): SubagentRegistryWriteReceipt => {
     const { writeId, values, deleteRunIds, terminalEvents = [] } = input;
     let committedReceipt: SubagentRegistryWriteReceipt | undefined;
-    const stageReceipt = (db: EngineConnection, notices: SessionStateNotice[]) => {
-      const receipt: SubagentRegistryWriteReceipt = { writeId, notices };
-      deferSqliteWorkerCommitReceipt(db, receipt);
-      deferSqlitePostCommitPublication(db, () => {
-        committedReceipt = receipt;
-      });
-      return receipt;
-    };
     try {
-      if (!deleteRunIds.length && !terminalEvents.length) {
-        const database = context.open();
-        const upsert = isPostgresSqlConnection(database.db)
-          ? undefined
-          : prepareSingleSubagentRunUpsert(database.db, values);
-        if (upsert) {
-          return runOpenClawStateWriteTransaction(
-            () => {
-              requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: writeId });
-              // Receipt capture can fail; finish it and admission before the terminal statement.
-              const receipt = stageReceipt(database.db, []);
-              requestSqliteWorkerOperationAdmission({ stage: "commit", facts: writeId });
-              upsert();
-              return receipt;
-            },
-            { ...context.stateOptions(), database },
-            { singleStatement: true },
-          );
-        }
-      }
       return context.write((writer): SubagentRegistryWriteReceipt => {
         requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: writeId });
         writeSubagentRunValuesInDatabase(writer, values, deleteRunIds);
@@ -204,7 +172,15 @@ export const subagentRegistryOperations = {
           });
         }
         requestSqliteWorkerOperationAdmission({ stage: "commit", facts: writeId });
-        return stageReceipt(writer.db, notices);
+        const receipt: SubagentRegistryWriteReceipt = {
+          writeId,
+          notices,
+        };
+        deferSqliteWorkerCommitReceipt(writer.db, receipt);
+        deferSqlitePostCommitPublication(writer.db, () => {
+          committedReceipt = receipt;
+        });
+        return receipt;
       });
     } catch (error) {
       if (!committedReceipt) {
