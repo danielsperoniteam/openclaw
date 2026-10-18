@@ -1,4 +1,4 @@
-import { createEffect, createMemo, onCleanup, onSettled } from "solid-js";
+import { createMemo, onCleanup, onSettled } from "solid-js";
 import { handleMarkdownCodeBlockClick } from "../../../components/markdown-code-blocks.ts";
 import {
   linkReaderPrefetchRef as createLinkReaderPrefetchRef,
@@ -29,7 +29,6 @@ import {
   getExpansionStateVersion,
   subscribeExpansionState,
 } from "../chat-thread.ts";
-import { hydrateLinkFavicons } from "../link-favicon-loader.ts";
 import { ChatCommentPins } from "./chat-comment-pins.tsx";
 import { CHAT_HISTORY_BOUNDARY_HEIGHT_PX, ChatHistoryBoundary } from "./chat-history-boundary.tsx";
 import { ChatPositionRail } from "./chat-position-rail-solid.tsx";
@@ -129,15 +128,6 @@ export function ChatThread(input: { props: ChatThreadProps; transcript: ChatTran
     Boolean(input.props.gatewayClient?.connected),
   ]);
   const markdownRef = createMarkdownBlocksRef(() => input.props.transcriptVisible ?? true);
-  // Hydrate favicon images inserted by the markdown DOM owner.
-  createEffect(
-    () => [current(), input.props.fetchLinkFavicon] as const,
-    ([, fetchLinkFavicon]) => {
-      if (root) {
-        hydrateLinkFavicons(root, fetchLinkFavicon);
-      }
-    },
-  );
   const historyHeader = () =>
     input.props.historyPagination
       ? {
